@@ -81,9 +81,10 @@ normalize_raw() {
 }
 
 # Derive an approximate signal from ledger.jsonl alone when the endpoint is
-# unreachable. Sums weighted tokens over the trailing 5h and 7d windows against a
-# conservative, configurable ceiling; percent is explicitly ESTIMATED. Reset
-# times track real consumption (5h anchored from the last >5h gap).
+# unreachable. Sums weighted tokens over fixed trailing 5h and 7d rolling windows
+# against a conservative, configurable ceiling; percent is explicitly ESTIMATED.
+# resets_at is left empty because the true window anchor is server-side and
+# unknown offline.
 heuristic_signal() {
   local now fetched hw c5 cw
   now=$(now_epoch); fetched=$(now_iso)

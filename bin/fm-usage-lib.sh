@@ -182,8 +182,10 @@ fm_usage_severity_rank() {
 }
 
 # The alert level (0|1|2) of a normalized quota-signal JSON file: the max over the
-# session and weekly windows and any active per-model scoped cap, combining the
-# severity rank with the percent high-water. Missing fields default to level 0.
+# session window (severity or percent high-water), the weekly window (severity
+# only), and any active per-model scoped cap (severity or 100% percent). These
+# thresholds mirror fm_usage_decision so the wake never fires without a matching
+# hold. Missing fields default to level 0.
 fm_usage_signal_level() {
   local file=$1 hw
   [ -f "$file" ] || { printf '0'; return 0; }
@@ -195,16 +197,22 @@ fm_usage_signal_level() {
       | if ($s|test("critical|blocked|exceeded")) then 2
         elif ($s|test("warning|warn|elevated|high")) then 1
         else 0 end;
-    def lvl(w):
+    def sessionLvl(w):
       if (w == null) then 0
-      else ([rank(w.severity),
-             (if ((w.percent // 0) >= 100) then 2
-              elif ((w.percent // 0) >= $hw) then 1
-              else 0 end)] | max)
-      end;
-    ([ lvl(.windows.session),
-       lvl(.windows.weekly),
-       ( (.windows.scoped // []) | map(select(.is_active == true) | lvl(.)) | (max // 0) )
+      elif (rank(w.severity) >= 2 or (w.percent // 0) >= 100) then 2
+      elif ((w.percent // 0) >= $hw) then 1
+      else 0 end;
+    def weeklyLvl(w):
+      if (w == null) then 0
+      elif (rank(w.severity) >= 2) then 2
+      else 0 end;
+    def scopedLvl(w):
+      if (w == null) then 0
+      elif (rank(w.severity) >= 2 or (w.percent // 0) >= 100) then 2
+      else 0 end;
+    ([ sessionLvl(.windows.session),
+       weeklyLvl(.windows.weekly),
+       ( (.windows.scoped // []) | map(select(.is_active == true) | scopedLvl(.)) | (max // 0) )
      ] | max) // 0
   ' "$file" 2>/dev/null || printf '0'
 }
