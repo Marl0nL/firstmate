@@ -72,6 +72,7 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   mkdir "$LOCK" 2>/dev/null || exit 0
 fi
 trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT
+trap 'exit 143' HUP INT TERM
 
 # --- load durable state once ------------------------------------------------
 

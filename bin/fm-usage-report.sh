@@ -95,6 +95,10 @@ if [ -z "$DATA" ]; then
   exit 1
 fi
 
+DATA=${DATA//&/\\u0026}
+DATA=${DATA//</\\u003c}
+DATA=${DATA//>/\\u003e}
+
 # Emit a self-contained HTML page: inline CSS, an embedded data blob, and a small
 # vanilla-JS renderer (no external assets, so it opens anywhere).
 {
