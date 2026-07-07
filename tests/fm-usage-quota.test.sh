@@ -100,6 +100,22 @@ if grep -rq "$TOKEN" "$HOME_DIR/data" 2>/dev/null; then
 fi
 pass "the OAuth token is never emitted or persisted"
 
+# --- a cache older than the TTL is NOT served; fall through to the heuristic --
+runq 200 --signal >/dev/null   # refresh the cache with a current fetched_at
+jq '.fetched_at="2020-01-01T00:00:00Z"' "$HOME_DIR/data/usage/quota.json" > "$TMP/stale.json" \
+  && mv "$TMP/stale.json" "$HOME_DIR/data/usage/quota.json"
+sig_stale=$(runq 401 --signal)
+[ "$(printf '%s' "$sig_stale" | jq -r '.source')" = heuristic ] \
+  || fail "a cache older than FM_USAGE_QUOTA_TTL must fall through to the heuristic, not be served as cache"
+pass "a stale cache (beyond FM_USAGE_QUOTA_TTL) falls through to the heuristic"
+
+# --- a cache within the TTL is still served on degrade -----------------------
+runq 200 --signal >/dev/null   # refresh the cache with a current fetched_at
+sig_fresh=$(runq 401 --signal)
+[ "$(printf '%s' "$sig_fresh" | jq -r '.source')" = cache ] \
+  || fail "a cache within FM_USAGE_QUOTA_TTL should still degrade to the cache"
+pass "a fresh cache (within FM_USAGE_QUOTA_TTL) is still served on degrade"
+
 # --- no live token available still degrades (no cred file) -------------------
 sig_nolive=$(PATH="$FAKEBIN:$BASE_PATH" FAKE_CODE=200 USAGE_FIXTURE="$TMP/usage.json" \
   FM_HOME="$HOME_DIR" FM_USAGE_CREDENTIALS_FILE="$TMP/does-not-exist.json" "$QUOTA" --signal)

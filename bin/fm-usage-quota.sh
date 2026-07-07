@@ -7,9 +7,9 @@
 # interactive /usage view makes; it is undocumented/best-effort, so every field
 # is parsed defensively and any failure degrades rather than erroring out.
 #
-# Degrade chain: live 200 -> cached data/usage/quota.json (<= TTL preferred, but
-# used even when stale as the best available) -> a ledger-derived burn-rate
-# heuristic. The 5-hour window is the captain's primary gate.
+# Degrade chain: live 200 -> cached data/usage/quota.json (trusted only while
+# within FM_USAGE_QUOTA_TTL seconds of its fetched_at) -> a ledger-derived
+# burn-rate heuristic. The 5-hour window is the captain's primary gate.
 #
 # Usage:
 #   fm-usage-quota.sh            print a one-line human summary (session-start,
@@ -128,11 +128,15 @@ heuristic_signal() {
 
 # Resolve the freshest signal. On success also refreshes the quota.json cache.
 resolve_signal() {
-  local token body code auth_file signal
+  local token body code auth_file signal ttl now cache_epoch
   if command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 \
      && token=$(fm_usage_oauth_token); then
     body=$(mktemp "${TMPDIR:-/tmp}/fm-usage-quota.XXXXXX") || body=
     auth_file=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-usage-auth.XXXXXX") || auth_file=
+    # Guarantee the token-bearing 0600 temp (and the body temp) are removed even
+    # if the process is interrupted between the token write and the explicit rm.
+    trap 'rm -f "${body:-}" "${auth_file:-}" 2>/dev/null' EXIT
+    trap 'exit 143' HUP INT TERM
     if [ -n "$body" ] && [ -n "$auth_file" ]; then
       # Token lives only in this 0600 header file, never on a command line.
       printf 'Authorization: Bearer %s\n' "$token" > "$auth_file" 2>/dev/null
@@ -161,15 +165,25 @@ resolve_signal() {
     fi
     if [ -n "${auth_file:-}" ]; then rm -f "$auth_file" 2>/dev/null || true; fi
   fi
-  # Live failed (or no token): degrade to the cached signal, marked degraded.
+  # Live failed (or no token): degrade to the cached signal, but only while it is
+  # still within the TTL (live -> cached<=TTL -> heuristic). Mark it degraded.
   if [ -s "$FM_USAGE_QUOTA_CACHE" ] && command -v jq >/dev/null 2>&1; then
-    signal=$(jq -c '.source="cache" | .degraded=true' "$FM_USAGE_QUOTA_CACHE" 2>/dev/null)
-    if [ -n "$signal" ]; then
-      printf '%s' "$signal"
-      return 0
+    ttl=$(fm_usage_quota_ttl)
+    now=$(now_epoch)
+    cache_epoch=$(jq -r '
+      (.fetched_at // "") | sub("\\.[0-9]+";"") | (try fromdateiso8601 catch 0)
+    ' "$FM_USAGE_QUOTA_CACHE" 2>/dev/null) || cache_epoch=0
+    case "$cache_epoch" in ''|*[!0-9]*) cache_epoch=0 ;; esac
+    if [ "$cache_epoch" -gt 0 ] 2>/dev/null && [ "$((now - cache_epoch))" -le "$ttl" ] 2>/dev/null; then
+      signal=$(jq -c '.source="cache" | .degraded=true' "$FM_USAGE_QUOTA_CACHE" 2>/dev/null)
+      if [ -n "$signal" ]; then
+        printf '%s' "$signal"
+        return 0
+      fi
     fi
   fi
-  # No cache: fall back to the ledger burn-rate heuristic.
+  # No fresh cache (absent, older than the TTL, or unparseable fetched_at): fall
+  # back to the ledger burn-rate heuristic.
   heuristic_signal
 }
 

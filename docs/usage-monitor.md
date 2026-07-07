@@ -149,7 +149,7 @@ The ledger extracts only token counts and attribution metadata; no transcript me
 ### Degrade chain
 
 The live endpoint is primary.
-On any failure - including a `401` when the on-disk token has expired - the quota script degrades to the cached `quota.json` (marked `degraded`), and if there is no cache, to a ledger burn-rate heuristic.
+On any failure - including a `401` when the on-disk token has expired - the quota script degrades to the cached `quota.json` (marked `degraded`) while it is still within `FM_USAGE_QUOTA_TTL` seconds of its `fetched_at`, and if there is no cache or the cache is older than that TTL, to a ledger burn-rate heuristic.
 It never attempts a token refresh: refreshing `.credentials.json` is Claude Code's job, and a standalone refresh would risk racing the client's token rotation.
 A degraded signal is a soft warning, never a blocker, and never fails a watcher cycle.
 
