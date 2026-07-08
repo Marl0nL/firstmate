@@ -211,11 +211,11 @@ FM_USAGE_PRICING_JQ_DEFS='
     (($pricing.models // {}) | has($m))
     or (($pricing.models // {}) | keys | map(. as $k | ($m // "") | startswith($k)) | any);
   def costOf($pricing; r):
-    rateFor($pricing; (r.model // "")) as $rt
-    | ( ((r.input_tokens // 0)                * ($rt.input       // 0))
-      + ((r.output_tokens // 0)               * ($rt.output      // 0))
-      + ((r.cache_read_input_tokens // 0)     * ($rt.cache_read  // 0))
-      + ((r.cache_creation_input_tokens // 0) * ($rt.cache_write // 0)) ) / 1000000;
+    (rateFor($pricing; (r.model // "")) | if type == "object" then . else {} end) as $rt
+    | ( ((r.input_tokens // 0)                * (($rt.input       // 0) | numbers // 0))
+      + ((r.output_tokens // 0)               * (($rt.output      // 0) | numbers // 0))
+      + ((r.cache_read_input_tokens // 0)     * (($rt.cache_read  // 0) | numbers // 0))
+      + ((r.cache_creation_input_tokens // 0) * (($rt.cache_write // 0) | numbers // 0)) ) / 1000000;
 '
 
 # The per-model pricing config path, override-friendly so the pricing tests never
@@ -233,8 +233,17 @@ fm_usage_pricing_json() {
   local file merged
   command -v jq >/dev/null 2>&1 || { printf '%s' "$FM_USAGE_PRICING_DEFAULTS"; return 0; }
   file=$(fm_usage_pricing_file)
-  if [ -f "$file" ] && jq -e . "$file" >/dev/null 2>&1; then
-    # shellcheck disable=SC2016  # $-names are jq bindings, not shell vars.
+  # Accept the overlay only when it is STRUCTURALLY valid, not merely parseable: a
+  # top-level object whose .models (if present) is an object of rate objects and
+  # whose .default (if present) is a rate object. A scalar default or model rate
+  # passes a bare `jq -e .` yet would break costOf, so a bad edit must fall back to
+  # the built-in table verbatim (the documented guarantee), never zero the cost.
+  # shellcheck disable=SC2016  # $-names below and in the merge are jq bindings.
+  if [ -f "$file" ] && jq -e '
+        (type == "object")
+        and ((.models // {}) | (type == "object") and all(.[]; type == "object"))
+        and ((.default // {}) | type == "object")
+      ' "$file" >/dev/null 2>&1; then
     merged=$(jq -n --argjson b "$FM_USAGE_PRICING_DEFAULTS" --slurpfile o "$file" '
       ($o[0] // {}) as $ov
       | { models: (($b.models // {}) + ($ov.models // {})),

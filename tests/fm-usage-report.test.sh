@@ -73,19 +73,37 @@ EOF
   || fail "config default must replace the built-in default (unknown input -> 7)"
 pass "config overlay merges by id, adds models, and replaces the default"
 
-# --- malformed config falls back to the built-in table (never zeroes cost) -----
+# --- malformed / structurally-invalid config falls back (never zeroes cost) ----
 BAD="$TMP/bad.json"
 printf '{ not valid json\n' > "$BAD"
 [ "$(FM_USAGE_PRICING_FILE="$BAD" fm_usage_model_cost 1000000 0 0 0 claude-opus-4-8)" = 5 ] \
-  || fail "a malformed config must fall back to the built-in table, not zero the cost"
-pass "malformed config falls back to the built-in rate table"
+  || fail "an unparseable config must fall back to the built-in table, not zero the cost"
+# Parseable but structurally invalid (a scalar 'default') must ALSO fall back to
+# the built-in table rather than crash costing or silently zero - the documented
+# guarantee. A bare jq-parse check would wrongly accept this.
+STRUCT="$TMP/struct-bad.json"
+printf '{"default":"oops"}\n' > "$STRUCT"
+[ "$(FM_USAGE_PRICING_FILE="$STRUCT" fm_usage_model_cost 0 1000000 0 0 claude-opus-4-8)" = 25 ] \
+  || fail "a scalar-default config must fall back to built-in (opus output 25)"
+[ "$(FM_USAGE_PRICING_FILE="$STRUCT" fm_usage_model_cost 0 1000000 0 0 unknown-x)" = 25 ] \
+  || fail "a scalar-default config must not crash an unknown-model cost; use built-in default 25"
+SBAD="$TMP/struct-bad-model.json"
+printf '{"models":{"claude-opus-4-8":"oops"}}\n' > "$SBAD"
+[ "$(FM_USAGE_PRICING_FILE="$SBAD" fm_usage_model_cost 0 1000000 0 0 claude-opus-4-8)" = 25 ] \
+  || fail "a scalar-rate model entry must fall back to built-in (opus output 25)"
+pass "malformed and structurally-invalid configs fall back to the built-in table"
 
-# --- example template validity + parity with built-ins ------------------------
+# --- example template validity + FULL parity with the built-in table ----------
+# The example restates every built-in rate, so assert the whole models+default
+# object matches - a single-row check would let a later built-in rate change drift
+# the shipped template silently.
 jq -e . "$ROOT/docs/examples/usage-pricing.json" >/dev/null 2>&1 \
   || fail "docs/examples/usage-pricing.json must be valid JSON"
-[ "$(FM_USAGE_PRICING_FILE="$ROOT/docs/examples/usage-pricing.json" fm_usage_model_cost 1000000 1000000 1000000 1000000 claude-opus-4-8)" = 36.75 ] \
-  || fail "the example template should reproduce the built-in opus rates"
-pass "docs/examples/usage-pricing.json is valid and matches the built-in defaults"
+builtin_rates=$(printf '%s' "$FM_USAGE_PRICING_DEFAULTS" | jq -S '{models, default}')
+example_rates=$(jq -S '{models, default}' "$ROOT/docs/examples/usage-pricing.json")
+[ "$builtin_rates" = "$example_rates" ] \
+  || fail "docs/examples/usage-pricing.json must match the built-in rate table exactly (models + default)"
+pass "docs/examples/usage-pricing.json is valid and matches the built-in defaults in full"
 
 # --- end-to-end report: real $ cost per model in the embedded data blob --------
 L="$HOME_DIR/data/usage/ledger.jsonl"

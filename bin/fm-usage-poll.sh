@@ -76,11 +76,14 @@ else
   file_size()  { stat -c %s "$1" 2>/dev/null; }
 fi
 
-# --if-due min-interval gate: skip if a prior --if-due run touched the marker
+# --if-due min-interval gate: skip if a prior --if-due run marked a completed scan
 # within FM_USAGE_POLL_MIN_INTERVAL seconds. The incremental offset/mtime
 # checkpoint already bounds the work to only-new bytes; this just caps how OFTEN
-# the (cheap) scan runs on the wake-drain hot path. Touch the marker up front so
-# two near-simultaneous wake-handling turns don't both scan.
+# the (cheap) scan runs on the wake-drain hot path. The marker is touched only
+# AFTER a scan pass completes (below, once the lock is held and the ledger is
+# updated), never here up front - so a run that loses the single-writer lock and
+# scans nothing does not suppress the next catch-up. Concurrent double-scanning is
+# already prevented by the lock itself, so no up-front touch is needed.
 if [ "$IFDUE" -eq 1 ]; then
   DUE_MARKER="$FM_USAGE_DIR/.last-poll"
   min_iv=$(fm_usage_poll_min_interval)
@@ -92,7 +95,6 @@ if [ "$IFDUE" -eq 1 ]; then
       exit 0
     fi
   fi
-  : > "$DUE_MARKER" 2>/dev/null || true
 fi
 
 # Single-writer lock: the watcher runs one poll at a time, but a session-start
@@ -372,6 +374,13 @@ if [ -n "$attr_tmp" ]; then
   else
     rm -f "$attr_tmp"
   fi
+fi
+
+# --if-due: mark that a scan pass just completed (we held the single-writer lock
+# and reached here). Done now, not up front, so a run that lost the lock and
+# scanned nothing never advances the marker and never suppresses the next catch-up.
+if [ "$IFDUE" -eq 1 ] && [ -n "${DUE_MARKER:-}" ]; then
+  : > "$DUE_MARKER" 2>/dev/null || true
 fi
 
 # --- quota-severity wake (opt-in) -------------------------------------------

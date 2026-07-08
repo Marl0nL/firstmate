@@ -160,4 +160,21 @@ run_ifdue FM_USAGE_ENABLED=1 FM_USAGE_POLL_MIN_INTERVAL=0 >/dev/null 2>&1
   || fail "--if-due must not double-count across runs"
 pass "--if-due catches up once the interval elapses, without double-counting"
 
+# (5) the marker is advanced only AFTER a real scan: a held single-writer lock
+# must defer the scan without ingesting or advancing .last-poll, so the next
+# --if-due still catches up rather than being suppressed for the interval.
+rm -f "$MARKER"
+arec req_lock sess2 /work/wt-a claude-opus-4-8 7 7 "" false "$S2"
+LOCKDIR="$HOME_DIR/data/usage/.poll.lock"
+mkdir "$LOCKDIR"                       # simulate a concurrent poll holding the lock
+before_lock=$(count)
+run_ifdue FM_USAGE_ENABLED=1 >/dev/null 2>&1
+[ "$(count)" = "$before_lock" ] || fail "--if-due must not ingest while the single-writer lock is held"
+[ ! -e "$MARKER" ] || fail "--if-due must NOT advance the marker when the held lock blocked the scan"
+rmdir "$LOCKDIR"
+run_ifdue FM_USAGE_ENABLED=1 >/dev/null 2>&1   # lock free: catch up the deferred record
+[ "$(count)" = "$((before_lock + 1))" ] || fail "--if-due should catch up once the lock frees (marker was not suppressed)"
+[ "$(field req_lock output_tokens)" = 7 ] || fail "the lock-deferred record should be recorded on the next run"
+pass "--if-due advances the marker only after a real scan (held lock defers, never suppresses)"
+
 pass "fm-usage-poll: all checks passed"

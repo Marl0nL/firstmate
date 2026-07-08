@@ -57,8 +57,10 @@ PRICING=$(fm_usage_pricing_json)
 
 # One jq pass over the ledger builds every aggregate the renderer needs. Real $
 # cost per row comes from costOf() over the per-model rate table (the shared
-# pricing defs from fm-usage-lib.sh, prepended so the formula has one owner); the
-# token-CLASS weight is kept alongside as the older relative-ranking heuristic.
+# pricing defs from fm-usage-lib.sh, prepended so the formula has one owner). The
+# token-class "weighted" ranking heuristic is still surfaced, but only in the
+# class-split table, which recomputes it from the raw class totals and $weights -
+# so the aggregates below carry real $ cost only, not a parallel weighted set.
 # shellcheck disable=SC2016  # the $-names in the jq program are jq bindings.
 DATA=$(jq -s \
   --arg today "$TODAY" --arg generated "$GENERATED" \
@@ -66,15 +68,12 @@ DATA=$(jq -s \
   --argjson wcc "$(fm_usage_weight cache_creation)" --argjson wcr "$(fm_usage_weight cache_read)" \
   --argjson quota "$QUOTA" --argjson pricing "$PRICING" \
   "$FM_USAGE_PRICING_JQ_DEFS"'
-  def weight(r): (r.input_tokens*$wi) + (r.output_tokens*$wo)
-               + (r.cache_creation_input_tokens*$wcc) + (r.cache_read_input_tokens*$wcr);
   def day(r): (r.ts // "")[0:10];
   def agg(field):
     (group_by(.[field]) | map({key:(.[0][field] // "unknown"),
        cost:(map(.c) | add // 0),
-       weighted:(map(.w) | add // 0),
        requests:length}) | sort_by(-.cost));
-  map(. + {w: weight(.), c: costOf($pricing; .)}) as $rows
+  map(. + {c: costOf($pricing; .)}) as $rows
   | {
     generated_at: $generated,
     weights: {input:$wi, output:$wo, cache_creation:$wcc, cache_read:$wcr},
@@ -85,27 +84,17 @@ DATA=$(jq -s \
       output: ($rows|map(.output_tokens)|add // 0),
       cache_creation: ($rows|map(.cache_creation_input_tokens)|add // 0),
       cache_read: ($rows|map(.cache_read_input_tokens)|add // 0),
-      weighted: ($rows|map(.w)|add // 0),
       cost: ($rows|map(.c)|add // 0)
     },
-    today_weighted: ($rows | map(select(day(.) == $today) | .w) | add // 0),
     today_cost: ($rows | map(select(day(.) == $today) | .c) | add // 0),
     by_project: ($rows | agg("project")),
     by_task: ($rows | agg("task_id") | .[0:20]),
     by_harness: ($rows | agg("harness")),
-    by_model: ($rows | group_by(.model)
-      | map({key:(.[0].model // "unknown"),
-             cost:(map(.c) | add // 0),
-             weighted:(map(.w) | add // 0),
-             requests:length,
-             priced: priceMatched($pricing; (.[0].model // ""))})
-      | sort_by(-.cost)),
+    by_model: ($rows | agg("model")
+      | map(. + {priced: priceMatched($pricing; .key)})),
     by_day: (
       $rows | group_by(day(.))
-      | map({day:(.[0]|day(.)),
-             cost:(map(.c)|add // 0),
-             weighted:(map(.w)|add // 0),
-             models:(group_by(.model) | map({key:(.[0].model // "unknown"), cost:(map(.c)|add // 0)}))})
+      | map({day:(.[0]|day(.)), cost:(map(.c)|add // 0)})
       | sort_by(.day) | .[-30:]
     )
   }' "$FM_USAGE_LEDGER" 2>/dev/null)
@@ -181,7 +170,9 @@ function tile(lbl, big, meta, s){ return `<div class="card tile sev-${s||'normal
 // model matched no rate-table entry and fell back to the labelled default rate.
 function barTable(title, rows, total){
   if(!rows||!rows.length) return '';
-  const max = Math.max(1, ...rows.map(r=>r.cost));
+  // Scale bars to the actual max cost (|| 1 guards the all-zero case); clamping
+  // the denominator to 1 would understate every bar when costs are under a dollar.
+  const max = Math.max(...rows.map(r=>r.cost)) || 1;
   const body = rows.map(r=>{
     const pct = Math.round(100*r.cost/max);
     const share = total? (100*r.cost/total).toFixed(1)+'%' : '';
@@ -196,7 +187,7 @@ function barTable(title, rows, total){
 }
 function daysChart(days){
   if(!days||!days.length) return '';
-  const max = Math.max(1, ...days.map(d=>d.cost));
+  const max = Math.max(...days.map(d=>d.cost)) || 1;
   const cols = days.map(d=>{
     const h = Math.round(100*d.cost/max);
     return `<div class="day" title="${esc(d.day)}: ${usd(d.cost)}"><div class="daybar" style="height:${h}%"></div><div class="dl">${esc(d.day.slice(5))}</div></div>`;

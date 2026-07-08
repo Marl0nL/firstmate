@@ -28,22 +28,32 @@ assert_watcher_liveness() {
 # of every wake-handling turn regardless of watcher liveness, so the ledger keeps
 # accumulating even when the watcher background task is reaped (the check-shim
 # then rarely runs). It is deliberately:
+#   - opt-out-cheap: the monitor's check-shim exists only while the monitor is
+#     opted in (bootstrap creates/removes it), so its absence means "not opted in"
+#     and we skip the fork entirely on the common default-off hot path. The poll
+#     still self-gates authoritatively (--if-due checks fm_usage_enabled), so this
+#     is only a cheap pre-filter, not a second source of truth;
 #   - self-gated: fm-usage-poll.sh --if-due no-ops unless the monitor is opted in
 #     and its min-interval has elapsed, and only reads new transcript bytes;
 #   - silent: --if-due implies --quiet and all output is discarded, so it never
 #     pollutes the drain output and never emits a wake;
-#   - isolated: bounded by a short timeout and swallowed with `|| true`, so a slow
-#     or failing poll can never slow, break, or change the exit status of the
-#     drain / supervision path. Supervision correctness comes first.
+#   - non-blocking: run detached in the background so a slow scan can NEVER delay
+#     the drain or the wake-queue lock it still holds here - on ANY platform, not
+#     just where `timeout` exists - with `timeout` layered on where available as a
+#     secondary bound. Unlike the watcher, a reaped or slow poll is harmless: it is
+#     idempotent and single-writer-locked, and session start plus the next drain
+#     catch the ledger up. Failure is swallowed and can never change the drain's
+#     exit status.
 # The session-start backfill and the watcher check-shim are the belt-and-braces
 # catch-ups; see docs/usage-monitor.md.
 opportunistic_usage_poll() {
+  [ -e "$STATE/usage-watch.check.sh" ] || return 0
   local poll="$SCRIPT_DIR/fm-usage-poll.sh"
   [ -x "$poll" ] || return 0
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${FM_USAGE_WAKE_POLL_TIMEOUT:-10}" "$poll" --if-due >/dev/null 2>&1 || true
+    ( timeout "${FM_USAGE_WAKE_POLL_TIMEOUT:-10}" "$poll" --if-due >/dev/null 2>&1 || true ) &
   else
-    "$poll" --if-due >/dev/null 2>&1 || true
+    ( "$poll" --if-due >/dev/null 2>&1 || true ) &
   fi
   return 0
 }
