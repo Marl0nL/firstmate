@@ -24,6 +24,30 @@ assert_watcher_liveness() {
   "$SCRIPT_DIR/fm-guard.sh" || true
 }
 
+# Decoupled, failure-isolated token-usage ledger catch-up. This runs at the top
+# of every wake-handling turn regardless of watcher liveness, so the ledger keeps
+# accumulating even when the watcher background task is reaped (the check-shim
+# then rarely runs). It is deliberately:
+#   - self-gated: fm-usage-poll.sh --if-due no-ops unless the monitor is opted in
+#     and its min-interval has elapsed, and only reads new transcript bytes;
+#   - silent: --if-due implies --quiet and all output is discarded, so it never
+#     pollutes the drain output and never emits a wake;
+#   - isolated: bounded by a short timeout and swallowed with `|| true`, so a slow
+#     or failing poll can never slow, break, or change the exit status of the
+#     drain / supervision path. Supervision correctness comes first.
+# The session-start backfill and the watcher check-shim are the belt-and-braces
+# catch-ups; see docs/usage-monitor.md.
+opportunistic_usage_poll() {
+  local poll="$SCRIPT_DIR/fm-usage-poll.sh"
+  [ -x "$poll" ] || return 0
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${FM_USAGE_WAKE_POLL_TIMEOUT:-10}" "$poll" --if-due >/dev/null 2>&1 || true
+  else
+    "$poll" --if-due >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
   local status=$?
@@ -45,6 +69,7 @@ DRAIN_LOCK_HELD=true
 
 if [ ! -s "$FM_WAKE_QUEUE" ]; then
   : > "$FM_WAKE_QUEUE"
+  opportunistic_usage_poll
   assert_watcher_liveness
   exit 0
 fi
@@ -57,5 +82,6 @@ mv "$FM_WAKE_QUEUE" "$DRAIN_TMP" || exit 1
 fm_wake_print_deduped "$DRAIN_TMP" || exit "$?"
 rm -f "$DRAIN_TMP"
 DRAIN_TMP=
+opportunistic_usage_poll
 assert_watcher_liveness
 exit 0

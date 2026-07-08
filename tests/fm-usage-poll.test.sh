@@ -119,4 +119,45 @@ if grep -q '"content"\|"role"' "$LEDGER" 2>/dev/null; then
 fi
 pass "ledger carries only counts + attribution metadata (no message content)"
 
+# --- --if-due: the decoupled, self-gated wake-drain trigger -------------------
+# It must (1) stay inert unless the monitor is opted in, (2) run and mark on the
+# first opted-in call, (3) skip a rescan within the min-interval even with new
+# data present, and (4) always dedupe so no combination double-counts.
+MARKER="$HOME_DIR/data/usage/.last-poll"
+run_ifdue() { # extra env assignments passed as $@
+  env "$@" FM_HOME="$HOME_DIR" FM_USAGE_TRANSCRIPTS_DIR="$TMP/tx" "$POLL" --if-due
+}
+
+# (1) monitor OFF: a new record is NOT ingested and no marker is written.
+arec req_off sess2 /work/wt-a claude-opus-4-8 5 5 "" false "$S2"
+before=$(count)
+run_ifdue FM_USAGE_ENABLED=0 >/dev/null 2>&1
+[ "$(count)" = "$before" ] || fail "--if-due must be inert while the monitor is opted out"
+[ -z "$(field req_off request_id)" ] || fail "--if-due must not ingest while opted out"
+[ ! -e "$MARKER" ] || fail "--if-due must not write the min-interval marker while opted out"
+pass "--if-due is inert while the monitor is opted out"
+
+# (2) monitor ON, marker absent: the new record IS ingested and the marker set.
+run_ifdue FM_USAGE_ENABLED=1 >/dev/null 2>&1
+[ "$(count)" = "$((before + 1))" ] || fail "first opted-in --if-due should ingest the pending record"
+[ "$(field req_off input_tokens)" = 5 ] || fail "opted-in --if-due should record the new request"
+[ -e "$MARKER" ] || fail "opted-in --if-due should write the min-interval marker"
+pass "--if-due ingests and marks on the first opted-in run"
+
+# (3) marker fresh, default interval: a further record is NOT rescanned.
+arec req_skip sess2 /work/wt-a claude-opus-4-8 6 6 "" false "$S2"
+after_first=$(count)
+run_ifdue FM_USAGE_ENABLED=1 >/dev/null 2>&1
+[ "$(count)" = "$after_first" ] || fail "--if-due within the min-interval must skip the rescan"
+[ -z "$(field req_skip request_id)" ] || fail "skipped --if-due must not ingest the new record yet"
+pass "--if-due honors the min-interval (skips the rescan when marked recently)"
+
+# (4) interval disabled: the deferred record is caught up, deduped, once.
+run_ifdue FM_USAGE_ENABLED=1 FM_USAGE_POLL_MIN_INTERVAL=0 >/dev/null 2>&1
+[ "$(count)" = "$((after_first + 1))" ] || fail "--if-due with interval 0 should catch up exactly the one new record"
+[ "$(field req_skip output_tokens)" = 6 ] || fail "the deferred record should be recorded after the interval gate is disabled"
+[ "$(jq -r 'select(.request_id=="req_off")|.request_id' "$LEDGER" | grep -c .)" = 1 ] \
+  || fail "--if-due must not double-count across runs"
+pass "--if-due catches up once the interval elapses, without double-counting"
+
 pass "fm-usage-poll: all checks passed"

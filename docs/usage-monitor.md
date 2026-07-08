@@ -30,6 +30,7 @@ All module state is per-home and gitignored under `data/usage/`:
 - `attribution.json` - `{ "<sessionId>": {task_id, project, harness, kind, worktree}, ... }`; the per-session snapshot that survives teardown.
 - `quota.json` - the last-good normalized quota signal, with `fetched_at`.
 - `severity-watermark` - the last alert level surfaced, so the wake fires only on an upward crossing.
+- `.last-poll` - mtime marker for the `--if-due` min-interval gate (the wake-drain trigger); `.poll.lock` is the single-writer lock.
 - `report.html` - the generated report (overwritten each run).
 
 ## Goal A - the consumption ledger
@@ -99,11 +100,44 @@ The result is idempotent by construction: the requestId gate never double-append
 `--backfill` forces a full rescan (offsets reset to 0); it stays requestId-deduped, so it recovers a stretch consumed while the watcher was down, or a line missed by a mid-write read, without ever double-counting.
 A single-writer lock (`data/usage/.poll.lock`) keeps a session-start backfill from racing a watcher poll.
 
+### Reliable, watcher-independent gathering
+
+Data gathering must not depend on the watcher staying alive.
+In some environments the watcher background task is frequently reaped, so the check shim below rarely runs and the ledger would otherwise sit empty until a manual backfill.
+The ledger therefore catches up from three independent triggers, so any one being down does not stop accumulation:
+
+1. **Session start.** `bin/fm-session-start.sh` runs a bounded `--backfill --quiet` poll on every locked (non-read-only) session start, so each session opens with the ledger current.
+2. **Wake-drain (the decoupled, always-hit trigger).** `bin/fm-wake-drain.sh` runs at the top of every wake-handling turn regardless of watcher liveness, and fires `bin/fm-usage-poll.sh --if-due`.
+   `--if-due` is self-gated: it no-ops unless the monitor is opted in AND the last `--if-due` run touched `data/usage/.last-poll` more than `FM_USAGE_POLL_MIN_INTERVAL` seconds ago (default 60), and it relies on the same offset/mtime checkpoint so it only reads new transcript bytes.
+   It implies `--quiet` (never emits a wake) and the wake-drain call wraps it in a bounded `timeout` and `|| true`, so a slow or failing poll can never slow, break, or change the exit status of the drain or the supervision path.
+3. **Watcher check shim (belt and braces).** `state/usage-watch.check.sh` still execs the poll each watcher cycle when the watcher is alive (below).
+
+All three collapse to the same requestId-deduped, offset-checkpointed ledger, so running any combination of them never double-counts.
+
 ### Weighting
 
 The four token classes carry very different real cost - measured lifetime totals on one fleet were roughly `output=11.6M`, `cache_creation=98.5M`, `input=2.6M`, `cache_read=4.40B`, so cache reads dominate volume but are the cheapest per token while output is the most expensive.
 The report therefore stores the four classes raw and applies configurable weights (default `output=5`, `cache_creation=1.25`, `input=1`, `cache_read=0.1`) so "expensive operations" ranks by weighted cost rather than raw token count.
-This weighting is a heuristic for relative ranking only; it is not the subscription's actual server-side limit accounting.
+This weighting is a heuristic for relative ranking only; it is not the subscription's actual server-side limit accounting, and it deliberately does NOT reflect per-model price differences (see below).
+
+### Real per-model cost
+
+The token-class weighting above is uniform across models, so it cannot compare cost across models: it treats an output token on Haiku the same as one on Fable, when Fable is actually the priciest tier and Haiku the cheapest.
+The report's headline cost is therefore computed from real per-model pricing, applied at aggregation time from the `model` already recorded on every ledger line (no re-scan needed).
+
+The rate table lives in `fm_usage_pricing_json` (`bin/fm-usage-lib.sh`).
+Its built-in defaults (`FM_USAGE_PRICING_DEFAULTS`) carry one rate object per model - `input`, `output`, `cache_read`, `cache_write` - in **USD per million tokens (MTok)**, so the numbers match Anthropic's published pricing page 1:1.
+`cache_read` is the 0.1x-input cache-read rate and `cache_write` is the 1.25x-input 5-minute cache-creation rate (the cache class the ledger records); `costOf` sums each raw token class times its per-model rate and divides by 1,000,000.
+The built-in rates were sourced from the `claude-api` reference; **verify them against current Anthropic pricing before trusting the numbers - rates drift.**
+Each rate is labelled with its units and that verify caveat in the code, the report UI, and the config template.
+
+A local, gitignored `config/usage-pricing.json` (template: `docs/examples/usage-pricing.json`) overlays the built-ins: each model listed there merges over the built-in table by id, and a `default` there replaces the built-in default.
+An absent or malformed config falls back to the built-in table verbatim, so a bad edit never silently zeroes every cost.
+Model matching is exact id first, then the longest built-in/config key that is a prefix of the model (so `claude-opus-4-8[1m]` and dated `-20251001` variants resolve), then the labelled `default`.
+An unknown model uses `default` and is flagged `default rate` in the report - never a silent zero.
+
+The shared jq definitions (`FM_USAGE_PRICING_JQ_DEFS`: `rateFor`, `priceMatched`, `costOf`) are the single owner of the lookup and cost formula; `fm_usage_model_cost` (single-value, used by tests) and `bin/fm-usage-report.sh`'s one-pass aggregation both use them, so the math is stated once.
+The report's model, task, project, and harness breakdowns rank by real $ cost, with the token-class `weighted` number kept alongside only as the relative-ranking heuristic.
 
 ## Goal B - the remaining-quota signal
 
@@ -171,10 +205,11 @@ It advises a hold (exit 3) when the 5-hour severity is critical or its percent i
 It always allows (exit 0) an explicit captain dispatch (`--captain`) or high-priority work (`--priority high`), and when it has no signal - the guard advises, it never hard-blocks.
 The decision logic lives in `fm_usage_decision` in `bin/fm-usage-lib.sh`, shared between the guard and the poll's wake so the two never drift.
 
-The monitor rides the existing watcher backbone with no changes to `fm-watch.sh`:
+The quota-severity WAKE rides the existing watcher backbone with no changes to `fm-watch.sh`; the LEDGER gathering is decoupled from watcher liveness (see Reliable, watcher-independent gathering above):
 
-- The check shim `state/usage-watch.check.sh` (generated by bootstrap on opt-in, mirroring X mode's `x-watch.check.sh`) execs `bin/fm-usage-poll.sh` each cycle. The ledger update is a silent side effect; the poll prints a wake line only when the quota severity first crosses into warning/critical, tracked by `severity-watermark` so it never spams.
+- The check shim `state/usage-watch.check.sh` (generated by bootstrap on opt-in, mirroring X mode's `x-watch.check.sh`) execs `bin/fm-usage-poll.sh` each cycle. The ledger update is a silent side effect; the poll prints a wake line only when the quota severity first crosses into warning/critical, tracked by `severity-watermark` so it never spams. This is the only path that can emit the quota wake, and it fires only while the watcher is alive.
 - Session start runs a bounded backfill and surfaces the current 5-hour + weekly utilization and resets as one line, so every session opens knowing the headroom.
+- Wake-drain runs `--if-due` on every wake-handling turn to keep the ledger current even when the watcher is dead; it is silent, self-gated, and failure-isolated, and never emits a wake.
 - Intake (`AGENTS.md` section 7) gains a `quota-held` readiness outcome checked just before spawn, pointing at the guard.
 
 ## Risks

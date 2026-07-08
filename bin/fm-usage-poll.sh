@@ -11,6 +11,12 @@
 #                               line missed by a mid-write read, is recovered;
 #                               still requestId-deduped, so never double-counts
 #   fm-usage-poll.sh --quiet    never print a wake line (ledger-only)
+#   fm-usage-poll.sh --if-due   opportunistic, self-gated ledger catch-up for the
+#                               wake-drain hot path: no-op unless the monitor is
+#                               opted in AND the last --if-due run was more than
+#                               FM_USAGE_POLL_MIN_INTERVAL seconds ago; implies
+#                               --quiet (never emits a wake). Decouples data
+#                               gathering from watcher liveness (docs/usage-monitor.md)
 #
 # What it does each run (see docs/usage-monitor.md for the schema and the
 # dedup/attribution rationale):
@@ -38,13 +44,24 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 BACKFILL=0
 QUIET=0
+IFDUE=0
 for arg in "$@"; do
   case "$arg" in
     --backfill) BACKFILL=1 ;;
     --quiet) QUIET=1 ;;
+    --if-due) IFDUE=1 ;;
     *) : ;;  # ignore unknown args so a future flag never breaks a watcher cycle
   esac
 done
+
+# --if-due is the decoupled wake-drain trigger: respect the opt-in (so an un-opted
+# home stays inert) and never emit a wake from this path. Checked first so the
+# common monitor-off case exits before any filesystem work; the min-interval gate
+# is applied below, once FM_USAGE_DIR and the stat helpers exist.
+if [ "$IFDUE" -eq 1 ]; then
+  fm_usage_enabled || exit 0
+  QUIET=1
+fi
 
 command -v jq >/dev/null 2>&1 || exit 0
 [ -d "$FM_USAGE_TRANSCRIPTS_DIR" ] || exit 0
@@ -57,6 +74,25 @@ if [ "$(uname)" = Darwin ]; then
 else
   file_mtime() { stat -c %Y "$1" 2>/dev/null; }
   file_size()  { stat -c %s "$1" 2>/dev/null; }
+fi
+
+# --if-due min-interval gate: skip if a prior --if-due run touched the marker
+# within FM_USAGE_POLL_MIN_INTERVAL seconds. The incremental offset/mtime
+# checkpoint already bounds the work to only-new bytes; this just caps how OFTEN
+# the (cheap) scan runs on the wake-drain hot path. Touch the marker up front so
+# two near-simultaneous wake-handling turns don't both scan.
+if [ "$IFDUE" -eq 1 ]; then
+  DUE_MARKER="$FM_USAGE_DIR/.last-poll"
+  min_iv=$(fm_usage_poll_min_interval)
+  if [ "$min_iv" -gt 0 ] 2>/dev/null && [ -f "$DUE_MARKER" ]; then
+    now_s=$(date +%s 2>/dev/null || echo 0)
+    last_s=$(file_mtime "$DUE_MARKER" 2>/dev/null || echo 0)
+    case "$last_s" in ''|*[!0-9]*) last_s=0 ;; esac
+    if [ "$last_s" -gt 0 ] 2>/dev/null && [ "$((now_s - last_s))" -lt "$min_iv" ] 2>/dev/null; then
+      exit 0
+    fi
+  fi
+  : > "$DUE_MARKER" 2>/dev/null || true
 fi
 
 # Single-writer lock: the watcher runs one poll at a time, but a session-start
