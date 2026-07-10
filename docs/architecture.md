@@ -188,6 +188,15 @@ For preview testing, `FMX_DRY_RUN` makes `fm-x-reply.sh` and `fm-x-dismiss.sh` s
 Attached images are recorded as compact `{media_type, bytes, source_path}` metadata in dry-run instead of base64 bytes.
 The watcher, wake queue, arm wrapper, and afk daemon are unchanged; X mode is layered on top through the existing check mechanism.
 
+## Optional Crowsnest (Google Chat bridge)
+
+The Crowsnest is the Google Chat analogue of X mode: an opt-in, committed two-way bridge that lets the captain reach the single live firstmate session from a Chat thread and lets firstmate post back, without spawning a second fleet-aware agent.
+It is inert unless the home's gitignored `config/crowsnest.env` sets a truthy `CROWSNEST_ENABLED`.
+A Chat message routed to the `firstmate` agent runs the thin relay `bin/fm-crowsnest-relay.sh`, which stashes it to `state/chat-inbox/<id>.json`, enqueues a durable `chat-mention <id>` check wake, and returns an immediate async ack, never launching a parallel fleet-aware agent.
+The one live session drains that inbox on its own turn through the `fmc-respond` agent-only skill and posts the real answer back with `bin/fm-crowsnest-post.sh`, which reuses the backend's own `ChatClient` rather than reinventing OAuth.
+Like X mode, it rides the existing watcher check mechanism with no change to the watcher, wake queue, arm wrapper, or afk daemon: the locked session-start bootstrap step only wires or unwires the local check shim `state/chat-watch.check.sh`, while registering the agent and autostarting the `local-agents-chat` backend reach outside the home and stay explicit operator actions via `bin/fm-crowsnest.sh`.
+The single-threaded supervision guarantee is the whole point; full detail is in [docs/crowsnest.md](crowsnest.md).
+
 ## Project memory belongs to projects
 
 Durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`, with `CLAUDE.md` as a symlink.

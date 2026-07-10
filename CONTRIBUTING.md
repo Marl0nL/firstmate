@@ -93,6 +93,7 @@ tests/fm-grok-harness.test.sh             # grok adapter spawn hook, token guard
 tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached recovery, STUCK drift reports, benign skips, single-project name resolution, and bootstrap relay
 tests/fm-fleet-snapshot-view.test.sh      # read-only fleet snapshot JSON and Markdown view coverage: stable ordering, current-state vs status-event separation, backlog parsing, scout reports, secondmate return-channel guidance, and operational directory overrides
 tests/fm-x-mode.test.sh                   # X-mode poll, inbox context round-trip, reply threading, dismiss, completion follow-up counters/caps, dry-run preview, and .env-presence activation tests
+tests/fm-crowsnest.test.sh                # Crowsnest Google Chat bridge: inert-by-default relay/poll/bootstrap, relay stash + durable chat-mention wake + always-non-empty ack, poll inbox surfacing, post-back dry-run, lib config resolution, and lifecycle against a fakebin local-agents CLI
 tests/fm-tangle-guard.test.sh             # primary-checkout tangle detection, read-only remediation suppression, and spawn/brief isolation tests
 tests/fm-brief.test.sh                    # fm-brief.sh bash -n parse regression guard, clean delivery-mode scaffolds, and hard Herdr lifecycle declaration/contract tests
 tests/fm-herdr-lab.test.sh                # isolated Herdr lab helper fail-closed naming, scoped calls, forbidden operations, destructive-call guard ordering, and fleet-state tripwire tests
