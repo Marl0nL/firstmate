@@ -1,0 +1,18 @@
+{
+  "_comment": "Example config/usage-pricing.json - copy into this home's config/ to override the token-usage report's per-model rates. This file is OPTIONAL and gitignored; with no config/usage-pricing.json the report uses the built-in table baked into bin/fm-usage-lib.sh (FM_USAGE_PRICING_DEFAULTS). It is parsed with jq (must be valid JSON - no trailing commas, no // comments; the _-prefixed keys here are ignored). A malformed file is ignored and the built-ins are used, so a bad edit never silently zeroes every cost.",
+  "_units": "All rates are USD per MILLION tokens (per MTok), matching Anthropic's pricing page so you can copy the numbers straight across. cache_read is the 0.1x-input cache-read rate; cache_write is the 1.25x-input 5-minute cache-creation rate (the class the ledger records). The report divides raw tokens x rate by 1,000,000.",
+  "_verify": "VERIFY against current Anthropic pricing before trusting these - rates drift. The built-in defaults were sourced from the claude-api reference on 2026-07-08.",
+  "_merge": "Each model here MERGES over the built-in table by model id, so you only need to list models you want to change or add. A model listed here fully replaces its built-in entry. Model matching is exact first, then longest-prefix (so 'claude-opus-4-8' also covers 'claude-opus-4-8[1m]' and dated '-20251001' variants), then 'default'. An unknown model uses 'default' and is flagged 'default rate' in the report - it is never silently zero.",
+  "models": {
+    "claude-opus-4-8":   {"input": 5,  "output": 25, "cache_read": 0.5, "cache_write": 6.25},
+    "claude-opus-4-7":   {"input": 5,  "output": 25, "cache_read": 0.5, "cache_write": 6.25},
+    "claude-opus-4-6":   {"input": 5,  "output": 25, "cache_read": 0.5, "cache_write": 6.25},
+    "claude-opus-4-5":   {"input": 5,  "output": 25, "cache_read": 0.5, "cache_write": 6.25},
+    "claude-fable-5":    {"input": 10, "output": 50, "cache_read": 1.0, "cache_write": 12.5},
+    "claude-mythos-5":   {"input": 10, "output": 50, "cache_read": 1.0, "cache_write": 12.5},
+    "claude-sonnet-5":   {"input": 3,  "output": 15, "cache_read": 0.3, "cache_write": 3.75},
+    "claude-sonnet-4-6": {"input": 3,  "output": 15, "cache_read": 0.3, "cache_write": 3.75},
+    "claude-haiku-4-5":  {"input": 1,  "output": 5,  "cache_read": 0.1, "cache_write": 1.25}
+  },
+  "default": {"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25}
+}

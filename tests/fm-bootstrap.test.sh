@@ -7,7 +7,8 @@
 # 'TASKS_AXI: available' lines, so those contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
-# tasks-axi update advertises --archive-body, whether quota-axi is on PATH,
+# tasks-axi update advertises --archive-body, whether its mv help advertises
+# multi-ID moves, whether quota-axi is on PATH,
 # whether the local backend config opts out of tasks-axi backlog mutations, and
 # which no-mistakes version is on PATH.
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
@@ -72,9 +73,11 @@ SH
 }
 
 add_tasks_axi() {
-  local fakebin=$1 version=$2 archive_body=${3:-yes} archive_line
+  local fakebin=$1 version=$2 archive_body=${3:-yes} multi_id=${4:-yes} archive_line mv_usage
   archive_line=""
   [ "$archive_body" = yes ] && archive_line='  --archive-body'
+  mv_usage='usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
+  [ "$multi_id" = yes ] || mv_usage='usage: tasks-axi mv <id> --to <path-or-dir>'
   cat > "$fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = --version ]; then
@@ -85,6 +88,10 @@ if [ "\${1:-}" = update ] && [ "\${2:-}" = --help ]; then
   printf '%s\n' 'usage: tasks-axi update <id> [flags]'
   printf '%s\n' '  --body-file <path>'
   [ -z '$archive_line' ] || printf '%s\n' '$archive_line'
+  exit 0
+fi
+if [ "\${1:-}" = mv ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' '$mv_usage'
   exit 0
 fi
 exit 0
@@ -100,6 +107,29 @@ add_real_jq() {
 exec '$real_jq' "\$@"
 SH
   chmod +x "$fakebin/jq"
+}
+
+# Build a system-bin view of $BASE_PATH that excludes any real `orca` binary
+# (GNOME's screen reader is installed as `orca` on some dev machines). The
+# orca-selected backend case must observe orca as ABSENT to prove the gate
+# requires it, so it must not depend on the ambient system lacking a program
+# named `orca`. Symlinking the standard bin dirs minus orca keeps every other
+# real coreutil bootstrap needs. Echoes the new dir.
+make_orca_free_sysbin() {
+  local dir=$1 sysbin d f base
+  local dirs
+  sysbin="$dir/sysbin"
+  mkdir -p "$sysbin"
+  IFS=: read -ra dirs <<< "$BASE_PATH"
+  for d in "${dirs[@]}"; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*; do
+      base=${f##*/}
+      [ "$base" = orca ] && continue
+      [ -e "$sysbin/$base" ] || ln -s "$f" "$sysbin/$base" 2>/dev/null || true
+    done
+  done
+  printf '%s\n' "$sysbin"
 }
 
 make_fake_fleet_sync_root() {
@@ -197,7 +227,7 @@ run_bootstrap_timeout_case() {
 #   mode=exact -> output must equal <expect>
 #   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
 test_bootstrap_reporting() {
-  local label lease tasks quota backend mode expect notcontains case_dir fakebin out n archive_body
+  local label lease tasks quota backend mode expect notcontains case_dir fakebin out n archive_body multi_id
   n=0
   while IFS='^' read -r label lease tasks quota backend mode expect notcontains; do
     [ -n "$label" ] || continue
@@ -213,13 +243,20 @@ test_bootstrap_reporting() {
       rm -f "$fakebin/tasks-axi"
     else
       archive_body=yes
+      multi_id=yes
       case "$tasks" in
         *:noarchive)
           archive_body=no
           tasks=${tasks%:noarchive}
           ;;
       esac
-      add_tasks_axi "$fakebin" "$tasks" "$archive_body"
+      case "$tasks" in
+        *:nomulti)
+          multi_id=no
+          tasks=${tasks%:nomulti}
+          ;;
+      esac
+      add_tasks_axi "$fakebin" "$tasks" "$archive_body" "$multi_id"
     fi
     if [ "$quota" = "0" ]; then
       rm -f "$fakebin/quota-axi"
@@ -248,6 +285,7 @@ compatible tasks-axi is reported available by default^1^0.1.1^1^-^exact^TASKS_AX
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 tasks-axi without archive-body is required by default^1^0.1.2:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+tasks-axi without multi-id mv is required by default^1^0.2.2:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 missing quota-axi is required by default^1^0.1.1^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
 manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 manual backlog backend suppresses tasks-axi availability^1^0.1.1^1^manual^empty^^
@@ -287,7 +325,7 @@ ROWS
 }
 
 test_orca_backend_gates_orca_tool_only_when_selected() {
-  local case_dir fakebin out missing_orca
+  local case_dir fakebin sysbin out missing_orca
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
 
   case_dir="$TMP_ROOT/orca-backend-selected"
@@ -295,7 +333,10 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  # Use an orca-free system bin so the case does not falsely pass/fail based on
+  # whether the host happens to have an unrelated `orca` binary on PATH.
+  sysbin=$(make_orca_free_sysbin "$case_dir")
+  out=$(PATH="$fakebin:$sysbin" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
 

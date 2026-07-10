@@ -77,6 +77,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-usage-lib.sh
+. "$SCRIPT_DIR/fm-usage-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -231,6 +233,26 @@ print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 # --- 5. fleet-state digest ---------------------------------------------
 section "FLEET STATE"
 print_file_or_absent "$DATA/backlog.md" "data/backlog.md"
+
+# Token-usage headroom (only when the monitor is opted in; see AGENTS.md section
+# 3 and docs/usage-monitor.md). On the locked path, first fold in any tokens
+# consumed while the watcher was down with a bounded backfill, then surface the
+# freshest 5-hour + weekly quota as one line. Best-effort: never blocks startup.
+if fm_usage_enabled; then
+  subsection "Token usage (claude-harness)"
+  if [ "$READ_ONLY" -eq 0 ] && [ -x "$SCRIPT_DIR/fm-usage-poll.sh" ]; then
+    if command -v timeout >/dev/null 2>&1; then
+      timeout "${FM_USAGE_BACKFILL_TIMEOUT:-25}" "$SCRIPT_DIR/fm-usage-poll.sh" --backfill --quiet >/dev/null 2>&1 || true
+    else
+      "$SCRIPT_DIR/fm-usage-poll.sh" --backfill --quiet >/dev/null 2>&1 || true
+    fi
+  fi
+  if [ -x "$SCRIPT_DIR/fm-usage-quota.sh" ]; then
+    "$SCRIPT_DIR/fm-usage-quota.sh" 2>/dev/null || printf 'quota signal unavailable\n'
+  else
+    printf '(quota signal not built yet)\n'
+  fi
+fi
 
 subsection "In-flight tasks (state/*.meta)"
 META_FOUND=0
