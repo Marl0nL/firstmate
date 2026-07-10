@@ -25,8 +25,9 @@
 # remainder is the whole pane id - fm_backend_herdr_parse_target splits on the
 # first colon only). This is the value stored in a herdr task's meta window=
 # field and is what fm_backend_resolve_selector already returns unchanged for
-# both the fm-<id> and explicit backend-target forms (that function has no
-# herdr-specific logic; it just returns meta's window= verbatim).
+# exact task-id, legacy fm-<id>, and explicit backend-target forms (that
+# function has no herdr-specific logic; it just returns meta's window=
+# verbatim).
 #
 # Recovery/orphan discovery (ids may not deterministically match live state
 # after a server restart in a differently-configured session; see the
@@ -398,6 +399,28 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
   esac
 }
 
+# fm_backend_herdr_agent_alive: CONFIDENT liveness of a live harness-agent
+# PROCESS under <target> ("<session>:<pane_id>"), for the same
+# session-start secondmate-liveness sweep fm_backend_tmux_agent_alive serves
+# (bin/fm-bootstrap.sh; docs/herdr-backend.md "Agent liveness probe reuses the
+# husk classifier"). Reuses fm_backend_herdr_pane_agent_state, the
+# already-verified husk classifier ("Respawn idempotency" above): `dead`
+# (structurally gone pane) and `no-agent` (a restored, agent-less bare shell
+# - EXACTLY the shape a dead secondmate leaves behind) both collapse to
+# `dead`; `live` (a real registered agent_status, including idle/blocked)
+# maps to `alive`; `unknown` stays `unknown` - fail-safe toward refusal,
+# exactly like the husk check itself. Callers must never treat `unknown` as a
+# confirmed-dead signal.
+fm_backend_herdr_agent_alive() {  # <target>
+  local target=$1
+  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
+    dead|no-agent) printf 'dead' ;;
+    live) printf 'alive' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
 # <container> ("session:workspace_id"). Herdr does NOT enforce label
 # uniqueness itself (verified: two tabs can share a label), so the duplicate
@@ -595,6 +618,31 @@ fm_backend_herdr_capture() {  # <target> <lines>
   printf '%s' "$out" | tail -n "$lines"
 }
 
+fm_backend_herdr_capture_ansi() {  # <target> <lines>
+  fm_backend_herdr_target_ready "$1" || return 1
+  local lines=${2:-200} fetch out
+  case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
+  fetch=$lines
+  case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" --format ansi 2>/dev/null) || return 1
+  printf '%s' "$out" | tail -n "$lines"
+}
+
+fm_backend_herdr_strip_ansi() {  # <text>
+  local esc
+  esc=$'\033'
+  printf '%s' "$1" | sed "s/${esc}\\[[0-9;?]*[[:alpha:]]//g"
+}
+
+fm_backend_herdr_prompt_tail_is_faint() {  # <raw-ansi-composer-row>
+  local raw=$1 esc
+  esc=$'\033'
+  case "$raw" in
+    *"${esc}[1m❯ ${esc}[0m${esc}[2m"*|*"${esc}[1m› ${esc}[0m${esc}[2m"*) return 0 ;;
+  esac
+  return 1
+}
+
 # fm_backend_herdr_composer_state: classify the composer's own row as
 # empty|pending|unknown, scanning a generous tail-window capture of <target>.
 # herdr's CLI exposes no cursor-row primitive (unlike tmux's #{cursor_y}), so
@@ -628,9 +676,12 @@ fm_backend_herdr_capture() {  # <target> <lines>
 #              no-agent shell fallback prompt (`>`, `$`, `%`, or `#`) falls
 #              through to `unknown` instead of being misread as delivered.
 #
-#   empty   - blank, a bare prompt glyph, or known ghost/placeholder text
+#   empty   - blank, a bare prompt glyph, known ghost/placeholder text
 #             ("Type a message...", verified grok 0.2.82's empty-composer
-#             placeholder). Safe to treat as submitted.
+#             placeholder), or bare-prompt tail text rendered faint in the ANSI
+#             capture (verified Codex idle suggestions such as "Run /review on
+#             my current changes" and "Find and fix a bug in @filename").
+#             Safe to treat as submitted.
 #   pending - real, unsubmitted text sits in the composer. This deliberately
 #             also covers a slash-command popup that just closed but only
 #             auto-completed or filled an argument-hint placeholder into the
@@ -640,16 +691,11 @@ fm_backend_herdr_capture() {  # <target> <lines>
 #   unknown - the pane could not be read, or no composer row (of either shape)
 #             was found in the captured window.
 #
-# KNOWN REMAINING GAP (docs/herdr-backend.md "Incident (2026-07-07)"): codex's
-# idle composer shows dynamic tip/hint text ("Use /skills to list available
-# skills") rather than blank or a fixed placeholder string, so it cannot be
-# told apart from real pending input by pattern matching alone - a genuinely
-# idle codex composer under herdr classifies as "pending", not "empty". This
-# makes injection defer forever rather than redeliver, which is a narrower,
-# already-safe failure mode (the buffer is preserved, never silently lost, and
-# the max-defer wedge alarm still fires) - not fixed here; a real fix needs
-# either an upstream herdr cursor-row/style primitive or a codex-specific
-# signal, neither available today.
+# Codex ghost-suggestion note (2026-07-08): herdr's ANSI pane read preserves the
+# faint SGR style Codex uses for idle suggestions after the bare `›` prompt,
+# while real typed input after the same prompt is not faint. The classifier
+# therefore uses ANSI capture when available and treats a faint bare-prompt tail
+# as empty without weakening protection for real typed input.
 FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
 # Known ghost/placeholder composer text. Extend this if another
 # herdr-verified harness needs its own idle placeholder recognized.
@@ -660,9 +706,12 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cap line trimmed stripped="" found=0 shape=""
-  cap=$(fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  local target=$1 cap line raw_line trimmed stripped="" found=0 shape="" raw_match="" faint_tail=0
+  cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
+    || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
   while IFS= read -r line; do
+    raw_line=$line
+    line=$(fm_backend_herdr_strip_ansi "$line")
     trimmed="${line#"${line%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     [ -n "$trimmed" ] || continue
@@ -670,12 +719,14 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
       '│'*'│'|'┃'*'┃'|'|'*'|')
         stripped=$trimmed
         shape=bordered
+        raw_match=$raw_line
         found=1
         ;;
       *)
         if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
           stripped=$trimmed
           shape=bare
+          raw_match=$raw_line
           found=1
         fi
         ;;
@@ -705,6 +756,10 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   if printf '%s' "$stripped" | grep -qE "$FM_BACKEND_HERDR_IDLE_RE"; then
     printf 'empty'; return 0
   fi
+  if [ "$shape" = bare ] && fm_backend_herdr_prompt_tail_is_faint "$raw_match"; then
+    faint_tail=1
+  fi
+  [ "$faint_tail" -eq 1 ] && { printf 'empty'; return 0; }
   printf 'pending'
 }
 
@@ -726,18 +781,17 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
 # semantic signal regardless of what text a harness's idle composer happens
 # to display.
 #
-# Incident (2026-07-07): a redelivery loop in the away-mode daemon. Root
-# cause: fm_backend_herdr_composer_state's structural row classifier
-# recognizes only bordered and two hardcoded bare prompt glyphs; real codex's
-# IDLE composer shows dynamic tip/hint text ("Use /skills to list available
-# skills") that no static pattern can tell apart from genuinely unsubmitted
-# input, so a codex confirmation built on composer content classified a
-# landed submit as still-"pending" forever - see docs/herdr-backend.md for
-# the full account. Composer content is retained for other callers (the
-# away-mode daemon's PRE-injection empty-box guard, still dispatched via
-# fm_backend_composer_state / fm_backend_herdr_composer_state, unchanged) and
-# for submit attempts whose pre-Enter agent-state baseline is not legibly
-# idle.
+# Incident (2026-07-07, followed up on 2026-07-08): a redelivery loop in the
+# away-mode daemon. Root cause: composer-content submit confirmation was too
+# sensitive to harness rendering details. Real claude/codex use bare prompt
+# rows, and real codex adds dynamic idle suggestions after `›`; the later
+# ANSI-aware composer classifier now handles the pre-injection guard for that
+# Codex shape, but idle-baseline submit confirmation deliberately stays on
+# native agent-state so delivery does not depend on composer text. Composer
+# content is retained for other callers (the away-mode daemon's PRE-injection
+# empty-box guard, still dispatched via fm_backend_composer_state /
+# fm_backend_herdr_composer_state) and for submit attempts whose pre-Enter
+# agent-state baseline is not legibly idle.
 #
 # This also still correctly handles the earlier 2026-07-03 incident (a
 # slash-command popup selection/placeholder-fill on the FIRST Enter is not a
