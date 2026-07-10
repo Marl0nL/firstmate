@@ -81,6 +81,7 @@ config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit), and codex-app is not accepted; see docs/codex-app-backend.md; not inherited into secondmate homes
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
+config/crowsnest.env  Crowsnest opt-in and settings (CROWSNEST_ENABLED gate); LOCAL, gitignored; presence-gates section 15
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's personal preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update
@@ -100,6 +101,10 @@ state/               volatile runtime signals; gitignored
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
   x-poll.error       generated X-mode relay diagnostic dedupe marker
+  chat-watch.check.sh  generated Crowsnest chat relay poll shim; present only when opted in (section 15)
+  chat-inbox/        generated Crowsnest pending chat message payloads; fmc-respond drains it (section 15)
+  chat-outbox/       generated Crowsnest dry-run reply previews; inspect it when CROWSNEST_DRY_RUN is set (section 15)
+  chat-poll.error    generated Crowsnest relay diagnostic; chat-backend.log holds an autostarted backend's log (section 15)
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
@@ -124,7 +129,7 @@ It composes today's `fm-lock.sh`, `fm-bootstrap.sh`, and `fm-wake-drain.sh` - ca
 1. **Lock** - acquires the per-home session lock first, before anything mutates shared state.
 2. **Bootstrap** - detect-only diagnostics (tool/version problems, GitHub auth, the worktree-tangle check, harness override, dispatch-profile validation, backlog-backend status) always run and always print.
    When the lock could not be acquired, the worktree-tangle check uses read-only advisory wording without a checkout repair command.
-   The four MUTATING sweeps - fleet sync, the local secondmate fast-forward sweep, the secondmate liveness sweep, and X-mode artifact writes - run only when this session actually holds the lock from step 1.
+   The six MUTATING sweeps - fleet sync, the local secondmate fast-forward sweep, the secondmate liveness sweep, X-mode artifact writes, token-usage monitor artifact writes, and the Crowsnest relay-shim write/removal (section 15) - run only when this session actually holds the lock from step 1.
    The secondmate liveness sweep deterministically guarantees every registered secondmate is actually running: it probes each live secondmate's endpoint for a real agent process (not just pane presence) and respawns only on a confident dead reading, reported as `SECONDMATE_LIVENESS:` lines (`bin/fm-bootstrap.sh`; `bin/fm-backend.sh`'s `fm_backend_agent_alive`).
 3. **Wake queue** - when locked, drains the durable wake queue and prints the records prominently as this turn's first work queue, exactly as `bin/fm-wake-drain.sh` did before; a lapsed watcher chain still surfaces here via the same guard banner.
    When the lock could not be acquired, the queue is left untouched because another session owns it, and the guard's tangle/watcher-liveness alarms still print in read-only advisory mode without drain, supervision repair, or checkout repair commands.
@@ -719,7 +724,7 @@ On wake, in order of cheapness:
 3. `stale:` the crewmate stopped without reporting; peek the pane (`bin/fm-peek.sh <window>`) to diagnose.
    If the stale reason includes `demand-deep-inspection`, inspect the pane, `bin/fm-crew-state.sh <id>`, and the validation logs before resuming supervision.
    If the pane is waiting, looping, confused, or unresponsive, load `stuck-crewmate-recovery`.
-4. `check:` a per-task poll fired (usually a merge, or X mode when enabled); act on it.
+4. `check:` a per-task poll fired (usually a merge, X mode when enabled, or a `chat-mention <id>` from the Crowsnest when enabled - load `fmc-respond`, section 15); act on it.
 5. `heartbeat:` a heartbeat wake now reaches you only when the watcher's bash fleet-scan caught a captain-relevant status the per-wake path missed (no-change heartbeats are absorbed in bash, never surfaced), so treat it as "something turned up" and review the whole fleet: start with `bin/fm-fleet-view.sh` for the structured overview, use `bin/fm-crew-state.sh <id>` only for targeted follow-up, peek panes that look off, check PR-ready tasks for merge, reconcile data/backlog.md, then resume the emitted supervision protocol.
    Do not report that the fleet is unchanged.
 
@@ -906,6 +911,7 @@ These skills are not captain-invocable; they are conditional operating reference
 - `stuck-crewmate-recovery` - load after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited config into, or retiring a secondmate home, and before editing `data/secondmates.md`.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, and on any milestone or terminal wake for an X-mode-linked task before posting its completion follow-up; relevant only when X mode is on.
+- `fmc-respond` - load on a `chat-mention <id>` `check:` wake to drain the chat inbox and post the real reply back into the thread, and before posting proactively into a chat thread (the reverse channel); relevant only when the Crowsnest is on (section 15).
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 - `usage-monitor` - load before a quota-based hold decision at intake, when producing a token-usage report, on a `usage-quota ...` check wake, or when reading the session-start token-usage line; relevant only when the usage monitor is opted in (`docs/usage-monitor.md`).
@@ -938,3 +944,24 @@ On an `x-mention <request_id>` or `x-mode-error ...` `check:` wake, load `fmx-re
 It owns mention classification, acting on the request, reply composition, voice, thread-splitting, image attachments, dry-run preview, and the completion-follow-up procedure in full, including what an `x-mode-error` wake means instead.
 `docs/configuration.md` "X mode (.env)" has the wire-protocol reference.
 The one fact that must survive here because it fires on a generic terminal wake, not the mention wake itself: when an X-mode-linked task reaches a terminal state, post its final completion follow-up per section 8's wake-handling step before tearing down.
+
+## 15. Crowsnest (Google Chat bridge)
+
+The Crowsnest lets the captain reach this LIVE firstmate session from a Google Chat thread, and lets firstmate post back, through the `local-agents-chat` backend.
+It ships in this repo for every user but is **inert until opted in**, so a user who never enables it sees zero behavior change.
+
+**Activation is `config/crowsnest.env` presence, not a command.**
+A truthy `CROWSNEST_ENABLED` in that local, gitignored file turns it on; `bin/fm-crowsnest.sh enable` writes the flag, wires the watcher check shim, and registers the `firstmate` agent, and `disable` reverses all three.
+Bootstrap only wires/unwires the local check shim (the `CROWSNEST:` digest line); registration and backend autostart reach outside this home and stay explicit operator actions via `bin/fm-crowsnest.sh`.
+
+**Mechanism (mirrors X mode).**
+A chat message runs the thin relay `bin/fm-crowsnest-relay.sh`, which stashes it to `state/chat-inbox/<id>.json`, enqueues a durable `chat-mention <id>` check wake, and returns an immediate async ack - it never spawns a fleet-aware agent.
+The watcher surfaces the message as a `check:` wake this one live session handles on its own turn.
+`docs/crowsnest.md` has the full mechanism, config keys, wire shapes, and verification.
+
+**The rule that must never bend: single-threaded supervision.**
+A chat message becomes a WAKE the one live firstmate handles; it is never answered by a parallel agent in the firstmate home.
+
+**Answering and the reverse channel.**
+On a `chat-mention <id>` `check:` wake, load `fmc-respond` (section 13); it owns draining the inbox, composing the reply from live fleet state in the section 9 captain-facing voice, and posting back via `bin/fm-crowsnest-post.sh`.
+The same post tool posts proactively into a chat thread (for example an away-mode escalation); that reverse channel is also `fmc-respond`'s to drive, under the section 1 and 9 approval and etiquette rules.

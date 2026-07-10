@@ -240,6 +240,14 @@ In dry-run, `fm-x-dismiss.sh` records `{request_id, endpoint:"dismiss"}` to the 
 The live answer and follow-up bodies intentionally stay the same shape, including optional `image`; the relay distinguishes them by endpoint, and dismiss stays `{request_id}`.
 These paths need `jq` to build the JSON payload, but they run before token and network checks, so they need neither `FMX_PAIRING_TOKEN` nor `curl`.
 
+## Crowsnest (config/crowsnest.env)
+
+The Crowsnest is the Google Chat analogue of X mode: an opt-in, committed two-way bridge that lets the captain reach the one live firstmate session from a Chat thread and lets firstmate post back, without spawning a second fleet-aware agent.
+It is off unless the firstmate home's gitignored `config/crowsnest.env` sets a truthy `CROWSNEST_ENABLED`.
+Like X mode, the locked session-start bootstrap step only wires or unwires the local watcher check shim (`state/chat-watch.check.sh`, the `CROWSNEST:` digest line); registering the `firstmate` agent with the `local-agents-chat` backend and autostarting that backend reach outside the home and stay explicit operator actions via `bin/fm-crowsnest.sh`.
+Copy `docs/examples/crowsnest.env` to `config/crowsnest.env`, then run `bin/fm-crowsnest.sh enable` (add `--autostart` to also start the backend).
+The config keys (`CROWSNEST_ENABLED`, `CROWSNEST_AGENT_NAME`, `CROWSNEST_ACK`, `CROWSNEST_LA_CLI`, `CROWSNEST_LA_CONFIG`, `CROWSNEST_PYTHON`, `CROWSNEST_DRY_RUN`), the full mechanism, wire shapes, and verification live in [docs/crowsnest.md](crowsnest.md).
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):

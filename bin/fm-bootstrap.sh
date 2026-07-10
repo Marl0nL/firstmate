@@ -13,7 +13,8 @@
 #                 "NUDGE_SECONDMATES: fm-<id>...",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
-#                 "USAGE: monitor on ..." or "USAGE: monitor off ...".
+#                 "USAGE: monitor on ..." or "USAGE: monitor off ...",
+#                 "CROWSNEST: on ..." or "CROWSNEST: off ...".
 #          A NUDGE_SECONDMATES line lists the RUNNING secondmate task selectors
 #          (fm-<id>) whose worktree was fast-forwarded to firstmate's own
 #          current default-branch commit (a purely LOCAL fast-forward, never an
@@ -66,13 +67,13 @@
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the MUTATING sweeps
 #          (secondmate_sync, secondmate_liveness_sweep, x_mode_setup,
-#          usage_mode_setup, fleet_sync) while still printing every read-only
-#          detect line above; the TANGLE line switches to advisory-only wording
-#          with no checkout command. Used by
+#          usage_mode_setup, crowsnest_setup, fleet_sync) while still printing
+#          every read-only detect line above; the TANGLE line switches to
+#          advisory-only wording with no checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
-#          secondmate homes, X-mode artifacts, project clones, or repair
-#          instructions. Unset/0 (the default) runs every sweep exactly as
+#          secondmate homes, X-mode artifacts, Crowsnest relay shims, project
+#          clones, or repair instructions. Unset/0 (the default) runs every sweep exactly as
 #          before - this flag is purely additive.
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
@@ -96,6 +97,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-usage-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-usage-lib.sh"
+# shellcheck source=bin/fm-crowsnest-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-crowsnest-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 
@@ -462,6 +465,37 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+# Crowsnest (opt-in): when this home's config/crowsnest.env sets a truthy
+# CROWSNEST_ENABLED, wire the chat relay poll into the EXISTING watcher check
+# mechanism without touching fm-watch.sh, mirroring x_mode_setup. Drops one
+# idempotent, gitignored artifact:
+#   state/chat-watch.check.sh - check shim that execs bin/fm-crowsnest-poll.sh
+# On opt-out (absent or falsey) it removes the shim so the instance reverts to
+# no-poll behavior. Absent config AND no leftover shim is a complete no-op, so a
+# non-Crowsnest user sees zero change. It never registers the agent or starts the
+# backend - those are explicit operator actions via bin/fm-crowsnest.sh, since
+# both reach outside this home. It never touches the watcher itself.
+crowsnest_setup() {
+  local shim
+  shim="$STATE/chat-watch.check.sh"
+  fmc_load_config
+  if ! fmc_enabled; then
+    if [ -e "$shim" ]; then
+      if fmc_unwire_shim; then
+        echo "CROWSNEST: off - removed chat relay poll shim"
+      else
+        echo "CROWSNEST: off - failed to remove chat relay poll shim"
+      fi
+    fi
+    return 0
+  fi
+  if fmc_wire_shim; then
+    echo "CROWSNEST: on - chat relay poll armed via state/chat-watch.check.sh"
+  else
+    echo "CROWSNEST: on - failed to arm chat relay poll shim"
+  fi
+}
+
 # Usage monitor (opt-in): when config/usage-monitor.env sets FM_USAGE_ENABLED
 # truthy, wire the token-usage poll into the EXISTING watcher check mechanism,
 # mirroring x_mode_setup and touching no watcher-backbone file. Drops one
@@ -648,6 +682,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
   x_mode_setup
   usage_mode_setup
+  crowsnest_setup
   fleet_sync
 fi
 exit 0
