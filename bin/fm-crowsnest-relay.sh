@@ -110,9 +110,10 @@ fi
 # Durable wake so the message is handled even across a watcher gap or a restart.
 # A fixed key coalesces a burst of messages to one queue entry; the live session
 # drains the whole inbox on handling, so no message is lost.
-fm_wake_append check "chat-inbox" "chat-mention $ID" 2>/dev/null \
-  || diag "wrote inbox entry $ID but could not enqueue the wake"
-
-rm -f "$STATE/chat-poll.error" 2>/dev/null || true
+if fm_wake_append check "chat-inbox" "chat-mention $ID" 2>/dev/null; then
+  rm -f "$STATE/chat-poll.error" 2>/dev/null || true
+else
+  diag "wrote inbox entry $ID but could not enqueue the wake"
+fi
 ack
 exit 0

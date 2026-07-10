@@ -69,8 +69,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     chat_client, config = _import_backend()
-    cfg = config.load_config(args.config)
-    client = chat_client.ChatClient(credentials_path=cfg.credentials_path or None)
+    try:
+        cfg = config.load_config(args.config)
+        client = chat_client.ChatClient(credentials_path=cfg.credentials_path or None)
+    except Exception as exc:  # missing/invalid config or credentials - surface cleanly
+        print(f"fm-crowsnest-post: config load failed: {exc}", file=sys.stderr)
+        return 1
 
     reply_option = args.reply_option if args.thread else None
     try:

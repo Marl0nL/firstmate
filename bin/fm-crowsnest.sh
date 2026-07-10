@@ -51,7 +51,9 @@ set_config_key() {
 relay_command() {
   # One shell-style string local-agents shlex-splits into argv. The relay reads
   # the message from stdin and LOCAL_AGENTS_* env; no placeholders needed.
-  printf 'env FM_HOME=%s %s' "$FM_HOME" "$FM_ROOT/bin/fm-crowsnest-relay.sh"
+  printf 'env FM_HOME=%s %s' \
+    "$(printf '%q' "$FM_HOME")" \
+    "$(printf '%q' "$FM_ROOT/bin/fm-crowsnest-relay.sh")"
 }
 
 require_cli() {
