@@ -149,6 +149,20 @@ test_poll_ignores_unsafe_stray_file() {
   pass "poll refuses an unsafe inbox filename"
 }
 
+test_poll_skips_unsafe_and_surfaces_next_safe() {
+  local home out
+  home=$(make_home poll-skip on)
+  mkdir -p "$home/state/chat-inbox"
+  # An unsafe-named stray file is the OLDEST entry; it must not stall the waker -
+  # the poll must skip it and surface the next-oldest SAFE pending message.
+  : > "$home/state/chat-inbox/..evil.json"
+  sleep 1
+  : > "$home/state/chat-inbox/chat-9-safe.json"
+  out=$(env FM_HOME="$home" "$POLL")
+  assert_contains "$out" "chat-mention chat-9-safe" "poll must skip the unsafe stray and surface the next safe entry"
+  pass "poll skips an unsafe stray and continues to the next safe pending entry"
+}
+
 # --- post (dry-run) ---------------------------------------------------------
 
 test_post_dry_run_reply_records_outbox() {
@@ -344,6 +358,7 @@ test_poll_inert_when_disabled
 test_poll_silent_when_inbox_empty
 test_poll_surfaces_oldest_pending
 test_poll_ignores_unsafe_stray_file
+test_poll_skips_unsafe_and_surfaces_next_safe
 test_post_dry_run_reply_records_outbox
 test_post_dry_run_proactive_space_thread
 test_post_reply_unknown_id_errors

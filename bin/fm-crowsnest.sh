@@ -97,8 +97,11 @@ do_unregister() {
 }
 
 backend_running() {
-  pgrep -f 'local[-_]agents(-chat)?.*\brun\b' >/dev/null 2>&1 \
-    || pgrep -f "${FMC_CLI:-__none__} run" >/dev/null 2>&1
+  # Match a running local-agents(-chat) backend whose argv carries the `run`
+  # subcommand, tolerating an interposed `--config <path>` between the CLI and
+  # `run`. POSIX ERE only (no GNU-only \b): ` run` must be a separate arg,
+  # bounded by whitespace or end-of-string, so it works on BSD/macOS pgrep too.
+  pgrep -f 'local[-_]agents(-chat)?.*[[:space:]]run([[:space:]]|$)' >/dev/null 2>&1
 }
 
 do_autostart() {

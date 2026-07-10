@@ -101,17 +101,19 @@ if [ -n "${FMC_DRY:-}" ]; then
   OUTBOX=$(fmc_outbox_dir)
   mkdir -p "$OUTBOX" 2>/dev/null || { echo "fm-crowsnest-post: cannot create outbox" >&2; exit 1; }
   if command -v jq >/dev/null 2>&1; then
+    OUT_FILE="$OUTBOX/$KEY.json"
     jq -Rsc \
       --arg space "$SPACE" \
       --arg thread "$THREAD" \
       --arg key "$KEY" \
       '{key:$key, space:$space, thread:(if $thread == "" then null else $thread end), text:.}' \
-      < "$TEXT_TMP" > "$OUTBOX/$KEY.json" 2>/dev/null \
+      < "$TEXT_TMP" > "$OUT_FILE" 2>/dev/null \
       || { echo "fm-crowsnest-post: cannot write outbox record" >&2; exit 1; }
   else
-    cp "$TEXT_TMP" "$OUTBOX/$KEY.txt" 2>/dev/null || true
+    OUT_FILE="$OUTBOX/$KEY.txt"
+    cp "$TEXT_TMP" "$OUT_FILE" 2>/dev/null || true
   fi
-  echo "dry-run: recorded reply to $SPACE${THREAD:+ (thread $THREAD)} in $OUTBOX/$KEY.json"
+  echo "dry-run: recorded reply to $SPACE${THREAD:+ (thread $THREAD)} in $OUT_FILE"
   exit 0
 fi
 

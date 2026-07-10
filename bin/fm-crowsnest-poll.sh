@@ -33,16 +33,14 @@ INBOX=$(fmc_inbox_dir)
 # Surface the oldest pending entry (by modification time) so a burst is drained
 # in arrival order across cycles. The id is the filename stem; validate it before
 # printing so a stray file can never inject anything unexpected into the wake.
-oldest=""
 while IFS= read -r f; do
-  oldest=$f
-  break
+  base=${f##*/}
+  id=${base%.json}
+  # Skip an unsafe-named stray file rather than letting it stall the whole
+  # waker: continue to the next-oldest safe pending entry.
+  fmc_safe_id "$id" || continue
+  printf 'chat-mention %s\n' "$id"
+  exit 0
 done < <(ls -1tr "$INBOX"/*.json 2>/dev/null)
 
-[ -n "$oldest" ] || exit 0
-
-base=${oldest##*/}
-id=${base%.json}
-fmc_safe_id "$id" || exit 0
-
-printf 'chat-mention %s\n' "$id"
+exit 0
