@@ -219,6 +219,191 @@ test_post_rejects_reply_and_space_together() {
   pass "post rejects --reply and --space together"
 }
 
+# --- thread-context enrichment ----------------------------------------------
+
+CTX_PY="$ROOT/bin/fm-crowsnest-context.py"
+CTX_SH="$ROOT/bin/fm-crowsnest-context.sh"
+
+# jq_true <json-string> <filter>: succeed iff the filter is truthy.
+jq_true() { printf '%s' "$1" | jq -e "$2" >/dev/null 2>&1; }
+
+# Write a fake spaces.messages.list response (newest-first) to a temp file and
+# print its path. A prior captain msg, a firstmate reply, then the just-sent msg.
+make_ctx_fixture() {
+  local home=$1 fix
+  fix="$home/ctx-fixture.json"
+  cat > "$fix" <<'JSON'
+{"messages":[
+  {"name":"m3","sender":{"name":"users/cap","displayName":"Captain Marlon"},"text":"is the deploy green?","createTime":"2026-07-11T10:00:03Z"},
+  {"name":"m2","sender":{"name":"users/bot","displayName":"firstmate"},"text":"Captain, the login PR is up: https://github.com/x/y/pull/9","createTime":"2026-07-11T10:00:02Z"},
+  {"name":"m1","sender":{"name":"users/cap","displayName":"Captain Marlon"},"text":"how is the login fix going?","createTime":"2026-07-11T10:00:01Z"}
+]}
+JSON
+  printf '%s' "$fix"
+}
+
+test_context_reader_builds_enrichment() {
+  command -v python3 >/dev/null 2>&1 || { pass "python3 not installed, skipping"; return; }
+  local home fix out
+  home=$(make_home ctx-reader on)
+  fix=$(make_ctx_fixture "$home")
+  out=$(FMC_CONTEXT_FIXTURE="$fix" python3 "$CTX_PY" \
+    --space spaces/AAA --thread spaces/AAA/threads/T \
+    --sender users/cap --exclude-text 'is the deploy green?' --limit 5)
+  jq_true "$out" '.thread_context | length == 2' || fail "reader must drop the just-sent echo and keep 2 prior msgs"
+  jq_true "$out" '.thread_context[0].text == "how is the login fix going?"' || fail "thread_context must be oldest-first"
+  jq_true "$out" '.reply_to.sender == "users/bot"' || fail "reply_to must be the most recent prior (firstmate) message"
+  jq_true "$out" '.sender_display_name == "Captain Marlon"' || fail "reader must harvest the captain's display name"
+  pass "context reader dedups the echo, orders oldest-first, and extracts reply_to + display name"
+}
+
+test_context_reader_bounds_limit() {
+  command -v python3 >/dev/null 2>&1 || { pass "python3 not installed, skipping"; return; }
+  local home fix out
+  home=$(make_home ctx-bound on)
+  fix="$home/big.json"
+  {
+    echo '{"messages":['
+    for i in $(seq 1 12); do
+      [ "$i" -gt 1 ] && echo ','
+      printf '{"name":"m%s","sender":{"name":"users/cap","displayName":"Cap"},"text":"msg %s","createTime":"2026-07-11T10:%02d:00Z"}' "$i" "$i" "$i"
+    done
+    echo ']}'
+  } > "$fix"
+  out=$(FMC_CONTEXT_FIXTURE="$fix" python3 "$CTX_PY" \
+    --space spaces/AAA --thread spaces/AAA/threads/T --limit 3)
+  jq_true "$out" '.thread_context | length == 3' || fail "reader must bound thread_context to --limit"
+  pass "context reader bounds thread_context to the requested limit"
+}
+
+test_context_sh_merges_into_inbox() {
+  command -v python3 >/dev/null 2>&1 || { pass "python3 not installed, skipping"; return; }
+  local home id fix
+  home=$(make_home ctx-merge on)
+  printf 'is the deploy green?' | env FM_HOME="$home" LOCAL_AGENTS_SPACE='spaces/AAA' \
+    LOCAL_AGENTS_THREAD='spaces/AAA/threads/T' LOCAL_AGENTS_SENDER='users/cap' \
+    CROWSNEST_THREAD_CONTEXT=0 "$RELAY" >/dev/null
+  id=$(first_inbox_id "$home") || fail "setup: relay must stash a base entry"
+  assert_no_grep 'thread_context' "$home/state/chat-inbox/$id.json" "base entry must have no context yet"
+  fix=$(make_ctx_fixture "$home")
+  env FM_HOME="$home" FMC_CONTEXT_FIXTURE="$fix" "$CTX_SH" "$id"
+  assert_grep '"thread_context"' "$home/state/chat-inbox/$id.json" "context.sh must merge thread_context into the inbox entry"
+  assert_grep '"reply_to"' "$home/state/chat-inbox/$id.json" "context.sh must merge reply_to"
+  assert_grep 'Captain Marlon' "$home/state/chat-inbox/$id.json" "context.sh must merge the captain display name"
+  # The original base fields survive the merge.
+  assert_grep '"text":"is the deploy green?"' "$home/state/chat-inbox/$id.json" "merge must preserve the original message text"
+  pass "context.sh merges thread context into the inbox entry without losing base fields"
+}
+
+test_context_sh_no_thread_is_noop() {
+  command -v python3 >/dev/null 2>&1 || { pass "python3 not installed, skipping"; return; }
+  local home id fix
+  home=$(make_home ctx-nothread on)
+  printf 'hello' | env FM_HOME="$home" LOCAL_AGENTS_SPACE='spaces/AAA' LOCAL_AGENTS_SENDER='users/cap' \
+    CROWSNEST_THREAD_CONTEXT=0 "$RELAY" >/dev/null
+  id=$(first_inbox_id "$home") || fail "setup: relay must stash"
+  fix=$(make_ctx_fixture "$home")
+  env FM_HOME="$home" FMC_CONTEXT_FIXTURE="$fix" "$CTX_SH" "$id"
+  assert_no_grep 'thread_context' "$home/state/chat-inbox/$id.json" "a thread-less message must stay exactly as today"
+  pass "context.sh is a no-op for a message with no thread"
+}
+
+test_context_sh_empty_messages_is_noop() {
+  command -v python3 >/dev/null 2>&1 || { pass "python3 not installed, skipping"; return; }
+  local home id fix
+  home=$(make_home ctx-empty on)
+  printf 'q' | env FM_HOME="$home" LOCAL_AGENTS_SPACE='spaces/AAA' \
+    LOCAL_AGENTS_THREAD='spaces/AAA/threads/T' LOCAL_AGENTS_SENDER='users/cap' \
+    CROWSNEST_THREAD_CONTEXT=0 "$RELAY" >/dev/null
+  id=$(first_inbox_id "$home") || fail "setup: relay must stash"
+  fix="$home/empty.json"; echo '{"messages":[]}' > "$fix"
+  env FM_HOME="$home" FMC_CONTEXT_FIXTURE="$fix" "$CTX_SH" "$id"
+  assert_no_grep 'thread_context' "$home/state/chat-inbox/$id.json" "empty context must not rewrite the entry"
+  pass "context.sh does not touch the entry when no thread messages come back"
+}
+
+test_context_sh_inert_when_disabled() {
+  local home
+  home=$(make_home ctx-disabled off)
+  mkdir -p "$home/state/chat-inbox"
+  printf '{"id":"chat-1-a","space":"spaces/A","thread":"spaces/A/threads/T","sender":"users/c","text":"hi"}' \
+    > "$home/state/chat-inbox/chat-1-a.json"
+  env FM_HOME="$home" "$CTX_SH" chat-1-a
+  assert_no_grep 'thread_context' "$home/state/chat-inbox/chat-1-a.json" "context.sh must be inert when the Crowsnest is off"
+  pass "context.sh is a hard no-op when the Crowsnest is disabled"
+}
+
+test_context_sh_never_resurrects_missing_entry() {
+  # Guards the ctx-mv-resurrect fix: enrichment must never CREATE an inbox entry
+  # that is not (or is no longer) present - otherwise a message the live session
+  # already answered and deleted would be resurrected and re-surfaced as a
+  # duplicate reply. Here the entry does not exist when enrichment runs.
+  command -v python3 >/dev/null 2>&1 || { pass "python3 not installed, skipping"; return; }
+  local home fix
+  home=$(make_home ctx-resurrect on)
+  mkdir -p "$home/state/chat-inbox"
+  fix=$(make_ctx_fixture "$home")
+  env FM_HOME="$home" FMC_CONTEXT_FIXTURE="$fix" "$CTX_SH" chat-gone-1
+  assert_absent "$home/state/chat-inbox/chat-gone-1.json" "enrichment must not create/resurrect a missing inbox entry"
+  pass "context.sh never resurrects an inbox entry that is not present"
+}
+
+test_relay_sync_enrichment_merges_context() {
+  command -v python3 >/dev/null 2>&1 || { pass "python3 not installed, skipping"; return; }
+  local home id fix out
+  home=$(make_home relay-ctx on)
+  fix=$(make_ctx_fixture "$home")
+  out=$(printf 'is the deploy green?' | env FM_HOME="$home" FMC_CONTEXT_SYNC=1 FMC_CONTEXT_FIXTURE="$fix" \
+    LOCAL_AGENTS_SPACE='spaces/AAA' LOCAL_AGENTS_THREAD='spaces/AAA/threads/T' \
+    LOCAL_AGENTS_SENDER='users/cap' "$RELAY")
+  assert_contains "$out" "On it, captain" "relay must still return the instant ack with enrichment on"
+  id=$(first_inbox_id "$home") || fail "relay must stash a base entry"
+  assert_grep '"thread_context"' "$home/state/chat-inbox/$id.json" "relay must enrich the entry with thread context"
+  assert_grep 'Captain Marlon' "$home/state/chat-inbox/$id.json" "relay enrichment must include the display name"
+  pass "relay enriches the inbox entry with thread context while still acking instantly"
+}
+
+test_relay_context_killswitch() {
+  command -v python3 >/dev/null 2>&1 || { pass "python3 not installed, skipping"; return; }
+  local home id fix out
+  home=$(make_home relay-ctx-off on)
+  fix=$(make_ctx_fixture "$home")
+  out=$(printf 'is the deploy green?' | env FM_HOME="$home" CROWSNEST_THREAD_CONTEXT=0 \
+    FMC_CONTEXT_SYNC=1 FMC_CONTEXT_FIXTURE="$fix" \
+    LOCAL_AGENTS_SPACE='spaces/AAA' LOCAL_AGENTS_THREAD='spaces/AAA/threads/T' \
+    LOCAL_AGENTS_SENDER='users/cap' "$RELAY")
+  assert_contains "$out" "On it, captain" "relay must ack even with context disabled"
+  id=$(first_inbox_id "$home") || fail "relay must stash a base entry"
+  assert_no_grep 'thread_context' "$home/state/chat-inbox/$id.json" "CROWSNEST_THREAD_CONTEXT=0 must disable enrichment"
+  pass "CROWSNEST_THREAD_CONTEXT=0 reverts the relay to text-only stashing"
+}
+
+test_config_path_resolution_fixes_credentials() {
+  # The credential bug: the post tool passed --config=None, and load_config(None)
+  # reads NO file, leaving credentials_path empty -> ADC -> 403. The shared
+  # resolver now falls back to the backend's default config path. This pins that
+  # behavior hermetically with a fake config module (no backend needed).
+  command -v python3 >/dev/null 2>&1 || { pass "python3 not installed, skipping"; return; }
+  local out
+  out=$(python3 - "$ROOT" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/bin")
+import fm_crowsnest_chat as c
+
+class FakeConfig:
+    @staticmethod
+    def default_config_path():
+        return "/backend/default/config.toml"
+
+assert c.resolve_config_path(FakeConfig, None) == "/backend/default/config.toml", "None must fall back to the backend default"
+assert c.resolve_config_path(FakeConfig, "/explicit.toml") == "/explicit.toml", "explicit --config must win"
+print("ok")
+PY
+)
+  assert_contains "$out" "ok" "resolver must fall back to the backend default when --config is omitted"
+  pass "shared resolver fixes the credential fallback (None -> backend default config path)"
+}
+
 # --- library ----------------------------------------------------------------
 
 test_lib_safe_id() {
@@ -364,6 +549,16 @@ test_post_dry_run_proactive_space_thread
 test_post_reply_unknown_id_errors
 test_post_refuses_empty_text
 test_post_rejects_reply_and_space_together
+test_context_reader_builds_enrichment
+test_context_reader_bounds_limit
+test_context_sh_merges_into_inbox
+test_context_sh_no_thread_is_noop
+test_context_sh_empty_messages_is_noop
+test_context_sh_inert_when_disabled
+test_context_sh_never_resurrects_missing_entry
+test_relay_sync_enrichment_merges_context
+test_relay_context_killswitch
+test_config_path_resolution_fixes_credentials
 test_lib_safe_id
 test_resolve_cli_prefers_new_name
 test_wire_unwire_shim

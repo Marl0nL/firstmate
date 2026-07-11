@@ -121,6 +121,13 @@ fmc_load_config() {
   if [ -n "${CROWSNEST_DRY_RUN+x}" ]; then dry=${CROWSNEST_DRY_RUN-}; else dry=$(fmc_env_get CROWSNEST_DRY_RUN "$cfg"); fi
   # shellcheck disable=SC2034 # FMC_DRY is read by callers after sourcing.
   if _fmc_truthy "$dry"; then FMC_DRY=1; else FMC_DRY=""; fi
+
+  # Thread-context enrichment is ON by default; a falsey CROWSNEST_THREAD_CONTEXT
+  # is the kill switch that reverts the relay to text-only stashing.
+  local ctx
+  if [ -n "${CROWSNEST_THREAD_CONTEXT+x}" ]; then ctx=${CROWSNEST_THREAD_CONTEXT-}; else ctx=$(fmc_env_get CROWSNEST_THREAD_CONTEXT "$cfg"); fi
+  # shellcheck disable=SC2034 # FMC_CONTEXT is read by callers after sourcing.
+  if [ -z "$ctx" ] || _fmc_truthy "$ctx"; then FMC_CONTEXT=1; else FMC_CONTEXT=""; fi
 }
 
 fmc_enabled() {

@@ -5,8 +5,9 @@ backend's own ChatClient.
 This is the transport half of bin/fm-crowsnest-post.sh - the Crowsnest's reverse
 channel. It deliberately reuses the backend's ChatClient (spaces.messages.create
 as the chat.bot app) rather than reinventing OAuth token minting or the Chat REST
-shape in shell. It is name-agnostic across the package rename: it imports whichever
-of the candidate module names is installed.
+shape in shell. Credential resolution is shared with the thread-context reader in
+bin/fm_crowsnest_chat.py so both authenticate as the Chat app the same way the
+backend does (see that module for the credential-resolution contract).
 
 Usage:
   fm-crowsnest-post.py --space <spaces/AAA> [--thread <spaces/.../threads/BBB>]
@@ -20,27 +21,13 @@ and exits 0. On any failure prints a diagnostic to stderr and exits non-zero.
 from __future__ import annotations
 
 import argparse
-import importlib
+import os
 import sys
 
-# Candidate module roots, newest package name first, so the tool keeps working
-# across the local-agents -> local-agents-chat rename without a code change.
-_CANDIDATE_MODULES = ("local_agents_chat", "local_agents")
-
-
-def _import_backend():
-    last_err = None
-    for root in _CANDIDATE_MODULES:
-        try:
-            chat_client = importlib.import_module(f"{root}.chat_client")
-            config = importlib.import_module(f"{root}.config")
-            return chat_client, config
-        except ImportError as exc:  # try the next candidate
-            last_err = exc
-    raise SystemExit(
-        "fm-crowsnest-post: cannot import the local-agents-chat backend "
-        f"(tried {', '.join(_CANDIDATE_MODULES)}): {last_err}"
-    )
+# Import the sibling shared helper by absolute location so this standalone script
+# works no matter the caller's working directory.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fm_crowsnest_chat as chatlib  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -68,10 +55,8 @@ def main(argv: list[str] | None = None) -> int:
         print("fm-crowsnest-post: refusing to post empty text", file=sys.stderr)
         return 2
 
-    chat_client, config = _import_backend()
     try:
-        cfg = config.load_config(args.config)
-        client = chat_client.ChatClient(credentials_path=cfg.credentials_path or None)
+        client, _cfg = chatlib.load_client(args.config)
     except Exception as exc:  # missing/invalid config or credentials - surface cleanly
         print(f"fm-crowsnest-post: config load failed: {exc}", file=sys.stderr)
         return 1
