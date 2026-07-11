@@ -29,6 +29,60 @@ This async model (immediate ack, then a full reply when firstmate has composed
 it) was chosen over a blocking reply so the backend's per-request timeout never
 gates on firstmate's actual work.
 
+## Thread and reply context
+
+When the captain replies inside a thread, the earlier messages are the context
+that makes the reply intelligible ("is it green?" only means something next to
+the message it answers).
+The `local-agents-chat` subprocess agent forwards only the message text plus
+`space`/`thread`/`sender` - never the replied-to message, the raw event, or any
+prior history - so the relay alone cannot see that context.
+The Crowsnest recovers it by reading the thread back from the Chat API.
+
+After the relay has durably stashed the base inbox entry and enqueued the wake,
+it spawns `bin/fm-crowsnest-context.sh` DETACHED (so the instant ack is never
+gated on a network read).
+That helper issues an authenticated `spaces.messages.list` for the thread -
+reusing the backend `ChatClient`'s own credentials via `bin/fm_crowsnest_chat.py`
+- and merges the recent messages into the inbox entry as:
+
+- `thread_context` - a bounded, oldest-first list of `{sender, sender_display_name, text, create_time}` (the just-received message is de-duplicated out).
+- `reply_to` - the most recent prior message in the thread (best-effort; the true quoted-message metadata is not forwarded by the backend, so this is "the last thing said before the captain's message").
+- `sender_display_name` - the captain's display name, harvested from the thread listing (the subprocess agent only forwards the opaque `users/<id>`).
+
+Everything about this is best-effort and additive.
+The durable base entry and the wake are written first, so a failed or slow read
+never loses a message; if the read fails for any reason - no thread, no
+interpreter, no backend, no credentials, no scope, a network error - the entry
+is left exactly as it was and the Crowsnest behaves precisely as it did before
+context existed.
+Enrichment is on by default and switched off with a falsey
+`CROWSNEST_THREAD_CONTEXT`.
+Bounds are tunable via `FMC_CONTEXT_LIMIT` (messages, default 10),
+`FMC_CONTEXT_MAXCHARS` (per-message truncation, default 1200), and
+`FMC_CONTEXT_TIMEOUT` (read seconds, default 20).
+`FMC_CONTEXT_SYNC` forces the enrichment to run inline instead of detached, for
+deterministic tests and debugging; `FMC_CONTEXT_FIXTURE` feeds the reader a
+canned `spaces.messages.list` response so the whole path is exercised offline.
+
+## Posting credentials
+
+Both the post tool and the context reader authenticate as the Chat app exactly
+the way the running backend does, resolved once in `bin/fm_crowsnest_chat.py`.
+When no `--config` / `CROWSNEST_LA_CONFIG` is given they fall back to the
+backend's DEFAULT config path (`~/.config/local-agents/config.toml`), so
+`gcp.credentials_path` (the Chat app's service-account key) is actually read and
+posts go out as the app.
+`LOCAL_AGENTS_CREDENTIALS_PATH` and `GOOGLE_APPLICATION_CREDENTIALS` still
+override, mirroring the backend.
+This is the fix for the 403 ("insufficient authentication scopes") that used to
+require manually exporting `GOOGLE_APPLICATION_CREDENTIALS` before a reply would
+post: the tool previously passed no config path, so it read no credentials and
+silently fell back to user ADC.
+`bin/fm-crowsnest.sh status` now prints a `posting id` line (from the same
+resolution) so an operator can see at a glance whether posts will use the
+service account or fall back to ADC.
+
 ## Components
 
 | Artifact | Role |
@@ -38,12 +92,15 @@ gates on firstmate's actual work.
 | `bin/fm-crowsnest-poll.sh` | The watcher check-shim body. Surfaces the oldest pending inbox entry as a `chat-mention <id>` line. Inert unless enabled. |
 | `bin/fm-crowsnest-post.sh` | The post-back and reverse channel: reply to a pending message, or post proactively into any space/thread. Dry-run capable. |
 | `bin/fm-crowsnest-post.py` | The transport half of the post tool; reuses the backend's own `ChatClient` (no reinvented OAuth). |
+| `bin/fm-crowsnest-context.sh` | Best-effort thread-context enrichment: reads recent thread messages back and merges them into the inbox entry. Spawned detached by the relay so the ack stays instant. |
+| `bin/fm-crowsnest-context.py` | The read half of enrichment; issues the authenticated `spaces.messages.list` for the thread reusing the `ChatClient` credentials. |
+| `bin/fm_crowsnest_chat.py` | Shared transport helper: imports the backend and resolves its config + credentials one way for both the post and context tools. |
 | `bin/fm-crowsnest.sh` | Operator lifecycle CLI: `enable`, `disable`, `register`, `unregister`, `autostart`, `status`. |
 | `.agents/skills/fmc-respond` | Agent-only operating reference: how the live session handles a `chat-mention` wake and posts back. |
 
 ## Runtime state (all gitignored under `state/`)
 
-- `state/chat-inbox/<id>.json` - a pending message: `{id, space, thread, sender, mode, text, received_epoch}`. Present = pending; the live session removes it after answering.
+- `state/chat-inbox/<id>.json` - a pending message: `{id, space, thread, sender, mode, text, received_epoch}`. Present = pending; the live session removes it after answering. Thread-context enrichment (below) may add the optional `thread_context`, `reply_to`, and `sender_display_name` fields; treat them as absent-by-default.
 - `state/chat-outbox/<id>.json` - a dry-run record of a would-be post (only when `CROWSNEST_DRY_RUN` is set).
 - `state/chat-watch.check.sh` - the generated watcher check shim that execs `bin/fm-crowsnest-poll.sh`. Written when enabled, removed when disabled.
 - `state/chat-poll.error` - a one-line relay diagnostic (missing `jq`, an inbox write failure); cleared on the next healthy relay.
@@ -104,6 +161,7 @@ local check shim (the `CROWSNEST:` line in the session-start digest).
 | `CROWSNEST_LA_CLI` | resolved | Override the local-agents(-chat) CLI path. |
 | `CROWSNEST_LA_CONFIG` | backend default | Path to the backend `config.toml` (registry + credentials). |
 | `CROWSNEST_PYTHON` | resolved | Override the interpreter that imports the backend. |
+| `CROWSNEST_THREAD_CONTEXT` | (on) | Falsey turns off thread-context enrichment; the relay then stashes text only. |
 | `CROWSNEST_DRY_RUN` | (off) | Truthy makes `fm-crowsnest-post.sh` record to the outbox instead of posting. |
 
 ## Posting back and the reverse channel
@@ -142,3 +200,10 @@ owns `x-inbox` cleanup.
 - Live posting requires the backend's `cloud` extra and GCP credentials; the
   dry-run path (`CROWSNEST_DRY_RUN=1`) exercises the full compose-and-record loop
   without them.
+- Thread-context enrichment is exercised offline with `FMC_CONTEXT_FIXTURE` (a
+  canned `spaces.messages.list` response) plus `FMC_CONTEXT_SYNC=1` (inline
+  instead of detached), so the reader, the merge, and the relay's enrichment path
+  all run in `tests/fm-crowsnest.test.sh` with no network or GCP.
+- Live context read requires the bot's credentials to be authorized to list
+  messages in the space; when they are not, the read 403s and enrichment simply
+  no-ops, leaving the entry as text-only.

@@ -161,6 +161,13 @@ do_status() {
   echo "  local-agents   : ${FMC_CLI:-<not found>}"
   echo "  python         : ${FMC_PY:-<not found>}"
   echo "  la config      : ${FMC_LA_CONFIG:-<default>}"
+  if [ -n "${FMC_PY:-}" ]; then
+    local ident
+    local -a idargs=()
+    [ -n "${FMC_LA_CONFIG:-}" ] && idargs+=(--config "$FMC_LA_CONFIG")
+    ident=$("$FMC_PY" "$FM_ROOT/bin/fm_crowsnest_chat.py" identity "${idargs[@]}" 2>/dev/null)
+    echo "  posting id     : ${ident:-<unknown>}"
+  fi
   echo "  check shim     : $([ -f "$STATE/chat-watch.check.sh" ] && echo present || echo absent)"
   local n=0
   [ -d "$(fmc_inbox_dir)" ] && n=$(find "$(fmc_inbox_dir)" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')

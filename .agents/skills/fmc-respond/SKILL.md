@@ -62,13 +62,26 @@ the inbox is empty).
 For each `state/chat-inbox/<id>.json`:
 
 1. **Read it.** The object carries `space`, `thread`, `sender`, `mode`, `text`,
-   and `received_epoch`. `text` is the captain's message.
-2. **Compose the answer from live fleet state**, in the captain-facing voice of
+   and `received_epoch`. `text` is the captain's message. It may ALSO carry
+   thread context (see next step); those fields are optional - when they are
+   absent, behave exactly as before, composing from `text` alone.
+2. **Use the thread context when present.** If the entry has `thread_context`
+   (an oldest-first list of recent thread messages), `reply_to` (the most recent
+   prior message - what the captain is most likely responding to), and/or
+   `sender_display_name` (the captain's display name), read them to understand
+   what the captain's `text` is actually about before composing. A short message
+   like "is it green?" or "ship it" usually only makes sense against `reply_to`.
+   These are best-effort: `reply_to` is the last thread message, not a guaranteed
+   quote, so weigh it as context, not gospel. You may greet the captain by
+   `sender_display_name` when it reads naturally. Never quote the raw context
+   back verbatim or expose that you read the thread - just answer with the shared
+   understanding it gives you.
+3. **Compose the answer from live fleet state**, in the captain-facing voice of
    AGENTS.md section 9: talk in outcomes, never firstmate internals (no crewmate,
    worktree, watcher, task-id, harness, or backend vocabulary), and address the
    captain at least once. Give full PR URLs, never bare `#numbers`. Google Chat
    renders simple markdown; keep it scannable.
-3. **Post the reply** into the originating thread:
+4. **Post the reply** into the originating thread:
 
    ```sh
    printf '%s' "$reply" | bin/fm-crowsnest-post.sh --reply <id> -
@@ -78,12 +91,12 @@ For each `state/chat-inbox/<id>.json`:
 
    `--reply <id>` resolves the space and thread from the inbox entry and posts a
    threaded reply, so the answer lands in the same conversation.
-4. **On a successful post, remove that inbox entry:** `rm -f
+5. **On a successful post, remove that inbox entry:** `rm -f
    state/chat-inbox/<id>.json` (and any temp reply file). This is what stops the
    poll from re-surfacing it. The post tool deliberately does NOT remove it - that
    cleanup is yours, only after the post is confirmed, mirroring how fmx-respond
    owns `x-inbox` cleanup.
-5. **On a failed post** (a non-zero exit), leave the inbox entry in place, move on
+6. **On a failed post** (a non-zero exit), leave the inbox entry in place, move on
    to the next, and do not retry blindly. It will be re-surfaced on a later cycle;
    if a specific message keeps failing to post, surface the blocker to the captain
    through the terminal.

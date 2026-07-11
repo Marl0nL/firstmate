@@ -115,5 +115,22 @@ if fm_wake_append check "chat-inbox" "chat-mention $ID" 2>/dev/null; then
 else
   diag "wrote inbox entry $ID but could not enqueue the wake"
 fi
+
+# Best-effort thread-context enrichment. The durable base entry and wake are
+# already written above, so this only ADDS context and can never lose a message.
+# It is spawned DETACHED so the instant ack (this script's whole point) is never
+# gated on a Chat API read; the live session drains the inbox on its next check
+# cycle, by which point enrichment has long since landed. Only attempted when a
+# thread exists and enrichment is not switched off. FMC_CONTEXT_SYNC forces an
+# inline run for deterministic tests/debugging.
+CTX_CMD=${FMC_CONTEXT_CMD:-$FM_ROOT/bin/fm-crowsnest-context.sh}
+if [ -n "${FMC_CONTEXT:-}" ] && [ -n "$THREAD" ] && [ -x "$CTX_CMD" ]; then
+  if [ -n "${FMC_CONTEXT_SYNC:-}" ]; then
+    "$CTX_CMD" "$ID" >/dev/null 2>&1 || true
+  else
+    nohup "$CTX_CMD" "$ID" >/dev/null 2>&1 </dev/null &
+  fi
+fi
+
 ack
 exit 0
