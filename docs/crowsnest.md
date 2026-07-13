@@ -31,39 +31,53 @@ gates on firstmate's actual work.
 
 ## Thread and reply context
 
-When the captain replies inside a thread, the earlier messages are the context
-that makes the reply intelligible ("is it green?" only means something next to
-the message it answers).
-The `local-agents-chat` subprocess agent forwards only the message text plus
-`space`/`thread`/`sender` - never the replied-to message, the raw event, or any
-prior history - so the relay alone cannot see that context.
-The Crowsnest recovers it by reading the thread back from the Chat API.
+When the captain replies inside a thread, the message they replied to is the
+context that makes the reply intelligible ("is it green?" only means something
+next to the message it answers).
 
-After the relay has durably stashed the base inbox entry and enqueued the wake,
-it spawns `bin/fm-crowsnest-context.sh` DETACHED (so the instant ack is never
-gated on a network read).
-That helper issues an authenticated `spaces.messages.list` for the thread -
-reusing the backend `ChatClient`'s own credentials via `bin/fm_crowsnest_chat.py`
-- and merges the recent messages into the inbox entry as:
+The primary source of that context is the backend, with no network read.
+The `local-agents-chat` subprocess agent now forwards the TRUE replied-to/quoted
+message and the sender's display name to the relay as `LOCAL_AGENTS_*` env vars -
+a compact `LOCAL_AGENTS_CONTEXT_JSON` blob (`{sender_display_name,
+space_display_name, quoted_message}`) plus the convenience scalars
+`LOCAL_AGENTS_SENDER_DISPLAY_NAME`, `LOCAL_AGENTS_QUOTED_TEXT`,
+`LOCAL_AGENTS_QUOTED_SENDER`, `LOCAL_AGENTS_QUOTED_NAME`.
+So for the common Reply/Quote case the relay stashes the exact quoted message
+directly, without any Chat API read.
+`bin/fm-crowsnest-relay.sh` prefers the JSON blob (scalars as fallback) and, when
+a quote is present, writes it into the inbox entry as:
 
-- `thread_context` - a bounded, oldest-first list of `{sender, sender_display_name, text, create_time}` (the just-received message is de-duplicated out).
-- `reply_to` - the most recent prior message in the thread (best-effort; the true quoted-message metadata is not forwarded by the backend, so this is "the last thing said before the captain's message").
-- `sender_display_name` - the captain's display name, harvested from the thread listing (the subprocess agent only forwards the opaque `users/<id>`).
+- `sender_display_name` - the captain's display name (the subprocess agent otherwise forwards only the opaque `users/<id>`); set for any forwarded message, quote or not.
+- `quoted` - the true quoted-message metadata `{name, quote_type, snapshot: {text, formatted_text, sender, create_time}}` (only the present sub-fields), carrying the exact message the captain replied to.
+- `reply_to` - the accurate replacement for the old best-effort guess: `{sender, sender_display_name, text, create_time}` built from the quote's inline text, whenever the quote carries it.
 
-Everything about this is best-effort and additive.
+A message with no quote adds none of `quoted`/`reply_to` and is stashed exactly
+as before, and a falsey `CROWSNEST_THREAD_CONTEXT` reverts the relay to text-only
+stashing.
+
+Two cases still need a read, so after stashing the base entry and enqueueing the
+wake the relay spawns `bin/fm-crowsnest-context.sh` DETACHED (the instant ack is
+never gated on a network read), reusing the backend `ChatClient`'s own
+credentials via `bin/fm_crowsnest_chat.py`:
+
+- Name-only quote (the report's F4 case): when the backend forwarded a quoted message `name` but no inline text, the helper hydrates it with a single authenticated `spaces.messages.get(name)` - which, unlike `list`, accepts the `chat.bot` scope this token carries - and fills in the quote's `snapshot` and `reply_to`. An inline quote is already authoritative, so no read is spawned for it.
+- No quote at all: the helper falls back to a best-effort `spaces.messages.list` for the thread and merges a bounded, oldest-first `thread_context` (a list of `{sender, sender_display_name, text, create_time}`, the just-received message de-duplicated out). This `chat.bot`+`list` read is KNOWN-BROKEN - `spaces.messages.list` no longer accepts the `chat.bot` scope, so it 403s and this path is a near-total no-op today; it is retained only as best-effort for the no-quote case.
+
+Everything about the read half is best-effort and additive.
 The durable base entry and the wake are written first, so a failed or slow read
 never loses a message; if the read fails for any reason - no thread, no
 interpreter, no backend, no credentials, no scope, a network error - the entry
-is left exactly as it was and the Crowsnest behaves precisely as it did before
-context existed.
+keeps whatever the relay already stashed and the Crowsnest behaves precisely as
+it did before context existed.
 Enrichment is on by default and switched off with a falsey
-`CROWSNEST_THREAD_CONTEXT`.
+`CROWSNEST_THREAD_CONTEXT` (which disables both the forwarded stash and the read).
 Bounds are tunable via `FMC_CONTEXT_LIMIT` (messages, default 10),
 `FMC_CONTEXT_MAXCHARS` (per-message truncation, default 1200), and
 `FMC_CONTEXT_TIMEOUT` (read seconds, default 20).
 `FMC_CONTEXT_SYNC` forces the enrichment to run inline instead of detached, for
 deterministic tests and debugging; `FMC_CONTEXT_FIXTURE` feeds the reader a
-canned `spaces.messages.list` response so the whole path is exercised offline.
+canned `spaces.messages.list` response and `FMC_GET_FIXTURE` a canned
+`spaces.messages.get` message, so the whole path is exercised offline.
 
 ## Posting credentials
 
@@ -92,15 +106,15 @@ service account or fall back to ADC.
 | `bin/fm-crowsnest-poll.sh` | The watcher check-shim body. Surfaces the oldest pending inbox entry as a `chat-mention <id>` line. Inert unless enabled. |
 | `bin/fm-crowsnest-post.sh` | The post-back and reverse channel: reply to a pending message, or post proactively into any space/thread. Dry-run capable. |
 | `bin/fm-crowsnest-post.py` | The transport half of the post tool; reuses the backend's own `ChatClient` (no reinvented OAuth). |
-| `bin/fm-crowsnest-context.sh` | Best-effort thread-context enrichment: reads recent thread messages back and merges them into the inbox entry. Spawned detached by the relay so the ack stays instant. |
-| `bin/fm-crowsnest-context.py` | The read half of enrichment; issues the authenticated `spaces.messages.list` for the thread reusing the `ChatClient` credentials. |
+| `bin/fm-crowsnest-context.sh` | The read half's dispatcher: hydrates a name-only forwarded quote via `spaces.messages.get`, or falls back to the best-effort thread `list`, and merges the result into the inbox entry. Spawned detached by the relay (never for an already-inline quote) so the ack stays instant. |
+| `bin/fm-crowsnest-context.py` | The read transport: `--get-message` hydrates one quoted message (`get` accepts `chat.bot`); `--space`/`--thread` is the best-effort thread `list` (known-broken on `chat.bot`). Reuses the `ChatClient` credentials. |
 | `bin/fm_crowsnest_chat.py` | Shared transport helper: imports the backend and resolves its config + credentials one way for both the post and context tools. |
 | `bin/fm-crowsnest.sh` | Operator lifecycle CLI: `enable`, `disable`, `register`, `unregister`, `autostart`, `status`. |
 | `.agents/skills/fmc-respond` | Agent-only operating reference: how the live session handles a `chat-mention` wake and posts back. |
 
 ## Runtime state (all gitignored under `state/`)
 
-- `state/chat-inbox/<id>.json` - a pending message: `{id, space, thread, sender, mode, text, received_epoch}`. Present = pending; the live session removes it after answering. Thread-context enrichment (below) may add the optional `thread_context`, `reply_to`, and `sender_display_name` fields; treat them as absent-by-default.
+- `state/chat-inbox/<id>.json` - a pending message: `{id, space, thread, sender, mode, text, received_epoch}`. Present = pending; the live session removes it after answering. Thread and reply context (above) may add the optional `sender_display_name`, `quoted`, `reply_to`, and `thread_context` fields; treat them as absent-by-default.
 - `state/chat-outbox/<id>.json` - a dry-run record of a would-be post (only when `CROWSNEST_DRY_RUN` is set).
 - `state/chat-watch.check.sh` - the generated watcher check shim that execs `bin/fm-crowsnest-poll.sh`. Written when enabled, removed when disabled.
 - `state/chat-poll.error` - a one-line relay diagnostic (missing `jq`, an inbox write failure); cleared on the next healthy relay.
@@ -200,10 +214,15 @@ owns `x-inbox` cleanup.
 - Live posting requires the backend's `cloud` extra and GCP credentials; the
   dry-run path (`CROWSNEST_DRY_RUN=1`) exercises the full compose-and-record loop
   without them.
-- Thread-context enrichment is exercised offline with `FMC_CONTEXT_FIXTURE` (a
-  canned `spaces.messages.list` response) plus `FMC_CONTEXT_SYNC=1` (inline
-  instead of detached), so the reader, the merge, and the relay's enrichment path
-  all run in `tests/fm-crowsnest.test.sh` with no network or GCP.
-- Live context read requires the bot's credentials to be authorized to list
-  messages in the space; when they are not, the read 403s and enrichment simply
-  no-ops, leaving the entry as text-only.
+- Thread and reply context is exercised offline in `tests/fm-crowsnest.test.sh`
+  with no network or GCP: the relay's forwarded-quote stash is env-driven, the
+  name-only get-hydrate uses `FMC_GET_FIXTURE` (a canned `spaces.messages.get`
+  message), and the best-effort thread `list` uses `FMC_CONTEXT_FIXTURE` (a canned
+  `spaces.messages.list` response); `FMC_CONTEXT_SYNC=1` runs enrichment inline
+  instead of detached.
+- The common Reply/Quote case needs no live read: the backend forwards the true
+  quoted message, so reply context is accurate offline and in DMs/private threads.
+- The best-effort thread `list` read is known-broken: `spaces.messages.list` no
+  longer accepts the `chat.bot` scope the `ChatClient` mints, so it 403s and the
+  no-quote enrichment path simply no-ops, leaving the entry with whatever the
+  relay already stashed (see the report's Gap 3).
