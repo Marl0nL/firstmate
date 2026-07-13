@@ -65,17 +65,29 @@ For each `state/chat-inbox/<id>.json`:
    and `received_epoch`. `text` is the captain's message. It may ALSO carry
    thread context (see next step); those fields are optional - when they are
    absent, behave exactly as before, composing from `text` alone.
-2. **Use the thread context when present.** If the entry has `thread_context`
-   (an oldest-first list of recent thread messages), `reply_to` (the most recent
-   prior message - what the captain is most likely responding to), and/or
-   `sender_display_name` (the captain's display name), read them to understand
-   what the captain's `text` is actually about before composing. A short message
-   like "is it green?" or "ship it" usually only makes sense against `reply_to`.
-   These are best-effort: `reply_to` is the last thread message, not a guaranteed
-   quote, so weigh it as context, not gospel. You may greet the captain by
-   `sender_display_name` when it reads naturally. Never quote the raw context
-   back verbatim or expose that you read the thread - just answer with the shared
-   understanding it gives you.
+2. **Use the reply/thread context when present.**
+   The entry may carry, in descending order of trust:
+   - `quoted` - the TRUE quoted message the captain replied to
+     (`{name, quote_type, snapshot: {text, formatted_text, sender, create_time}}`),
+     forwarded straight from Chat's Reply/Quote affordance.
+     When it is present, the captain is answering that exact message - trust it.
+   - `reply_to` - the message the captain is most likely responding to
+     (`{sender, sender_display_name, text, create_time}`).
+     When a `quoted` field is also present, `reply_to` IS that true quote and can
+     be trusted; with no `quoted` field it is a best-effort guess (the last thing
+     said in the thread), so weigh it as context, not gospel.
+   - `thread_context` - an oldest-first list of recent thread messages
+     (best-effort; the underlying thread read is often unavailable, so this is
+     frequently absent).
+   - `sender_display_name` - the captain's display name (otherwise only the opaque
+     `users/<id>` is forwarded).
+   Read whichever are present to understand what the captain's `text` is actually
+   about before composing.
+   A short message like "is it green?" or "ship it" usually only makes sense
+   against the quoted/replied-to message.
+   You may greet the captain by `sender_display_name` when it reads naturally.
+   Never quote the raw context back verbatim or expose that you read the thread -
+   just answer with the shared understanding it gives you.
 3. **Compose the answer from live fleet state**, in the captain-facing voice of
    AGENTS.md section 9: talk in outcomes, never firstmate internals (no crewmate,
    worktree, watcher, task-id, harness, or backend vocabulary), and address the

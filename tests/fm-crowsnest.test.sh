@@ -404,6 +404,152 @@ PY
   pass "shared resolver fixes the credential fallback (None -> backend default config path)"
 }
 
+# --- forwarded quote context (backend "Option A") ---------------------------
+#
+# The backend now forwards the TRUE replied-to/quoted message + sender display
+# name to the relay as LOCAL_AGENTS_* env vars, so the relay populates reply
+# context directly with NO Chat API read for the common Reply/Quote case. These
+# are fixture-/env-driven and touch no network.
+
+# entry_jq <home> <jq-filter>: succeed iff the filter is truthy against the
+# home's single stashed inbox entry.
+entry_jq() {
+  local home=$1 filter=$2 id
+  id=$(first_inbox_id "$home") || return 1
+  jq -e "$filter" "$home/state/chat-inbox/$id.json" >/dev/null 2>&1
+}
+
+# A compact LOCAL_AGENTS_CONTEXT_JSON blob carrying a true inline quote.
+QUOTE_CTX_JSON='{"sender_display_name":"Captain Marlon","space_display_name":"Ops","quoted_message":{"name":"spaces/AAA/messages/M1","quote_type":"REPLY","snapshot":{"text":"the login PR is up","formatted_text":"the *login PR* is up","sender":"firstmate","create_time":"2026-07-13T10:00:00Z"}}}'
+
+test_relay_forwarded_quote_json_populates_entry() {
+  local home
+  home=$(make_home fwd-quote-json on)
+  printf 'ship it' | env FM_HOME="$home" LOCAL_AGENTS_SPACE='spaces/AAA' \
+    LOCAL_AGENTS_THREAD='spaces/AAA/threads/T1' LOCAL_AGENTS_SENDER='users/cap' \
+    LOCAL_AGENTS_CONTEXT_JSON="$QUOTE_CTX_JSON" "$RELAY" >/dev/null
+  entry_jq "$home" '.sender_display_name == "Captain Marlon"' || fail "relay must set sender_display_name from the forwarded blob"
+  entry_jq "$home" '.quoted.snapshot.text == "the login PR is up"' || fail "relay must stash the true quoted message text"
+  entry_jq "$home" '.quoted.quote_type == "REPLY"' || fail "relay must preserve the quote type"
+  entry_jq "$home" '.reply_to.text == "the login PR is up"' || fail "relay must set reply_to from the true quote"
+  entry_jq "$home" '.reply_to.sender_display_name == "firstmate"' || fail "reply_to must name the quoted sender"
+  pass "relay populates quoted/reply_to/sender_display_name from LOCAL_AGENTS_CONTEXT_JSON"
+}
+
+test_relay_forwarded_quote_scalar_fallback() {
+  local home
+  home=$(make_home fwd-quote-scalar on)
+  # No JSON blob; only the convenience scalars are set.
+  printf 'ok' | env FM_HOME="$home" LOCAL_AGENTS_SPACE='spaces/AAA' \
+    LOCAL_AGENTS_THREAD='spaces/AAA/threads/T1' LOCAL_AGENTS_SENDER='users/cap' \
+    LOCAL_AGENTS_SENDER_DISPLAY_NAME='Cap' LOCAL_AGENTS_QUOTED_TEXT='prior message' \
+    LOCAL_AGENTS_QUOTED_SENDER='firstmate' LOCAL_AGENTS_QUOTED_NAME='spaces/AAA/messages/M9' \
+    "$RELAY" >/dev/null
+  entry_jq "$home" '.sender_display_name == "Cap"' || fail "scalar fallback must set the display name"
+  entry_jq "$home" '.quoted.name == "spaces/AAA/messages/M9"' || fail "scalar fallback must stash the quoted name"
+  entry_jq "$home" '.quoted.snapshot.text == "prior message"' || fail "scalar fallback must stash the quoted text"
+  entry_jq "$home" '.reply_to.text == "prior message"' || fail "scalar fallback must set reply_to"
+  pass "relay falls back to the convenience scalars when no JSON blob is forwarded"
+}
+
+test_relay_forwarded_display_name_without_quote() {
+  local home id
+  home=$(make_home fwd-noquote on)
+  printf 'hi' | env FM_HOME="$home" LOCAL_AGENTS_SPACE='spaces/AAA' \
+    LOCAL_AGENTS_THREAD='spaces/AAA/threads/T1' LOCAL_AGENTS_SENDER='users/cap' \
+    LOCAL_AGENTS_CONTEXT_JSON='{"sender_display_name":"Cap","space_display_name":"Ops","quoted_message":null}' \
+    "$RELAY" >/dev/null
+  id=$(first_inbox_id "$home") || fail "relay must stash"
+  entry_jq "$home" '.sender_display_name == "Cap"' || fail "relay must set the display name even without a quote"
+  assert_no_grep '"quoted"' "$home/state/chat-inbox/$id.json" "a no-quote entry must not carry a quoted field"
+  assert_no_grep '"reply_to"' "$home/state/chat-inbox/$id.json" "a no-quote entry must not carry a reply_to field"
+  pass "relay forwards the sender display name for a no-quote message without inventing a quote"
+}
+
+test_relay_no_forwarded_context_is_unchanged() {
+  local home id
+  home=$(make_home fwd-none on)
+  printf 'plain message' | env FM_HOME="$home" LOCAL_AGENTS_SPACE='spaces/AAA' \
+    LOCAL_AGENTS_THREAD='spaces/AAA/threads/T1' LOCAL_AGENTS_SENDER='users/cap' "$RELAY" >/dev/null
+  id=$(first_inbox_id "$home") || fail "relay must stash"
+  assert_no_grep 'sender_display_name' "$home/state/chat-inbox/$id.json" "no forwarded context must add no display name"
+  assert_no_grep 'quoted' "$home/state/chat-inbox/$id.json" "no forwarded context must add no quoted field"
+  assert_no_grep 'reply_to' "$home/state/chat-inbox/$id.json" "no forwarded context must add no reply_to"
+  assert_grep '"text":"plain message"' "$home/state/chat-inbox/$id.json" "the base entry is stashed exactly as before"
+  pass "relay stashes exactly as before when the backend forwards no context"
+}
+
+test_relay_forwarded_quote_killswitch() {
+  local home id
+  home=$(make_home fwd-kill on)
+  printf 'x' | env FM_HOME="$home" CROWSNEST_THREAD_CONTEXT=0 LOCAL_AGENTS_SPACE='spaces/AAA' \
+    LOCAL_AGENTS_THREAD='spaces/AAA/threads/T1' LOCAL_AGENTS_SENDER='users/cap' \
+    LOCAL_AGENTS_CONTEXT_JSON="$QUOTE_CTX_JSON" "$RELAY" >/dev/null
+  id=$(first_inbox_id "$home") || fail "relay must stash"
+  assert_no_grep 'quoted' "$home/state/chat-inbox/$id.json" "the kill switch must revert to text-only stashing"
+  assert_no_grep 'sender_display_name' "$home/state/chat-inbox/$id.json" "the kill switch must drop forwarded context"
+  pass "CROWSNEST_THREAD_CONTEXT=0 reverts forwarded-context stashing to text-only"
+}
+
+test_context_py_get_message_builds_enrichment() {
+  command -v python3 >/dev/null 2>&1 || { pass "python3 not installed, skipping"; return; }
+  local home fix out
+  home=$(make_home get-py on)
+  fix="$home/get.json"
+  cat > "$fix" <<'JSON'
+{"name":"spaces/AAA/messages/M7","sender":{"name":"users/bot","displayName":"firstmate"},"text":"the login PR is up","formattedText":"the *login PR* is up","createTime":"2026-07-13T09:59:00Z"}
+JSON
+  out=$(FMC_GET_FIXTURE="$fix" python3 "$CTX_PY" --get-message spaces/AAA/messages/M7)
+  jq_true "$out" '.reply_to.text == "the login PR is up"' || fail "get enrichment must carry reply_to text"
+  jq_true "$out" '.reply_to.sender_display_name == "firstmate"' || fail "get enrichment reply_to must name the sender"
+  jq_true "$out" '.quoted_snapshot.text == "the login PR is up"' || fail "get enrichment must carry the quoted snapshot text"
+  jq_true "$out" '.quoted_snapshot.formatted_text == "the *login PR* is up"' || fail "get enrichment must carry formatted text"
+  pass "context.py --get-message hydrates one quoted message into reply_to + quoted_snapshot"
+}
+
+test_context_sh_get_hydrates_name_only_quote() {
+  command -v python3 >/dev/null 2>&1 || { pass "python3 not installed, skipping"; return; }
+  local home id fix
+  home=$(make_home ctx-hydrate on)
+  # Relay stashes a name-only quote (no inline snapshot text) - the report's F4 case.
+  printf 'ship it' | env FM_HOME="$home" LOCAL_AGENTS_SPACE='spaces/AAA' \
+    LOCAL_AGENTS_THREAD='spaces/AAA/threads/T1' LOCAL_AGENTS_SENDER='users/cap' \
+    LOCAL_AGENTS_CONTEXT_JSON='{"sender_display_name":"Cap","quoted_message":{"name":"spaces/AAA/messages/M7","quote_type":"REPLY"}}' \
+    "$RELAY" >/dev/null
+  id=$(first_inbox_id "$home") || fail "relay must stash a name-only quote"
+  entry_jq "$home" '.quoted.name == "spaces/AAA/messages/M7"' || fail "setup: the quote name must be stashed"
+  entry_jq "$home" '.reply_to == null' || fail "setup: a name-only quote has no reply_to yet"
+  fix="$home/get.json"
+  cat > "$fix" <<'JSON'
+{"name":"spaces/AAA/messages/M7","sender":{"name":"users/bot","displayName":"firstmate"},"text":"the login PR is up","createTime":"2026-07-13T09:59:00Z"}
+JSON
+  env FM_HOME="$home" FMC_GET_FIXTURE="$fix" "$CTX_SH" "$id"
+  entry_jq "$home" '.quoted.snapshot.text == "the login PR is up"' || fail "get-hydrate must fill in the quoted snapshot text"
+  entry_jq "$home" '.quoted.quote_type == "REPLY"' || fail "get-hydrate must preserve the original quote metadata"
+  entry_jq "$home" '.reply_to.text == "the login PR is up"' || fail "get-hydrate must set reply_to from the fetched message"
+  pass "context.sh hydrates a name-only forwarded quote via a single spaces.messages.get"
+}
+
+test_context_sh_inline_quote_skips_readback() {
+  command -v python3 >/dev/null 2>&1 || { pass "python3 not installed, skipping"; return; }
+  local home id fix before after
+  home=$(make_home ctx-inline on)
+  # Relay stashes an inline quote (text present) -> reply context is authoritative.
+  printf 'ship it' | env FM_HOME="$home" LOCAL_AGENTS_SPACE='spaces/AAA' \
+    LOCAL_AGENTS_THREAD='spaces/AAA/threads/T1' LOCAL_AGENTS_SENDER='users/cap' \
+    LOCAL_AGENTS_CONTEXT_JSON="$QUOTE_CTX_JSON" "$RELAY" >/dev/null
+  id=$(first_inbox_id "$home") || fail "relay must stash an inline quote"
+  before=$(jq -c '.reply_to' "$home/state/chat-inbox/$id.json")
+  # Even handed a list fixture that WOULD produce a different guess, context.sh
+  # must not overwrite the authoritative forwarded reply_to.
+  fix=$(make_ctx_fixture "$home")
+  env FM_HOME="$home" FMC_CONTEXT_FIXTURE="$fix" "$CTX_SH" "$id"
+  after=$(jq -c '.reply_to' "$home/state/chat-inbox/$id.json")
+  [ "$before" = "$after" ] || fail "an inline forwarded quote must not be clobbered by the read-back"
+  assert_no_grep 'thread_context' "$home/state/chat-inbox/$id.json" "an inline quote must skip the thread read entirely"
+  pass "context.sh treats an inline forwarded quote as authoritative and skips the read-back"
+}
+
 # --- library ----------------------------------------------------------------
 
 test_lib_safe_id() {
@@ -559,6 +705,14 @@ test_context_sh_never_resurrects_missing_entry
 test_relay_sync_enrichment_merges_context
 test_relay_context_killswitch
 test_config_path_resolution_fixes_credentials
+test_relay_forwarded_quote_json_populates_entry
+test_relay_forwarded_quote_scalar_fallback
+test_relay_forwarded_display_name_without_quote
+test_relay_no_forwarded_context_is_unchanged
+test_relay_forwarded_quote_killswitch
+test_context_py_get_message_builds_enrichment
+test_context_sh_get_hydrates_name_only_quote
+test_context_sh_inline_quote_skips_readback
 test_lib_safe_id
 test_resolve_cli_prefers_new_name
 test_wire_unwire_shim
