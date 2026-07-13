@@ -558,9 +558,14 @@ test_arm_starts_and_self_heals() {
   pass "arm starts+confirms a fresh watcher on a clean lock and self-heals a dead-pid lock (never healthy off a dead pid)"
 }
 
-test_arm_hup_cleans_child_and_temp_output() {
-  local dir state fakebin armout i armpid lock_pid status
-  dir=$(make_case arm-hup-cleanup)
+test_arm_hup_leaves_watcher_running_in_own_session() {
+  # A signal to the arm must NOT take the watcher down with it: the watcher is
+  # forked with setsid into its own session, and the arm's HUP/TERM/INT traps
+  # deliberately do not kill it, so a reaped launcher leaves proactive
+  # supervision running. The arm still exits (129 on HUP) and still removes its
+  # own temp capture file.
+  local dir state fakebin armout i armpid lock_pid status wsess
+  dir=$(make_case arm-hup-survives)
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
@@ -572,20 +577,33 @@ test_arm_hup_cleans_child_and_temp_output() {
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP cleanup check"
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP survival check"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$lock_pid" ] || fail "arm did not record a watcher lock pid"
+  # setsid makes the watcher its own session leader (session id == its own pid),
+  # proving it is not in the arm's process group.
+  wsess=$(ps -o sess= -p "$lock_pid" 2>/dev/null | tr -d ' ')
+  [ "$wsess" = "$lock_pid" ] || fail "watcher child is not its own session leader (sess '$wsess' != pid '$lock_pid')"
   kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
   wait_for_exit "$armpid" 80
   status=$?
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
+  # Let the arm's death settle, then confirm the watcher is still alive.
   i=0
-  while [ "$i" -lt 80 ] && is_live_non_zombie "$lock_pid"; do
+  while [ "$i" -lt 20 ]; do
     sleep 0.1
     i=$((i + 1))
   done
-  ! is_live_non_zombie "$lock_pid" || fail "HUP cleanup left watcher child running"
-  ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP cleanup left temp output behind"
-  pass "arm cleans child watcher and temp output on HUP"
+  is_live_non_zombie "$lock_pid" || fail "HUP on the arm reaped the watcher (regression: the watcher must survive its launcher)"
+  ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP left the arm temp output behind"
+  # The surviving watcher is now this test's to stop (the arm no longer does).
+  kill -TERM "$lock_pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 40 ] && is_live_non_zombie "$lock_pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  pass "arm leaves the watcher running in its own session on HUP (survives reaping)"
 }
 
 test_arm_propagates_immediate_wake_before_confirmation() {
@@ -721,7 +739,7 @@ test_watch_restart_reports_healthy_peer_without_attaching
 test_watcher_self_evicts_on_lock_takeover
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_arm_starts_and_self_heals
-test_arm_hup_cleans_child_and_temp_output
+test_arm_hup_leaves_watcher_running_in_own_session
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
