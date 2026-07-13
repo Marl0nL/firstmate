@@ -164,28 +164,52 @@ if [ "$mode" = arm ] && healthy_watcher; then
   attach_and_wait "$HEALTHY_PID"
 fi
 
-# Start a watcher as a tracked child and confirm it before settling in. The child
-# stays our child for its whole life: we wait on it, so killing this arm (the
-# harness-tracked task) tears the watcher down too, and the watcher's eventual
-# wake exit propagates out so the harness re-notifies firstmate.
+# Start the watcher as a tracked child in its OWN session (setsid) and confirm it
+# before settling in.
+# We still wait on the child, so a normal wake exit propagates out and the harness
+# re-notifies firstmate, and $! stays the watcher pid the confirm and lock checks
+# match on.
+# The own-session fork is what lets the watcher SURVIVE this arm being reaped: a
+# process-group- or session-scoped signal to the arm (a herdr/terminal SIGHUP, or
+# the harness stopping this background task) no longer reaches the watcher, and
+# the signal traps below deliberately do NOT kill it either.
+# Intentional watcher teardown is --restart only (an explicit kill of the recorded
+# lock pid), so a reaped launcher leaves proactive supervision running instead of
+# taking it down.
 child=
 child_out=
-cleanup_child() {
-  if [ -n "$child" ] && fm_pid_alive "$child"; then
-    kill -TERM "$child" 2>/dev/null || true
-  fi
+# rm_child_out removes ONLY the arm's temp capture file.
+# It deliberately does NOT kill the watcher, so a signal to this arm cannot take
+# the forked watcher down with it.
+rm_child_out() {
   if [ -n "$child_out" ]; then
     rm -f "$child_out" 2>/dev/null || true
   fi
 }
-trap 'cleanup_child; exit 129' HUP
-trap 'cleanup_child; exit 143' TERM INT
+# kill_child stops the forked watcher child explicitly.
+# It is used ONLY on the FAILED-to-confirm path, where the child never became the
+# healthy singleton and must not be left behind; it is intentionally NOT wired
+# into the signal traps.
+kill_child() {
+  if [ -n "$child" ] && fm_pid_alive "$child"; then
+    kill -TERM "$child" 2>/dev/null || true
+  fi
+}
+trap 'rm_child_out; exit 129' HUP
+trap 'rm_child_out; exit 143' TERM INT
 
 child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
-"$WATCH" >"$child_out" &
+# setsid forks the watcher into its OWN session and process group so a
+# process-group- or session-scoped signal aimed at this arm cannot reap it, while
+# $! stays the watcher pid and it stays a wait-able child (setsid execs in place
+# because the backgrounded subshell is not a group leader in a non-job-control
+# script).
+# Full stdio redirection detaches it from the arm's streams so it never holds a
+# controlling terminal.
+setsid "$WATCH" >"$child_out" 2>&1 </dev/null &
 child=$!
 child_done=0
 
@@ -234,6 +258,7 @@ done
 
 trap - HUP TERM INT
 echo "watcher: FAILED - no live watcher with a fresh beacon"
-cleanup_child
+kill_child
+rm_child_out
 wait "$child" 2>/dev/null || true
 exit 1
