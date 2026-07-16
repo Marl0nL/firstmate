@@ -159,6 +159,33 @@ fm_composer_strip_ghost() {
   '
 }
 
+# fm_composer_trim: trim leading/trailing blanks from a composer row, treating
+# the NON-BREAKING SPACE (U+00A0) as a blank alongside the locale's [:space:]
+# class. Real claude 2.x pads its empty composer row with an NBSP after the
+# prompt glyph ("❯ "), and glibc's en_US.UTF-8 [:space:] does NOT include
+# U+00A0, so a plain bash trim leaves it behind (verified live on herdr 0.7.4,
+# docs/herdr-backend.md "Incident (2026-07-17)"). That stray NBSP made the row
+# miss the exact bare-glyph cases below, strip to a non-empty remainder, and
+# read `pending` forever - the away-mode injection wedge. Interior NBSPs fold to
+# a plain space, so a padded row with real text still reads pending on its text.
+# Normalizing here, BEFORE the glyph cases, is what keeps the safety rule intact:
+# a padded dead-shell row (">  ") trims back to the exact `>` case and stays
+# `unknown` instead of falling through to the post-glyph-strip empty path.
+# FM_COMPOSER_NBSP is spelled as an explicit UTF-8 byte escape rather than a
+# literal NBSP (invisible in source, and an editor or a copy-paste could
+# silently normalize it away) or $'\u00a0' (stock macOS Bash 3.2 does not
+# understand \u and would yield those six literal characters instead, silently
+# disabling this fix on macOS while every assertion still read green).
+FM_COMPOSER_NBSP=$'\xc2\xa0'
+
+fm_composer_trim() {  # <content>
+  local c=$1
+  c=${c//"$FM_COMPOSER_NBSP"/ }
+  c="${c#"${c%%[![:space:]]*}"}"
+  c="${c%"${c##*[![:space:]]}"}"
+  printf '%s' "$c"
+}
+
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, or a structurally-identified bare AGENT
@@ -182,6 +209,11 @@ fm_composer_idle_matches() {
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
+  # Re-trim both inputs through the NBSP-aware owner. Callers already trim, but
+  # only this trim knows about harness NBSP padding, and the exact-match glyph
+  # cases below (the dead-shell safety rule) depend on it having run first.
+  content=$(fm_composer_trim "$content")
+  plain_content=$(fm_composer_trim "$plain_content")
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›') printf 'empty'; return 0 ;;
@@ -210,8 +242,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
     '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
   esac
-  content="${content#"${content%%[![:space:]]*}"}"
-  content="${content%"${content##*[![:space:]]}"}"
+  content=$(fm_composer_trim "$content")
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Known idle placeholder (matched again after the leading glyph was stripped,
   # e.g. "❯ Type a message...").

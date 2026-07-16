@@ -785,6 +785,66 @@ The luminance rule assumes a dark terminal theme (the fleet reality); the SGR-2 
 **Resolved: backend-independent wedge alarm.** The max-defer wedge alarm (`inject_wedge_alarm`, `bin/fm-supervise-daemon.sh`) formerly alarmed into the void because its only active signal was a tmux client status-line flash, skipped for herdr, leaving only the passive `state/.subsuper-inject-wedged` marker.
 It now also attempts a configurable active alert independent of the supervisor backend; [`wedge-alarm.md`](wedge-alarm.md) owns its channels and verification evidence.
 
+## Incident (2026-07-17): away-mode injection wedged on real claude's NON-BREAKING SPACE composer padding
+
+Away mode was silently useless on this host: between 00:09 and 01:35 the daemon deferred every injection into the claude supervisor pane (zero successful sends) while three crews finished, and the captain learned nothing until the durable wedge marker was read back by hand.
+
+**Reported diagnosis, and why it was wrong.** The task came in diagnosed as a Pi-specific veto in `fm_backend_herdr_composer_state`: the `elif` branch that sets `found=0` when `FM_BACKEND_HERDR_PI_PAIR_FOUND` is 0 and an unmatched separator sits below the generic match, which was believed to fire unconditionally for claude (claude draws a horizontal rule between its composer and footer) and return `unknown` forever.
+That branch is real, but it is NOT reachable for a normal claude composer, and the observed verdict was `pending`, not `unknown`.
+Real claude draws a full-width rule BOTH above and below its composer, so `fm_backend_herdr_pi_composer_find` finds a COMPLETE pair and `FM_BACKEND_HERDR_PI_PAIR_FOUND` is 1 - the `elif` never runs.
+The first branch also declines correctly, because its `generic_line < FM_BACKEND_HERDR_PI_PAIR_OPEN_LINE` guard is false when the `❯` row sits BETWEEN the pair (18 < 17 is false).
+The suggested fix (making the veto identity-aware, so a known non-Pi agent keeps its generic verdict) was therefore not applied: the branch only fires when the composer's OPENING rule has scrolled out of the capture window, and in that shape the generic match cannot be proven current, so returning the stale generic verdict would have widened the guard toward a false `empty` - the one direction that types into a live pane.
+The conservative refusal is correct and is now pinned by `test_composer_state_claude_single_trailing_rule_below_prompt_is_unknown`.
+
+**Root cause: U+00A0.** Real claude 2.x pads its EMPTY composer row with a NON-BREAKING SPACE after the prompt glyph, and herdr returns CRLF line endings from `pane read --format ansi`.
+Captured live from a real `claude` in an isolated lab session (herdr 0.7.4, `fm-lab-veto-p3b-*`, the `default` session untouched):
+
+```
+$ herdr --session <lab> pane read w1:p1 --format ansi --source recent --lines 20 | sed -n '18p' | xxd
+00000000: e29d afc2 a00d                           ......
+#         ❯        NBSP  CR
+```
+
+That is `❯` (`e2 9d af`) + `c2 a0` + `0d`, between two full-width `─` rules, with the footer `⏸ manual mode on · ? for shortcuts` below.
+glibc's `en_US.UTF-8` `[:space:]` class does NOT contain U+00A0, so the classifier's plain bash trim stripped the CR but left the NBSP attached:
+
+```
+$ . bin/fm-composer-lib.sh
+after strip_ghost:  e29d afc2 a00d
+after bash trim:    e29d afc2 a0      # the NBSP survived
+classify verdict:   pending
+```
+
+With the NBSP still attached the row never matched the exact bare-`❯` case, so the classifier stripped the leading glyph, found a non-empty remainder (the NBSP), and returned `pending` on every poll, forever.
+`inject_msg` (`bin/fm-supervise-daemon.sh`) requires an affirmative `empty` and logs `inject deferred: supervisor composer not confirmed-empty (state=pending: ...)`, so every escalation deferred.
+Every pre-existing claude fixture used a plain ASCII `❯` with no NBSP and no CRLF, which is exactly why the suite stayed green through three prior composer incidents.
+
+**Fix: NBSP normalization at the one shared owner.** The NBSP is emitted by the AGENT (claude), not by herdr, so the fix belongs to the fleet-wide classifier rather than a herdr special case (the same one-owner reasoning as the 2026-07-10 consolidation).
+`bin/fm-composer-lib.sh` gains `fm_composer_trim`, which folds U+00A0 to a plain space before trimming with the locale's `[:space:]` class, and `fm_composer_classify_content` re-trims both `content` and `plain_content` through it BEFORE the glyph cases run.
+Running the normalization before the exact-match cases is what preserves the dead-shell safety rule: a padded `>` + NBSP husk trims back to the exact bare `>` case and stays `unknown`, instead of stripping the glyph and falling through to the post-strip `empty` path.
+`fm_backend_herdr_composer_state`'s structural, content, and border-strip trims all route through the same helper.
+
+**Verification against real panes (herdr 0.7.4, protocol 16, Linux 6.17.7 x86_64, GNU bash 5.3.0, ShellCheck 0.11.0).** Driven in an isolated lab session via `bin/fm-herdr-lab.sh`; the live `default` session was never touched, and the helper's fleet-state tripwire verified identical fleet state after teardown.
+Each verdict came from the real `fm_backend_herdr_composer_state` code path against `<lab-session>:w1:p1` (never the composite as a raw pane id - `fm_backend_herdr_parse_target` splits `session:pane` deliberately):
+
+| real pane state | `agent_status` | `busy_state` | composer verdict | before the fix |
+| --- | --- | --- | --- | --- |
+| idle claude, empty composer | `idle` | not-busy | `empty` | `pending` (the wedge) |
+| real typed text | `idle` | not-busy | `pending` | `pending` |
+| mid-turn (`esc to interrupt`) | `working` | **busy** | `empty` | `pending` |
+| bare shell husk, no agent | (absent) | not-busy | `unknown` | `unknown` |
+
+A mid-turn claude composer reads `empty` both before and after the fix, and that is correct: claude's composer IS genuinely empty while it works (it accepts type-ahead).
+Injection into a busy pane is refused one step EARLIER, by `inject_msg`'s `pane_is_busy` guard (`busy_state=busy` above), not by the composer classifier - the two guards are separate, and only the busy guard owns mid-turn refusal.
+
+**Regression coverage.** `tests/fm-backend-herdr.test.sh` reproduces the exact captured bytes (NBSP padding, CRLF endings, full-width rules) through the real classifier: `test_composer_state_claude_nbsp_padded_prompt_is_empty` is the incident test and fails against the pre-fix code with `got 'pending'`, confirmed by stashing the fix and rerunning.
+Alongside it, `test_composer_state_claude_nbsp_padded_prompt_with_real_text_is_pending`, `test_composer_state_nbsp_padded_shell_husk_is_unknown` (all four husk glyphs), `test_composer_state_claude_single_trailing_rule_below_prompt_is_unknown` (pins the conservative veto), and `test_composer_state_pi_nbsp_padded_idle_is_empty` (Pi unchanged) hold the safety directions; the four pre-existing Pi tests stay green.
+`tests/fm-composer-lib.test.sh` pins the owner directly, including `fm_composer_trim` against the real `❯` + NBSP + CR bytes and the padded-shell-husk refusal in both bordered and bare forms.
+`bin/fm-lint.sh` passes clean.
+
+**Upstream.** This arrived with the upstream sync (commit `a55448a`) and is very likely an upstream bug too - the NBSP padding is claude's own rendering, not anything this fork introduced.
+Nothing was opened upstream from here.
+
 ## Native `pane.agent_status_changed` push escalation (immediate blocked wake)
 
 Herdr exposes a native, push-based agent-state event stream, and firstmate folds it into the watcher so a crew entering `blocked` (waiting on the human at a permission/trust dialog, an interactive menu, or a wedged prompt) wakes its supervisor sub-second instead of after the ~240s stale-pane wedge timer.
@@ -881,6 +941,9 @@ Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry
 - **RESOLVED: a restart's restored-layout husk no longer needs a manual pane close before respawn.** See "Respawn idempotency: a restored task tab is a husk, not a duplicate" above for the fix (`fm_backend_herdr_pane_agent_state`, `fm_backend_herdr_create_task`'s close-and-replace).
   Left over from that fix: the `dead` (`pane_not_found`) husk classification is exercised only at the unit level, never against the real binary - killing a pane's process on a live server was observed to make herdr reap the whole tab immediately (never leaving a dead-but-still-listed pane for the duplicate check to find), and a real session restart was never observed to produce one either.
   It remains a conservative, defensively-coded path for a herdr failure mode (e.g. a restored process that fails to start) nobody has reproduced against the real binary yet.
+- **Composer padding can be invisible whitespace the locale does not trim.** See "Incident (2026-07-17)" above.
+  A harness may pad its empty composer row with a blank the C locale's `[:space:]` class does not cover (real claude uses U+00A0); `fm_composer_trim` (`bin/fm-composer-lib.sh`) normalizes U+00A0 specifically, on captured evidence, and is the place to extend if another harness turns up a different invisible pad.
+  A pad that is not normalized fails safe (`pending`, so the injector defers rather than overwriting a draft) and surfaces through the max-defer alarm - but it defers FOREVER, so the alarm is the only signal.
 - **Ghost/placeholder suggestion handling depends on ANSI style.** See "Incident (2026-07-08)" and "Incident (2026-07-10)" above.
   Herdr 0.7.3 preserves the harness's own de-emphasis style (dim/faint and truecolor foreground) in `pane read --format ansi`, and `fm_backend_herdr_composer_state` extracts real typed content with the shared `fm_composer_strip_ghost` (`bin/fm-composer-lib.sh`), which drops dim/faint AND dark-truecolor runs to distinguish ghost suggestions/placeholders from real typed text.
   If a future herdr build strips ANSI style from `--format ansi`, the classifier loses its ghost signal and falls back to reading the suggestion text as `pending` - the fail-safe direction (it defers rather than risks overwriting a human draft), which the max-defer alarm then surfaces.
