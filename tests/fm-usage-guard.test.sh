@@ -14,7 +14,7 @@ set -u
 command -v jq >/dev/null 2>&1 || { pass "fm-usage-guard: jq unavailable, skipping"; exit 0; }
 
 GUARD="$ROOT/bin/fm-usage-guard.sh"
-TMP=$(fm_test_tmproot fm-usage-guard)
+fm_test_tmproot TMP fm-usage-guard
 HOME_DIR="$TMP/home"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data"
 

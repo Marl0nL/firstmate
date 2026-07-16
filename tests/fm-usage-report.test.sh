@@ -17,7 +17,7 @@ set -u
 
 command -v jq >/dev/null 2>&1 || { pass "fm-usage-report: jq unavailable, skipping"; exit 0; }
 
-TMP=$(fm_test_tmproot fm-usage-report)
+fm_test_tmproot TMP fm-usage-report
 HOME_DIR="$TMP/home"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data/usage"
 

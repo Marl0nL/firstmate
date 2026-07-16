@@ -11,7 +11,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-afk-return-tests)
+fm_test_tmproot TMP_ROOT fm-afk-return-tests
 
 install_runner() {  # <case-dir>
   local dir=$1

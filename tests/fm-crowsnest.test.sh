@@ -14,7 +14,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-crowsnest-tests)
+fm_test_tmproot TMP_ROOT fm-crowsnest-tests
 RELAY="$ROOT/bin/fm-crowsnest-relay.sh"
 POLL="$ROOT/bin/fm-crowsnest-poll.sh"
 POST="$ROOT/bin/fm-crowsnest-post.sh"

@@ -39,6 +39,33 @@ export FM_GATE_REFUSE_BYPASS=1
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# --- /tmp headroom preflight -------------------------------------------------
+#
+# The 2026-07-16 incident: leaked fm-secondmate-safety fixtures (~365MB each,
+# several accumulated across runs) filled a RAM-backed /tmp tmpfs solid, taking
+# every shell on the host down with "Disk quota exceeded" - including the shell
+# needed to diagnose it. This suite creates its scratch fixtures under
+# ${TMPDIR:-/tmp}; fail loudly here, before a single mktemp runs, rather than
+# risk wedging the host the same way again. This check runs at source time
+# (top level, not inside a command-substitution subshell) so `exit` here
+# actually stops the sourcing test script instead of just the subshell - see
+# wake-helpers.sh's near-identical caveat about fm_test_tmproot itself.
+# FM_TEST_TMP_MIN_KB overrides the default floor for an unusual environment.
+if [ -z "${FM_TEST_TMP_GUARD_DONE:-}" ]; then
+  FM_TEST_TMP_GUARD_DONE=1
+  fm_test_tmp_dir=${TMPDIR:-/tmp}
+  fm_test_tmp_min_kb=${FM_TEST_TMP_MIN_KB:-524288}
+  fm_test_tmp_avail_kb=$(df -Pk "$fm_test_tmp_dir" 2>/dev/null | awk 'NR==2 {print $4}')
+  if [ -n "$fm_test_tmp_avail_kb" ] && [ "$fm_test_tmp_avail_kb" -lt "$fm_test_tmp_min_kb" ] 2>/dev/null; then
+    printf 'fatal: %s has only %dK free (need >= %dK) - refusing to start tests that create temp fixtures there.\n' \
+      "$fm_test_tmp_dir" "$fm_test_tmp_avail_kb" "$fm_test_tmp_min_kb" >&2
+    printf 'Free space under %s (or set TMPDIR elsewhere) before running tests; see the 2026-07-16 /tmp-exhaustion incident.\n' \
+      "$fm_test_tmp_dir" >&2
+    exit 1
+  fi
+  unset fm_test_tmp_dir fm_test_tmp_min_kb fm_test_tmp_avail_kb
+fi
+
 # --- reporters --------------------------------------------------------------
 
 fail() {
@@ -52,10 +79,18 @@ pass() {
 
 # --- self-cleaning temp root ------------------------------------------------
 #
-# fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT. The first call installs the cleanup trap. A test file that needs
-# extra teardown (e.g. killing a daemon) should define its own EXIT trap and
-# call fm_test_cleanup from inside it so registered dirs are still removed.
+# fm_test_tmproot <varname> <prefix> creates a fresh temp dir, registers it for
+# removal on EXIT, and assigns its path to <varname> directly (never through
+# command substitution: `VAR=$(fm_test_tmproot ...)` runs the whole function -
+# trap install and array append included - inside a throwaway subshell, so
+# none of it survives back into the caller. This was the actual mechanism
+# behind the 2026-07-16 /tmp-exhaustion incident: the trap fired and cleaned
+# up inside that dead-end subshell, the real script process never had a trap
+# at all, and every later `mkdir -p "$TMP_ROOT/..."` silently recreated the
+# directory the doomed trap had just deleted). The first call installs the
+# cleanup trap. A test file that needs extra teardown (e.g. killing a daemon)
+# should define its own EXIT trap and call fm_test_cleanup from inside it so
+# registered dirs are still removed.
 
 FM_TEST_CLEANUP_DIRS=()
 
@@ -67,13 +102,13 @@ fm_test_cleanup() {
 }
 
 fm_test_tmproot() {
-  local prefix=${1:-fm-test} root
+  local __fm_test_tmproot_var=$1 prefix=${2:-fm-test} root
   root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
   if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
     trap fm_test_cleanup EXIT
   fi
   FM_TEST_CLEANUP_DIRS+=("$root")
-  printf '%s\n' "$root"
+  printf -v "$__fm_test_tmproot_var" '%s' "$root"
 }
 
 # --- fakebin / PATH shims ---------------------------------------------------

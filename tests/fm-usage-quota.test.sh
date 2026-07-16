@@ -15,7 +15,7 @@ set -u
 command -v jq >/dev/null 2>&1 || { pass "fm-usage-quota: jq unavailable, skipping"; exit 0; }
 
 QUOTA="$ROOT/bin/fm-usage-quota.sh"
-TMP=$(fm_test_tmproot fm-usage-quota)
+fm_test_tmproot TMP fm-usage-quota
 HOME_DIR="$TMP/home"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data"
 

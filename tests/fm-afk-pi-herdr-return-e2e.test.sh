@@ -31,7 +31,7 @@ done
 
 LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 SESSION=$("$LAB_HELPER" name fm-afk-pi-return-e2e)
-TMP_ROOT=$(fm_test_tmproot fm-afk-pi-return-e2e)
+fm_test_tmproot TMP_ROOT fm-afk-pi-return-e2e
 HOME_DIR="$TMP_ROOT/home"
 STATE="$HOME_DIR/state"
 PROJECT="$TMP_ROOT/project"
