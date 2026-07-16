@@ -50,14 +50,52 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# Physical spelling of a path, for FIRSTMATE-INTERNAL comparison ONLY.
+#
+# NEVER canonicalize a path on its way to an external tool that owns its own
+# spelling: `treehouse return` matches its argument against the exact string
+# treehouse recorded, so resolving it there is what BREAKS the handoff. See
+# bin/fm-teardown.sh's treehouse_recorded_path for that opposite direction.
+fm_canonical_path() {  # <path>
+  local path=$1 dir base
+  [ -n "$path" ] || return 1
+  if [ -d "$path" ]; then
+    ( cd "$path" 2>/dev/null && pwd -P ) || return 1
+    return 0
+  fi
+  dir=$(dirname "$path")
+  base=$(basename "$path")
+  dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$dir" "$base"
+}
+
+# Do two firstmate-resolved paths name the same place? Identical strings match
+# without touching the filesystem; otherwise compare physical spellings.
+#
+# Both sides must be firstmate's own values. A home reached as $HOME/firstmate
+# and the same home reached as /var/home/<user>/firstmate is ONE directory spelled
+# two ways wherever /home is a symlink to /var/home - the default layout on every
+# ostree/atomic Fedora variant (Silverblue, Kinoite, Bazzite). Scripts derive their
+# root with a logical `pwd`, so the spelling follows the caller's cwd: a watcher
+# armed from one spelling recorded it in the lock, while a turn-end hook invoked
+# through the other spelling compared against the other - same directory, two
+# strings, no match, and the guard cried wolf. Unresolvable paths stay unequal.
+fm_same_path() {  # <a> <b>
+  local a=$1 b=$2 ca cb
+  [ "$a" = "$b" ] && return 0
+  ca=$(fm_canonical_path "$a") || return 1
+  cb=$(fm_canonical_path "$b") || return 1
+  [ "$ca" = "$cb" ]
+}
+
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$home" ] || return 1
-  [ "$lock_path" = "$watch_path" ] || return 1
+  fm_same_path "$lock_home" "$home" || return 1
+  fm_same_path "$lock_path" "$watch_path" || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
   [ "$current_identity" = "$lock_identity" ]

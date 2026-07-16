@@ -962,8 +962,15 @@ test_teardown_conformance_old_vs_new() {
 
   expect_code 0 "$rc_old" "old fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_old"
   expect_code 0 "$rc_new" "new fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_new"
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/teardown-diff.txt" 2>&1 \
-    || fail "fm-teardown.sh: tmux+treehouse command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/teardown-diff.txt")"
+  # This conformance contract is that the BACKEND refactor did not change the
+  # tmux/treehouse commands teardown ISSUES. Read-only probes are outside it:
+  # treehouse_recorded_path added a `treehouse status` read so the return is handed
+  # treehouse's own path spelling (docs/treehouse-path-contract.md). Drop probes
+  # from both sides and require the MUTATING sequence to still match exactly.
+  grep -v "^treehouse"$'\x1f'"status$" "$log_old" > "$log_old.mutating" || true
+  grep -v "^treehouse"$'\x1f'"status$" "$log_new" > "$log_new.mutating" || true
+  diff -u "$log_old.mutating" "$log_new.mutating" > "$TMP_ROOT/teardown-diff.txt" 2>&1 \
+    || fail "fm-teardown.sh: mutating tmux+treehouse command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/teardown-diff.txt")"
   assert_contains "$(cat "$log_new")" "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f'"$wt" \
     "teardown did not call treehouse return --force <worktree>"
   assert_contains "$(cat "$log_new")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"firstmate:fm-$id" \

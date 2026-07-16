@@ -503,15 +503,113 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
+# Expand treehouse's $HOME abbreviation, emitting nothing for a non-path.
+# treehouse abbreviates with the same $HOME it recorded the absolute path under,
+# so expanding ~ here reproduces its stored spelling exactly.
+treehouse_expand_home_abbrev() {  # <path>
+  local path=$1
+  # [~] is a one-character class matching a LITERAL tilde: treehouse prints the
+  # abbreviation as text, so this must never be shell tilde expansion.
+  case "$path" in
+    [~]/*) printf '%s/%s\n' "${HOME%/}" "${path#[~]/}" ;;
+    /*)    printf '%s\n' "$path" ;;
+  esac
+}
+
+# Candidate worktree spellings from one `treehouse status` row; nothing for a
+# line that is not a row (a blank line, or an indented "bash (123), claude (456)"
+# process continuation).
+#
+# A row is "<name>  <state>  <path>", but the path is NOT simply the rest of the
+# line: a `leased` row appends a "  (held by <holder>)" annotation after it, while
+# a path may itself contain spaces. Rather than guess where the path ends, emit
+# both readings. The caller keeps whichever one RESOLVES to the worktree it is
+# looking for, so a wrong candidate is discarded rather than returned - which is
+# what keeps this parse honest as treehouse's output evolves.
+# See docs/treehouse-path-contract.md for the recorded output of both row shapes.
+treehouse_status_path_candidates() {  # <line>
+  local line=$1 rest trimmed
+  case "$line" in
+    ''|[[:space:]]*) return 0 ;;
+  esac
+  read -r _ _ rest <<EOF
+$line
+EOF
+  [ -n "$rest" ] || return 0
+  treehouse_expand_home_abbrev "$rest"
+  # The same row with a trailing "  (...)" annotation dropped.
+  trimmed=${rest%%  (*}
+  [ "$trimmed" = "$rest" ] || treehouse_expand_home_abbrev "$trimmed"
+}
+
+# Every candidate worktree spelling in a `treehouse status` output.
+treehouse_status_paths() {  # <status-output>
+  local listed=$1 line
+  while IFS= read -r line; do
+    treehouse_status_path_candidates "$line"
+  done <<EOF
+$listed
+EOF
+}
+
+# treehouse's OWN spelling of a worktree path, which is the only one it accepts.
+#
+# `treehouse return` matches its argument against the exact string treehouse
+# recorded at `get` time; it does not resolve either side. Firstmate cannot simply
+# keep that string, because it never receives it: a crew worktree is discovered by
+# polling the live pane's cwd, and every backend reports that OS-resolved (tmux's
+# pane_current_path and the herdr/zellij/cmux equivalents read the kernel's
+# physical path). Wherever /home is a symlink to /var/home - the default layout on
+# every ostree/atomic Fedora variant - treehouse records $HOME/.treehouse/... while
+# the pane reports /var/home/<user>/.treehouse/..., one inode spelled two ways, and
+# treehouse rejects the spelling it did not record.
+#
+# So ask treehouse which spelling is its own, matching on physical identity rather
+# than on the string, and do it HERE at the handoff boundary rather than at spawn:
+# this is the single point where a path crosses back into treehouse, so it also
+# repairs metadata written before this fix instead of needing a migration.
+#
+# This is deliberately the INVERSE of fm_same_path's internal-comparison rule. Do
+# not "simplify" it by canonicalizing; that is the bug.
+#
+# Degrades to the caller's path whenever treehouse cannot be asked or reports no
+# matching worktree, so an unparseable status or a changed output format is never
+# worse than the old unconditional behavior.
+treehouse_recorded_path() {  # <path> <pool-dir>
+  local path=$1 pool_dir=$2 target listed candidate candidate_real
+  [ -n "$path" ] || { printf '%s\n' "$path"; return 0; }
+  command -v treehouse >/dev/null 2>&1 || { printf '%s\n' "$path"; return 0; }
+  target=$(canonical_existing_dir "$path") || { printf '%s\n' "$path"; return 0; }
+  listed=$(cd "$pool_dir" 2>/dev/null && treehouse status 2>/dev/null) || {
+    printf '%s\n' "$path"
+    return 0
+  }
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    candidate_real=$(canonical_existing_dir "$candidate") || continue
+    if [ "$candidate_real" = "$target" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done <<EOF
+$(treehouse_status_paths "$listed")
+EOF
+  printf '%s\n' "$path"
+}
+
 # Return a worktree/home via `treehouse return --force`, tolerating a stale git
 # lock left by a killed crew process. On failure: wait briefly and retry once
 # (the owning process may be exiting), then - only if the lock is provably
 # stale - remove it and retry once more. A lock that is not provably stale is
 # left untouched and the original failure is surfaced to the caller.
 teardown_treehouse_return() {
-  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} lock
+  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} lock return_path
 
-  if ( cd "$cd_dir" && treehouse return --force "$dir" ); then
+  # Hand treehouse ITS spelling of this worktree; every other use below stays on
+  # the caller's $dir, which git and the lock checks resolve for themselves.
+  return_path=$(treehouse_recorded_path "$dir" "$cd_dir")
+
+  if ( cd "$cd_dir" && treehouse return --force "$return_path" ); then
     return 0
   fi
 
@@ -523,7 +621,7 @@ teardown_treehouse_return() {
   echo "teardown: $label return failed with git lock $lock present; waiting ${STALE_WORKTREE_LOCK_RETRY_WAIT_SECS}s and retrying (owning process may be exiting)" >&2
   sleep "$STALE_WORKTREE_LOCK_RETRY_WAIT_SECS"
 
-  if ( cd "$cd_dir" && treehouse return --force "$dir" ); then
+  if ( cd "$cd_dir" && treehouse return --force "$return_path" ); then
     echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
     return 0
   fi
@@ -538,7 +636,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if ( cd "$cd_dir" && treehouse return --force "$dir" ); then
+      if ( cd "$cd_dir" && treehouse return --force "$return_path" ); then
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
       fi

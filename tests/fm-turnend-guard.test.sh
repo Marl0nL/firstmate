@@ -142,6 +142,26 @@ run_hook() {
   printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
+# run_hook with the script root and FM_HOME passed verbatim, so a caller can
+# invoke the hook through a chosen SPELLING of the home instead of the one
+# `cd && pwd` happens to produce.
+run_hook_via() {  # <script-root> <fm-home> <stop_active>
+  local dir=$1 home=$2 stop_active=$3
+  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
+# An alias spelling of <target>: a symlinked directory reaching the very same
+# inode by a different string. Built with ln -s rather than read off this machine,
+# so the aliasing cases below hold on any developer's box - including one whose
+# /home is NOT a symlink, where a test that trusted the host layout would pass
+# while the bug survived.
+make_home_alias() {  # <target> <link-path>
+  local target=$1 link=$2 real
+  real=$(cd "$target" && pwd -P)
+  ln -s "$real" "$link"
+  printf '%s\n' "$link"
+}
+
 nonexistent_pid() {
   local pid=999999
   while kill -0 "$pid" 2>/dev/null; do
@@ -218,6 +238,80 @@ test_hook_silent_with_live_lock_and_fresh_beacon() {
   expect_code 0 "$status" "hook must exit 0 with a live identity-matched watcher lock and fresh beacon"
   [ -z "$out" ] || fail "hook produced output despite a live fresh watcher lock: $out"
   pass "fm-turnend-guard: silent no-op with a live watcher lock and fresh beacon"
+}
+
+# --- path aliasing: the watcher lock is FIRSTMATE-vs-FIRSTMATE ---------------
+#
+# Every script derives its root with a logical `pwd`, so the spelling follows the
+# ARMING cwd: a watcher armed from $HOME/firstmate records that string, while
+# Claude's Stop hook runs "$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh and can
+# resolve the same directory as /var/home/<user>/firstmate. Both values are ours
+# and name one directory, so the guard must recognize them as equal from either
+# side; comparing raw strings made it cry "TURN WOULD END BLIND" at a watcher that
+# was alive, holding the lock, and beating a second earlier.
+
+# Shared body: record the lock through <lock-spelling>, invoke the hook through
+# <hook-spelling>, and require silence.
+assert_hook_silent_across_spellings() {  # <case> <lock-spelling> <hook-spelling>
+  local label=$1 lock_dir=$2 hook_dir=$3 pid identity out status
+  : > "$lock_dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$lock_dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "$label: could not identify live watcher holder"
+  }
+  record_watcher_lock "$lock_dir" "$pid" "$identity"
+  touch "$lock_dir/state/.last-watcher-beat"
+  out=$(run_hook_via "$hook_dir" "$hook_dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "$label: hook must stay silent for a live watcher on the same home spelled another way"
+  [ -z "$out" ] || fail "$label: hook fired at a healthy watcher across two spellings of one home: $out"
+}
+
+test_hook_silent_when_lock_armed_from_real_and_hook_runs_via_alias() {
+  local real alias_dir
+  real=$(make_primary_dir "$TMP_ROOT/hook-alias-armed-real")
+  alias_dir=$(make_home_alias "$real" "$TMP_ROOT/hook-alias-armed-real-link")
+  assert_hook_silent_across_spellings "armed-real/hook-alias" "$real" "$alias_dir"
+  pass "fm-turnend-guard: silent when the watcher was armed from the direct path and the hook runs through a symlinked spelling"
+}
+
+test_hook_silent_when_lock_armed_from_alias_and_hook_runs_via_real() {
+  local real alias_dir
+  real=$(make_primary_dir "$TMP_ROOT/hook-alias-armed-alias")
+  alias_dir=$(make_home_alias "$real" "$TMP_ROOT/hook-alias-armed-alias-link")
+  assert_hook_silent_across_spellings "armed-alias/hook-real" "$alias_dir" "$real"
+  pass "fm-turnend-guard: silent when the watcher was armed through a symlinked spelling and the hook runs from the direct path"
+}
+
+# The canonicalizing fix must not make the matcher LOOSER: a lock naming a
+# genuinely different home must still fail, or the guard would go blind to a
+# foreign watcher instead of only to a differently-spelled one.
+test_hook_blocks_when_lock_names_a_genuinely_different_home() {
+  local dir other pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-foreign-home")
+  other=$(make_primary_dir "$TMP_ROOT/hook-foreign-home-other")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watcher holder"
+  }
+  # A live, identity-matched pid, but the lock belongs to a DIFFERENT home.
+  record_watcher_lock "$dir" "$pid" "$identity"
+  printf '%s\n' "$other" > "$dir/state/.watch.lock/fm-home"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "hook must still block when the lock names a genuinely different home"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: still blocks when the lock names a genuinely different home (aliasing fix stays strict)"
 }
 
 test_hook_blocks_with_live_lock_and_stale_beacon() {
@@ -721,6 +815,9 @@ test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
+test_hook_silent_when_lock_armed_from_real_and_hook_runs_via_alias
+test_hook_silent_when_lock_armed_from_alias_and_hook_runs_via_real
+test_hook_blocks_when_lock_names_a_genuinely_different_home
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
