@@ -38,6 +38,13 @@
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #
+# Also covers the treehouse path-aliasing fix: `treehouse return` string-matches
+# its argument against the spelling treehouse recorded, so firstmate must hand it
+# THAT spelling, not a canonicalized one (bin/fm-teardown.sh's
+# treehouse_recorded_path).
+#   (x) meta records a physically-resolved alias of treehouse's path -> ALLOW
+#   (y) treehouse inventory reports no matching worktree            -> path passed through
+#
 # Also covers backlog teardown-lock-race-l2: a stale git index.lock left in the
 # worktree by a killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
@@ -123,6 +130,63 @@ SH
   touch "$case_dir/state/.last-watcher-beat"
 
   printf '%s\n' "$case_dir"
+}
+
+# Replace fakebin/treehouse with one FAITHFUL to the real tool's path contract
+# (verified against treehouse v2.0.0): it knows exactly ONE spelling of the
+# worktree, prints `status` rows with that path $HOME-abbreviated, and string-
+# matches `return` against its recorded spelling, resolving NEITHER side.
+#
+# make_case's default mock is a bare `exit 0`, which accepts every spelling - so
+# it would keep passing while a real teardown failed on every aliased box. That
+# is exactly how this shipped, and it is why this fake validates the argument.
+#
+# Configured through the environment so the script body can stay a quoted heredoc:
+#   FM_TEST_TREEHOUSE_ACCEPT      the ONE spelling `return` accepts
+#   FM_TEST_TREEHOUSE_STATUS_PATH the path `status` reports (default: ACCEPT)
+#   FM_TEST_TREEHOUSE_STATUS_ROW  "in-use" (default) or "leased"
+#   FM_TEST_TREEHOUSE_RETURN_LOG  file collecting each `return` argument
+add_spelling_strict_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+accept=${FM_TEST_TREEHOUSE_ACCEPT:?}
+case "${1:-}" in
+  status)
+    shown=${FM_TEST_TREEHOUSE_STATUS_PATH:-$accept}
+    case "$shown" in
+      "$HOME"/*) shown="~/${shown#"$HOME"/}" ;;
+    esac
+    # A leased row appends a "  (held by <holder>)" annotation AFTER the path; an
+    # in-use row is followed by an indented process continuation line instead.
+    # Both shapes are recorded in docs/treehouse-path-contract.md.
+    if [ "${FM_TEST_TREEHOUSE_STATUS_ROW:-in-use}" = leased ]; then
+      printf '%s\n' "1     leased       $shown  (held by fm-test-holder)"
+    else
+      printf '%s\n' "1     in-use       $shown"
+      printf '%s\n' "                   bash (1), claude (2)"
+    fi
+    exit 0
+    ;;
+  return)
+    shift
+    got=
+    for arg in "$@"; do
+      case "$arg" in --*) ;; *) got=$arg ;; esac
+    done
+    printf '%s\n' "$got" >> "${FM_TEST_TREEHOUSE_RETURN_LOG:?}"
+    if [ "$got" = "$accept" ]; then
+      echo "Worktree returned to pool."
+      exit 0
+    fi
+    echo "worktree $got is not managed by treehouse" >&2
+    exit 1
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
 }
 
 add_compatible_tasks_axi() {
@@ -413,6 +477,114 @@ run_teardown() {
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+# --- path aliasing: `treehouse return` is an EXTERNAL contract ---------------
+#
+# treehouse owns its own spelling. Firstmate never receives it for a crew
+# worktree: the worktree is discovered by polling the live pane's cwd, which every
+# backend reports OS-resolved. Where /home is a symlink to /var/home (the default
+# on every ostree/atomic Fedora variant) treehouse records $HOME/... while the
+# pane reports /var/home/<user>/..., and treehouse rejects the spelling it did not
+# record - which failed EVERY teardown on such a box until firstmate hand-patched
+# the meta with sed before each one.
+#
+# The alias is built here with ln -s rather than read off the host, so this holds
+# on a developer box whose /home is not a symlink.
+test_treehouse_return_uses_treehouse_own_spelling_on_an_aliased_home() {
+  local case_dir real_root alias_root rc returned stderr rc_leased returned_leased
+  case_dir=$(make_case treehouse-alias)
+  real_root=$(cd "$case_dir" && pwd -P)
+  alias_root="$TMP_ROOT/treehouse-alias-link"
+  ln -s "$real_root" "$alias_root"
+  add_spelling_strict_treehouse "$case_dir"
+
+  # The meta carries the PHYSICALLY RESOLVED spelling - what the pane-cwd read
+  # produces at spawn - while treehouse knows only its own $HOME-based spelling.
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$real_root/wt" \
+    "project=$real_root/project" \
+    "kind=ship" \
+    "mode=local-only"
+
+  : > "$case_dir/treehouse-return-args"
+  set +e
+  # Env prefixes on the call: bash exports them to the teardown run and restores
+  # them afterward, so the aliased HOME never leaks into a later case.
+  HOME="$alias_root" \
+  FM_TEST_TREEHOUSE_ACCEPT="$alias_root/wt" \
+  FM_TEST_TREEHOUSE_RETURN_LOG="$case_dir/treehouse-return-args" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  # A LEASED row - which trails a "  (held by ...)" annotation after the path -
+  # must resolve identically. Reading the annotation as part of the path resolves
+  # nothing, silently falls back, and fails the return; a real `treehouse get
+  # --lease` produces exactly this row, which is how it was caught.
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$real_root/wt" \
+    "project=$real_root/project" \
+    "kind=ship" \
+    "mode=local-only"
+  : > "$case_dir/treehouse-return-args-leased"
+  set +e
+  HOME="$alias_root" \
+  FM_TEST_TREEHOUSE_ACCEPT="$alias_root/wt" \
+  FM_TEST_TREEHOUSE_STATUS_ROW=leased \
+  FM_TEST_TREEHOUSE_RETURN_LOG="$case_dir/treehouse-return-args-leased" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout-leased" 2> "$case_dir/stderr-leased"
+  rc_leased=$?
+  set -e
+  expect_code 0 "$rc_leased" "aliased home (leased row): teardown must return the worktree"$'\n'"--- stderr ---"$'\n'"$(cat "$case_dir/stderr-leased")"
+  returned_leased=$(cat "$case_dir/treehouse-return-args-leased")
+  [ "$returned_leased" = "$alias_root/wt" ] || \
+    fail "aliased home (leased row): expected treehouse's spelling '$alias_root/wt', got '$returned_leased' (the '(held by ...)' annotation was probably read as part of the path)"
+
+  stderr=$(cat "$case_dir/stderr")
+  expect_code 0 "$rc" "aliased home: teardown must return the worktree with no hand-patched meta"$'\n'"--- stderr ---"$'\n'"$stderr"
+  assert_not_contains "$stderr" "is not managed by treehouse" "aliased home: treehouse rejected the spelling firstmate handed it"
+  assert_not_contains "$stderr" "teardown aborted" "aliased home: teardown aborted on the treehouse handoff"
+  returned=$(cat "$case_dir/treehouse-return-args")
+  [ "$returned" = "$alias_root/wt" ] || \
+    fail "aliased home: expected treehouse to be handed ITS spelling '$alias_root/wt', got '$returned'"
+  pass "treehouse return is handed treehouse's own spelling (in-use and leased rows) when the meta records a physically-resolved alias"
+}
+
+# The lookup must never invent a path: when treehouse's inventory has no worktree
+# matching this one, the caller's path is passed through unchanged, so a changed
+# `status` format degrades to the old behavior rather than to a wrong argument.
+test_treehouse_return_passes_path_through_when_status_has_no_match() {
+  local case_dir rc returned
+  case_dir=$(make_case treehouse-no-match)
+  add_spelling_strict_treehouse "$case_dir"
+
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only"
+
+  : > "$case_dir/treehouse-return-args"
+  set +e
+  # treehouse's inventory reports only some OTHER worktree (a pool path that does
+  # not exist), so no candidate can resolve to this one.
+  HOME="$case_dir" \
+  FM_TEST_TREEHOUSE_ACCEPT="$case_dir/wt" \
+  FM_TEST_TREEHOUSE_STATUS_PATH="$case_dir/absent-elsewhere" \
+  FM_TEST_TREEHOUSE_RETURN_LOG="$case_dir/treehouse-return-args" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-match: teardown must still return using the caller's path"
+  returned=$(cat "$case_dir/treehouse-return-args")
+  [ "$returned" = "$case_dir/wt" ] || \
+    fail "no-match: expected the caller's path '$case_dir/wt' passed through, got '$returned'"
+  pass "treehouse return falls back to the caller's path when the inventory reports no matching worktree"
 }
 
 test_local_only_fork_remote_allows() {
@@ -1014,6 +1186,8 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+test_treehouse_return_uses_treehouse_own_spelling_on_an_aliased_home
+test_treehouse_return_passes_path_through_when_status_has_no_match
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
