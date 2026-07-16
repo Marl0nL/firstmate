@@ -785,64 +785,92 @@ The luminance rule assumes a dark terminal theme (the fleet reality); the SGR-2 
 **Resolved: backend-independent wedge alarm.** The max-defer wedge alarm (`inject_wedge_alarm`, `bin/fm-supervise-daemon.sh`) formerly alarmed into the void because its only active signal was a tmux client status-line flash, skipped for herdr, leaving only the passive `state/.subsuper-inject-wedged` marker.
 It now also attempts a configurable active alert independent of the supervisor backend; [`wedge-alarm.md`](wedge-alarm.md) owns its channels and verification evidence.
 
-## Incident (2026-07-17): away-mode injection wedged on real claude's NON-BREAKING SPACE composer padding
+## Incident (2026-07-17): away-mode injection wedged for 87 minutes on a TWO-bug stack (Pi veto + NBSP padding)
 
-Away mode was silently useless on this host: between 00:09 and 01:35 the daemon deferred every injection into the claude supervisor pane (zero successful sends) while three crews finished, and the captain learned nothing until the durable wedge marker was read back by hand.
+Away mode was silently useless on this host: between 00:09 and 01:35 the daemon deferred every injection into the claude supervisor pane `default:w1:p1` (zero successful sends) while three crews finished, and the captain learned nothing until the durable wedge marker was read back by hand.
+`state/.supervise-daemon.log` records 365 defers, every one of them `inject deferred: supervisor composer not confirmed-empty (state=unknown: ...)` - `unknown` on every single poll, never `pending`.
 
-**Reported diagnosis, and why it was wrong.** The task came in diagnosed as a Pi-specific veto in `fm_backend_herdr_composer_state`: the `elif` branch that sets `found=0` when `FM_BACKEND_HERDR_PI_PAIR_FOUND` is 0 and an unmatched separator sits below the generic match, which was believed to fire unconditionally for claude (claude draws a horizontal rule between its composer and footer) and return `unknown` forever.
-That branch is real, but it is NOT reachable for a normal claude composer, and the observed verdict was `pending`, not `unknown`.
-Real claude draws a full-width rule BOTH above and below its composer, so `fm_backend_herdr_pi_composer_find` finds a COMPLETE pair and `FM_BACKEND_HERDR_PI_PAIR_FOUND` is 1 - the `elif` never runs.
-The first branch also declines correctly, because its `generic_line < FM_BACKEND_HERDR_PI_PAIR_OPEN_LINE` guard is false when the `❯` row sits BETWEEN the pair (18 < 17 is false).
-The suggested fix (making the veto identity-aware, so a known non-Pi agent keeps its generic verdict) was therefore not applied: the branch only fires when the composer's OPENING rule has scrolled out of the capture window, and in that shape the generic match cannot be proven current, so returning the stale generic verdict would have widened the guard toward a false `empty` - the one direction that types into a live pane.
-The conservative refusal is correct and is now pinned by `test_composer_state_claude_single_trailing_rule_below_prompt_is_unknown`.
+This was TWO independent bugs stacked on the same composer row, and only the outer one was ever visible.
 
-**Root cause: U+00A0.** Real claude 2.x pads its EMPTY composer row with a NON-BREAKING SPACE after the prompt glyph, and herdr returns CRLF line endings from `pane read --format ansi`.
-Captured live from a real `claude` in an isolated lab session (herdr 0.7.4, `fm-lab-veto-p3b-*`, the `default` session untouched):
+The incoming diagnosis for this task named Bug 1 correctly - the Pi veto, the `elif` branch, and the identity asymmetry against the complete-pair branch above it.
+It was incomplete in two ways that both had to be established from the live pane before the fix was safe to write: the veto does not fire unconditionally for claude (a narrow pane pairs normally - the precise trigger is the TITLED top rule that only a wide pane renders), and a second, independent bug sat behind it (Bug 2 below), so the proposed identity-aware veto alone would have left away mode wedged on `pending`.
+
+### Bug 1 (the outage): claude's TITLED composer rule trips the Pi veto
+
+`fm_backend_herdr_composer_state`'s Pi veto sets `found=0` when the separator pair is incomplete (`FM_BACKEND_HERDR_PI_PAIR_FOUND` is 0) and an unmatched separator sits BELOW the generic match.
+Its premise - "a lower unmatched separator proves the generic row is stale" - is true only for Pi, whose composer lives BETWEEN separators.
+For claude the same lower rule is the composer's OWN bottom border and proves nothing.
+
+Captured read-only from the live primary supervisor pane (no Herdr lifecycle touched), `─` runs collapsed to `[rule]` so the embedded title is visible:
 
 ```
-$ herdr --session <lab> pane read w1:p1 --format ansi --source recent --lines 20 | sed -n '18p' | xxd
+$ herdr --session default pane read w1:p1 --source recent --lines 200 --format ansi
+  win-line 17  not-a-separator  [rule] Personal-Firstmate [rule]
+  win-line 18  not-a-separator  ❯ <NBSP>
+  win-line 19  SEPARATOR        [rule]
+  win-line 20                     ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt
+# => PAIR_FOUND=0  LAST_SEPARATOR_LINE=19  generic_line=18  -> veto fires -> unknown
+```
+
+On a WIDE pane claude renders the workspace title INSIDE the composer's top rule (`──── Personal-Firstmate ──`).
+`fm_backend_herdr_pi_separator_row` accepts only a row of PURE `─` (>= 8 chars), so the titled rule is correctly not a separator - which leaves the pair permanently incomplete with exactly one unmatched rule below the live `❯` row.
+The veto then fired on every poll, forever.
+A NARROW pane hides this completely: claude drops the title when there is no room, leaving a pure rule that pairs normally.
+Every pre-existing claude fixture used short untitled rules, which is why the suite never caught this.
+
+**Fix.** The veto now consults native agent identity, exactly as the complete-pair branch above it already did (that branch ends `*) : ;; # A known non-Pi agent keeps its established generic verdict.`; the asymmetry WAS the bug).
+A known non-Pi agent keeps its generic verdict; Pi (any status) and an unreadable identity keep the conservative refusal, since without a complete pair there is no Pi composer structure to inject into.
+
+### Bug 2 (hidden behind Bug 1): U+00A0 composer padding
+
+Real claude 2.x pads its EMPTY composer row with a NON-BREAKING SPACE after the prompt glyph, and herdr returns CRLF from `pane read --format ansi`.
+The real composer row's bytes, from the same live capture:
+
+```
+$ ... | sed -n '18p' | xxd
 00000000: e29d afc2 a00d                           ......
 #         ❯        NBSP  CR
 ```
 
-That is `❯` (`e2 9d af`) + `c2 a0` + `0d`, between two full-width `─` rules, with the footer `⏸ manual mode on · ? for shortcuts` below.
-glibc's `en_US.UTF-8` `[:space:]` class does NOT contain U+00A0, so the classifier's plain bash trim stripped the CR but left the NBSP attached:
+glibc's `en_US.UTF-8` `[:space:]` does NOT contain U+00A0, so a plain bash trim strips the CR but leaves the NBSP attached: the row never matches the exact bare-`❯` case, the glyph is stripped, and the leftover NBSP reads as real text -> `pending`.
+The Pi veto short-circuited before content classification ever ran, so this bug was invisible in the log - it would have wedged away mode again the moment Bug 1 was fixed alone.
 
-```
-$ . bin/fm-composer-lib.sh
-after strip_ghost:  e29d afc2 a00d
-after bash trim:    e29d afc2 a0      # the NBSP survived
-classify verdict:   pending
-```
+**Fix.** `fm_composer_trim` (`bin/fm-composer-lib.sh`) folds U+00A0 to a plain space before trimming; `fm_composer_classify_content` re-trims both `content` and `plain_content` through it BEFORE the glyph cases run.
+That ordering is the safety property: a padded dead-shell `>` + NBSP husk trims back to the exact bare `>` case and stays `unknown` rather than falling through to the post-glyph-strip `empty` path.
+The NBSP is emitted by the AGENT, not by herdr, so it belongs to the fleet-wide owner rather than a herdr special case (the same one-owner reasoning as the 2026-07-10 consolidation).
 
-With the NBSP still attached the row never matched the exact bare-`❯` case, so the classifier stripped the leading glyph, found a non-empty remainder (the NBSP), and returned `pending` on every poll, forever.
-`inject_msg` (`bin/fm-supervise-daemon.sh`) requires an affirmative `empty` and logs `inject deferred: supervisor composer not confirmed-empty (state=pending: ...)`, so every escalation deferred.
-Every pre-existing claude fixture used a plain ASCII `❯` with no NBSP and no CRLF, which is exactly why the suite stayed green through three prior composer incidents.
+### Both fixes are load-bearing
 
-**Fix: NBSP normalization at the one shared owner.** The NBSP is emitted by the AGENT (claude), not by herdr, so the fix belongs to the fleet-wide classifier rather than a herdr special case (the same one-owner reasoning as the 2026-07-10 consolidation).
-`bin/fm-composer-lib.sh` gains `fm_composer_trim`, which folds U+00A0 to a plain space before trimming with the locale's `[:space:]` class, and `fm_composer_classify_content` re-trims both `content` and `plain_content` through it BEFORE the glyph cases run.
-Running the normalization before the exact-match cases is what preserves the dead-shell safety rule: a padded `>` + NBSP husk trims back to the exact bare `>` case and stays `unknown`, instead of stripping the glyph and falling through to the post-strip `empty` path.
-`fm_backend_herdr_composer_state`'s structural, content, and border-strip trims all route through the same helper.
+Measured against the REAL captured supervisor pane (idle, `agent_status=done`, titled rule + NBSP pad + claude's SGR-2 dim ghost suggestion on the composer row), replayed through the real `fm_backend_herdr_composer_state` code path, reproduced identically across three independent samples:
 
-**Verification against real panes (herdr 0.7.4, protocol 16, Linux 6.17.7 x86_64, GNU bash 5.3.0, ShellCheck 0.11.0).** Driven in an isolated lab session via `bin/fm-herdr-lab.sh`; the live `default` session was never touched, and the helper's fleet-state tripwire verified identical fleet state after teardown.
-Each verdict came from the real `fm_backend_herdr_composer_state` code path against `<lab-session>:w1:p1` (never the composite as a raw pane id - `fm_backend_herdr_parse_target` splits `session:pane` deliberately):
+| variant | verdict on the real pane |
+| --- | --- |
+| main (pre-fix) | `unknown` - matches the daemon's 365 log lines exactly |
+| NBSP fix only | `unknown` - the veto short-circuits first; does NOT fix the outage |
+| veto fix only | `pending` - the NBSP pad surfaces; still != `empty`, still wedged |
+| both fixes | `empty` - injection restored |
 
-| real pane state | `agent_status` | `busy_state` | composer verdict | before the fix |
-| --- | --- | --- | --- | --- |
-| idle claude, empty composer | `idle` | not-busy | `empty` | `pending` (the wedge) |
-| real typed text | `idle` | not-busy | `pending` | `pending` |
-| mid-turn (`esc to interrupt`) | `working` | **busy** | `empty` | `pending` |
-| bare shell husk, no agent | (absent) | not-busy | `unknown` | `unknown` |
+Reaching `empty` on that row needs all three mechanisms together: the identity-aware veto (else `unknown`), the shared dim-ghost strip (else the rotating suggestion reads as real text), and the NBSP-aware trim (else the pad reads as real text).
 
-A mid-turn claude composer reads `empty` both before and after the fix, and that is correct: claude's composer IS genuinely empty while it works (it accepts type-ahead).
-Injection into a busy pane is refused one step EARLIER, by `inject_msg`'s `pane_is_busy` guard (`busy_state=busy` above), not by the composer classifier - the two guards are separate, and only the busy guard owns mid-turn refusal.
+**Verification (herdr 0.7.4, protocol 16, Linux 6.17.7 x86_64, GNU bash 5.3.0, ShellCheck 0.11.0).**
+The live pane was only ever READ (`pane read`, `agent get`); all lifecycle work ran in isolated lab sessions via `bin/fm-herdr-lab.sh`, whose fleet-state tripwire verified an identical `default` session after every teardown.
+A separate isolated lab run confirmed the narrow-pane shapes directly: idle -> `empty` (was `pending` via Bug 2), real typed text -> `pending`, bare shell husk -> `unknown`, mid-turn -> `busy_state=busy`.
+A mid-turn claude composer reads `empty` both before and after, correctly: claude's composer IS empty while it works (type-ahead). Injection into a busy pane is refused one step earlier by `inject_msg`'s `pane_is_busy` guard, not by this classifier - the two guards are separate and only the busy guard owns mid-turn refusal.
 
-**Regression coverage.** `tests/fm-backend-herdr.test.sh` reproduces the exact captured bytes (NBSP padding, CRLF endings, full-width rules) through the real classifier: `test_composer_state_claude_nbsp_padded_prompt_is_empty` is the incident test and fails against the pre-fix code with `got 'pending'`, confirmed by stashing the fix and rerunning.
-Alongside it, `test_composer_state_claude_nbsp_padded_prompt_with_real_text_is_pending`, `test_composer_state_nbsp_padded_shell_husk_is_unknown` (all four husk glyphs), `test_composer_state_claude_single_trailing_rule_below_prompt_is_unknown` (pins the conservative veto), and `test_composer_state_pi_nbsp_padded_idle_is_empty` (Pi unchanged) hold the safety directions; the four pre-existing Pi tests stay green.
-`tests/fm-composer-lib.test.sh` pins the owner directly, including `fm_composer_trim` against the real `❯` + NBSP + CR bytes and the padded-shell-husk refusal in both bordered and bare forms.
-`bin/fm-lint.sh` passes clean.
+**Regression coverage.** `tests/fm-backend-herdr.test.sh`:
+`test_composer_state_claude_titled_rule_with_dim_ghost_is_empty` reproduces the complete real stack (titled rule + NBSP + dim ghost, idle) and is the test that would have caught the outage;
+`test_composer_state_claude_titled_top_rule_is_empty` isolates Bug 1 and fails against the pre-fix code with `got 'unknown'`;
+`test_composer_state_claude_nbsp_padded_prompt_is_empty` isolates Bug 2 and fails against the pre-fix code with `got 'pending'`;
+`test_composer_state_unmatched_separator_still_refuses_pi_and_unreadable` holds the veto's remaining conservative refusals (Pi any status, unreadable identity);
+plus titled-rule-with-real-text -> `pending`, NBSP husks -> `unknown`, and the four pre-existing Pi tests, all green.
+`tests/fm-composer-lib.test.sh` pins the owner directly. `bin/fm-lint.sh` passes clean.
 
-**Upstream.** This arrived with the upstream sync (commit `a55448a`) and is very likely an upstream bug too - the NBSP padding is claude's own rendering, not anything this fork introduced.
+**Reproduction lesson worth keeping.** A lab reproduction of a composer shape must match the REAL pane's WIDTH.
+claude drops the titled rule on a narrow pane, so the pair completes, the veto never fires, and the outage shape silently stops reproducing - a 53-column lab pane reads this row `pending` (Bug 2 only) while the real wide pane reads `unknown` (Bug 1 masking Bug 2).
+The daemon log is the ground truth for which bug is live: `state=unknown` on every poll (never `pending`) is what distinguishes a veto short-circuit from a content misread, because the veto returns before content is ever classified.
+When a lab and the log disagree, capture the actual failing pane read-only and replay its real bytes through the real code path.
+
+**Upstream.** This arrived with the upstream sync (commit `a55448a`) and both bugs are very likely upstream too - the titled rule and the NBSP padding are both claude's own rendering.
 Nothing was opened upstream from here.
 
 ## Native `pane.agent_status_changed` push escalation (immediate blocked wake)
@@ -941,6 +969,9 @@ Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry
 - **RESOLVED: a restart's restored-layout husk no longer needs a manual pane close before respawn.** See "Respawn idempotency: a restored task tab is a husk, not a duplicate" above for the fix (`fm_backend_herdr_pane_agent_state`, `fm_backend_herdr_create_task`'s close-and-replace).
   Left over from that fix: the `dead` (`pane_not_found`) husk classification is exercised only at the unit level, never against the real binary - killing a pane's process on a live server was observed to make herdr reap the whole tab immediately (never leaving a dead-but-still-listed pane for the duplicate check to find), and a real session restart was never observed to produce one either.
   It remains a conservative, defensively-coded path for a herdr failure mode (e.g. a restored process that fails to start) nobody has reproduced against the real binary yet.
+- **A harness's own composer chrome can defeat structural row-finding.** See "Incident (2026-07-17)" above.
+  The Pi separator veto assumed a lower unmatched `─` rule means the row above it is stale; that is a Pi-specific premise, and claude's titled composer rule (`──── <workspace> ──`, wide panes only) broke it into an 87-minute away-mode outage.
+  Structural rules that key off one harness's chrome must consult native agent identity before vetoing another harness's pane - and any lab reproduction must match the REAL pane's width, because claude drops the title on a narrow pane and the shape silently stops reproducing.
 - **Composer padding can be invisible whitespace the locale does not trim.** See "Incident (2026-07-17)" above.
   A harness may pad its empty composer row with a blank the C locale's `[:space:]` class does not cover (real claude uses U+00A0); `fm_composer_trim` (`bin/fm-composer-lib.sh`) normalizes U+00A0 specifically, on captured evidence, and is the place to extend if another harness turns up a different invisible pad.
   A pad that is not normalized fails safe (`pending`, so the injector defers rather than overwriting a draft) and surfaces through the max-defer alarm - but it defers FOREVER, so the alarm is the only signal.

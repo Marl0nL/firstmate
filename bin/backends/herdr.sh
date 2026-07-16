@@ -876,9 +876,32 @@ EOF
     esac
   elif [ "$FM_BACKEND_HERDR_PI_PAIR_FOUND" -eq 0 ] \
        && [ "$FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE" -gt "$generic_line" ]; then
-    # A lower unmatched separator proves the generic row is stale, but does
-    # not provide the complete Pi composer structure required for injection.
-    found=0
+    # An unmatched separator BELOW the generic row is Pi-specific evidence of
+    # staleness, and only Pi-specific: Pi's composer lives BETWEEN separators, so
+    # a separator below the generic row means that row sits outside the live
+    # composer. For a non-Pi agent the very same row is the composer's OWN bottom
+    # border - claude draws a rule between its composer and its footer - and
+    # proves nothing about staleness. Consulting identity here mirrors the
+    # complete-pair branch above; NOT consulting it was the 2026-07-17 outage
+    # (docs/herdr-backend.md): claude renders its workspace title INSIDE the
+    # composer's top rule ("──── Personal-Firstmate ──"), which is not a pure `─`
+    # run and so never pairs, leaving one unmatched rule below the live `❯` row.
+    # The veto then fired on every poll and away-mode injection deferred for 87
+    # minutes straight.
+    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    case "$agent:$agent_status" in
+      pi:*|:*)
+        # Pi (any status), or an unreadable identity: keep the conservative
+        # refusal. Without a complete separator pair there is no Pi composer
+        # structure to inject into, and an unreadable identity can never
+        # authorize one.
+        found=0
+        ;;
+      *) : ;; # A known non-Pi agent keeps its established generic verdict.
+    esac
   fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   # Content: extract the real typed text from the raw row with the shared,

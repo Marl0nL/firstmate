@@ -1077,6 +1077,19 @@ herdr_claude_rule() {  # -> claude's full-width composer rule row, styled + CRLF
   printf '\x1b[0m\r\n'
 }
 
+# claude's composer TOP rule on a WIDE pane carries the workspace title inside
+# the rule ("──── Personal-Firstmate ──"), so the row is NOT a pure `─` run and
+# fm_backend_herdr_pi_separator_row correctly declines it. Captured verbatim from
+# the live supervisor pane; see test_composer_state_claude_titled_top_rule_is_empty.
+herdr_claude_titled_rule() {  # <title> -> claude's titled composer rule + CRLF
+  local title=$1 i
+  printf '\x1b[0m\x1b[38;2;136;136;136m'
+  for i in $(seq 1 40); do printf '\xe2\x94\x80'; done
+  printf ' %s ' "$title"
+  printf '\xe2\x94\x80\xe2\x94\x80'
+  printf '\x1b[0m\r\n'
+}
+
 test_composer_state_claude_nbsp_padded_prompt_is_empty() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-claude-nbsp-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -1133,28 +1146,119 @@ test_composer_state_nbsp_padded_shell_husk_is_unknown() {
   pass "fm_backend_herdr_composer_state: NBSP-padded bare shell husks still read unknown"
 }
 
-# A claude composer whose TOP rule has scrolled out of the capture window leaves
-# a single unmatched rule BELOW the prompt row. That shape must stay `unknown`:
-# without the opening rule the classifier cannot prove the '❯' row it found is
-# the live composer rather than stale scrollback, and this veto is what keeps a
-# stale row from being promoted into a false `empty`. Pinned here because the
-# 2026-07-17 investigation initially proposed making this veto identity-aware
-# (letting a known non-Pi agent keep its generic verdict), which would have
-# widened exactly this refusal - see docs/herdr-backend.md.
-test_composer_state_claude_single_trailing_rule_below_prompt_is_unknown() {
+# --- composer_state: claude's TITLED composer rule (the 2026-07-17 outage) ----
+# THE outage shape, captured read-only from the live primary claude-on-herdr
+# supervisor pane default:w1:p1 (docs/herdr-backend.md "Incident (2026-07-17)").
+# claude renders the workspace title INSIDE its composer's TOP rule on a wide
+# pane:
+#
+#   17  ──────────…──── Personal-Firstmate ──   <- NOT a pure ─ run
+#   18  ❯ <NBSP>                                 <- the live composer
+#   19  ──────────────────────────────────────   <- a pure ─ run
+#   20    ⏵⏵ auto mode on … · esc to interrupt
+#
+# fm_backend_herdr_pi_separator_row only accepts a row of PURE `─`, so the titled
+# rule never registers as a separator: the pair is incomplete
+# (FM_BACKEND_HERDR_PI_PAIR_FOUND=0) while one unmatched separator sits BELOW the
+# generic match (LAST_SEPARATOR_LINE=19 > generic_line=18). The Pi veto then fired
+# on EVERY poll and the daemon logged `state=unknown` 365 times (00:09-01:35,
+# zero successful sends). The veto's premise - "a lower unmatched separator proves
+# the generic row is stale" - is true only for Pi, whose composer lives BETWEEN
+# separators; for claude that lower rule is the composer's own bottom border.
+#
+# A narrow pane hides this: claude drops the title when there is no room, leaving
+# a pure rule that pairs normally. The pre-existing claude fixtures all use short
+# untitled rules, which is why the suite never caught it.
+test_composer_state_claude_titled_top_rule_is_empty() {
   local dir log resp fb out
-  dir="$TMP_ROOT/composer-claude-trailing-rule"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  dir="$TMP_ROOT/composer-claude-titled-rule"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   {
-    printf '\xe2\x9d\xaf\xc2\xa0\r\n'
+    printf '\xe2\x9c\xbb Inferring\xe2\x80\xa6 (13s \xc2\xb7 \xe2\x86\x93 213 tokens \xc2\xb7 thinking)\r\n'
+    printf '  \xe2\x94\x9d  Tip: Run /install-slack-app to use Claude in Slack\r\n'
+    herdr_claude_titled_rule 'Personal-Firstmate'
+    printf '\x1b[0m\x1b[38;2;153;153;153m\xe2\x9d\xaf\xc2\xa0\x1b[0m\r\n'
     herdr_claude_rule
-    printf '  \x1b[0m\x1b[38;2;153;153;153m\xe2\x8f\xb8 manual mode on\x1b[0m\r\n'
+    printf '  \x1b[0m\x1b[38;2;153;153;153m\xe2\x8f\xb5\xe2\x8f\xb5 auto mode on (shift+tab to cycle) \xc2\xb7 esc to interrupt\x1b[0m\r\n'
+  } > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p1' "$ROOT" )
+  [ "$out" = empty ] || fail "the real supervisor-pane shape (titled top rule, so the separator pair never completes) must read empty, got '$out' (regression: this is the 87-minute away-mode outage - the Pi veto fired on a claude pane and the daemon logged state=unknown 365 times)"
+  pass "fm_backend_herdr_composer_state: claude's TITLED composer rule no longer trips the Pi veto (the 2026-07-17 outage shape)"
+}
+
+# The COMPLETE real shape, captured verbatim from the live supervisor pane
+# default:w1:p1 while it was idle (agent_status=done): the titled top rule, the
+# NBSP-padded prompt, AND claude's SGR-2 dim rotating ghost suggestion on the
+# same row. This is the exact stack the 87-minute outage ran on, and it needs
+# all three mechanisms working together to reach `empty`:
+#   1. the identity-aware veto      (else `unknown`  - the veto short-circuits)
+#   2. the shared dim-ghost strip   (else `pending`  - the suggestion reads real)
+#   3. the NBSP-aware trim          (else `pending`  - the pad reads real)
+# Verified against the real pane: main -> unknown, veto fix alone -> pending,
+# NBSP fix alone -> unknown, both -> empty.
+test_composer_state_claude_titled_rule_with_dim_ghost_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-titled-ghost"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  {
+    printf '\xe2\x9c\xbb Inferring\xe2\x80\xa6 (13s \xc2\xb7 \xe2\x86\x93 213 tokens \xc2\xb7 thinking)\r\n'
+    printf '  \xe2\x94\x9d  Tip: Run /install-slack-app to use Claude in Slack\r\n'
+    herdr_claude_titled_rule 'Personal-Firstmate'
+    printf '\xe2\x9d\xaf\xc2\xa0\x1b[0m\x1b[2mrebase 17 onto main while the review runs\x1b[0m\r\n'
+    herdr_claude_rule
+    printf '  \xe2\x8f\xb5\xe2\x8f\xb5 auto mode on (shift+tab to cycle)\r\n'
+  } > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"done"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p1' "$ROOT" )
+  [ "$out" = empty ] || fail "the complete real supervisor shape (titled rule + NBSP pad + dim ghost, idle) must read empty, got '$out' (this is the exact 2026-07-17 outage stack)"
+  pass "fm_backend_herdr_composer_state: the complete real outage shape (titled rule + NBSP + dim ghost) reads empty"
+}
+
+# The same titled-rule shape carrying REAL typed text must still refuse: making
+# the veto identity-aware must not cost the pending guard.
+test_composer_state_claude_titled_top_rule_with_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-titled-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  {
+    herdr_claude_titled_rule 'Personal-Firstmate'
+    printf '\xe2\x9d\xaf\xc2\xa0land pr 8 when green\r\n'
+    herdr_claude_rule
+    printf '  \xe2\x8f\xb5\xe2\x8f\xb5 auto mode on\r\n'
   } > "$resp/1.out"
   printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p1' "$ROOT" )
-  [ "$out" = unknown ] || fail "a claude prompt row with only an unmatched rule BELOW it (opening rule out of window) must stay unknown, got '$out'"
-  pass "fm_backend_herdr_composer_state: an unmatched trailing rule below the prompt keeps the conservative unknown verdict"
+  [ "$out" = pending ] || fail "real typed text under a titled composer rule must still read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: the identity-aware veto still refuses real typed text under a titled rule"
+}
+
+# The veto stays conservative exactly where its Pi-specific premise still holds:
+# an incomplete separator pair under a Pi identity (any status), or under an
+# identity that cannot be read at all, must never authorize injection.
+test_composer_state_unmatched_separator_still_refuses_pi_and_unreadable() {
+  local dir log resp fb out case_id
+  for case_id in pi-idle pi-working unreadable; do
+    dir="$TMP_ROOT/composer-veto-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    {
+      printf '\xe2\x9d\xaf\xc2\xa0\r\n'
+      herdr_claude_rule
+      printf '  footer\r\n'
+    } > "$resp/1.out"
+    case "$case_id" in
+      pi-idle) printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out" ;;
+      pi-working) printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/2.out" ;;
+      unreadable) printf '1\n' > "$resp/2.exit" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p1' "$ROOT" )
+    [ "$out" = unknown ] || fail "an unmatched separator below the generic row must still refuse for '$case_id', got '$out'"
+  done
+  pass "fm_backend_herdr_composer_state: an incomplete separator pair still refuses for Pi (any status) and for an unreadable identity"
 }
 
 # Pi's separated composer under the same NBSP normalization: an idle Pi row
@@ -2217,7 +2321,10 @@ test_composer_state_claude_dim_ghost_row_with_real_text_is_pending
 test_composer_state_claude_nbsp_padded_prompt_is_empty
 test_composer_state_claude_nbsp_padded_prompt_with_real_text_is_pending
 test_composer_state_nbsp_padded_shell_husk_is_unknown
-test_composer_state_claude_single_trailing_rule_below_prompt_is_unknown
+test_composer_state_claude_titled_top_rule_is_empty
+test_composer_state_claude_titled_rule_with_dim_ghost_is_empty
+test_composer_state_claude_titled_top_rule_with_real_text_is_pending
+test_composer_state_unmatched_separator_still_refuses_pi_and_unreadable
 test_composer_state_pi_nbsp_padded_idle_is_empty
 test_composer_state_grok_dark_truecolor_placeholder_is_empty
 test_composer_state_grok_bright_truecolor_real_text_is_pending
