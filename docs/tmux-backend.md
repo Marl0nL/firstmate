@@ -111,6 +111,15 @@ The classifier deliberately reports `unknown` for `node`/`python`/`python3` rath
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
 Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
 
+### Second consumer: fm-spawn's post-launch start confirmation
+
+The session-start secondmate-liveness sweep was the first consumer of `fm_backend_agent_alive`; `bin/fm-spawn.sh` is the second.
+After a spawn sends its launch command, it polls `fm_backend_agent_alive` (through the generic dispatcher) until the agent is confirmed running before it prints `spawned` - a created pane and a sent command do not prove an agent started (observed live 2026-07-17: a launch send that never landed against a freshly restarted backend server left a bare no-agent shell, yet fm-spawn still reported success and the task went In flight running nothing).
+A confidently `dead` pane after the poll triggers one launch re-send (mitigating the suspected pane-creation/launch-send race) and, if still `dead`, a loud non-zero failure naming the pane rather than a `spawned` print.
+An `unknown` verdict is never treated as a failure, matching the sweep's correctness bar (a wrong `dead` is the costly error).
+The confirmation runs only for a backend+harness pair that can reach a confident verdict, gated by `fm_backend_agent_probe_verifiable` (`bin/fm-backend.sh`): tmux for every harness except `pi` (whose generic `node` process name is the gap above), and herdr for any harness.
+Behaviour is covered by `tests/fm-spawn-agent-confirm.test.sh`, which drives fm-spawn against a fake tmux whose reported foreground command is the launch's actual result.
+
 ## Limitations
 
 None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.

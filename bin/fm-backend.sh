@@ -725,6 +725,39 @@ fm_backend_agent_alive() {  # <backend> <target>
   esac
 }
 
+# fm_backend_agent_probe_verifiable: 0 when fm_backend_agent_alive can, for this
+# <backend>+<harness> pair, be expected to reach a CONFIDENT alive-or-dead
+# verdict rather than a permanent `unknown`. It is the gate for fm-spawn.sh's
+# post-launch start confirmation: only a pair that can be confidently classified
+# is worth polling to a failure verdict, so an unverifiable pair keeps the
+# pre-confirmation behaviour (print `spawned` without a liveness check) instead
+# of paying a full poll timeout that can never resolve.
+#   herdr - verifiable for ANY harness: fm_backend_herdr_agent_alive reads
+#           herdr's own agent registry (dead/no-agent/live), which is
+#           harness-agnostic (docs/herdr-backend.md "Agent liveness probe reuses
+#           the husk classifier").
+#   tmux  - verifiable for every harness whose CLI runs as its own attributable
+#           process name (claude, codex, opencode, grok), NOT for pi: pi execs
+#           into a generic `node` process that tmux's classifier can only report
+#           as `unknown` (docs/tmux-backend.md "Known gaps").
+#   zellij|orca|cmux - no empirically verified agent-liveness classifier yet
+#           (fm_backend_agent_alive returns `unknown` for them), so they are
+#           NOT verifiable; the start-confirmation gap is documented, not fixed,
+#           for those backends.
+fm_backend_agent_probe_verifiable() {  # <backend> <harness>
+  local backend=$1 harness=${2:-}
+  case "$backend" in
+    herdr) return 0 ;;
+    tmux)
+      case "$harness" in
+        pi|pi-*|pi_*) return 1 ;;
+        *) return 0 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # --- native event push (backend-extensible) ---------------------------------
 #
 # The watcher's event-wait splice (bin/fm-watch.sh) is backend-agnostic: it asks
