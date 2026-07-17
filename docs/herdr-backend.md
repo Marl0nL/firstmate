@@ -468,6 +468,10 @@ Rather than add a second herdr classifier, `fm_backend_herdr_agent_alive` (`bin/
 No new empirical verification was needed for the mapping itself - `fm_backend_herdr_pane_agent_state`'s four states are already verified above (both at the unit level and, for `no-agent`, against the real binary via the respawn-idempotency e2e test); this wrapper only renames them for the generic `fm_backend_agent_alive` dispatcher (`bin/fm-backend.sh`) that also serves the tmux adapter (`docs/tmux-backend.md` "Agent liveness probe").
 Unlike tmux's probe, herdr's has no equivalent "which harness is running under a generic interpreter name" ambiguity: the classification comes from herdr's own registered-agent state, not a process name, so herdr correctly resolves every verified harness including `pi` (the one tmux cannot confidently classify - see `docs/tmux-backend.md` "Known gap").
 
+The same `fm_backend_agent_alive` probe now has a second consumer: `bin/fm-spawn.sh`'s post-launch start confirmation (see `docs/tmux-backend.md` "Second consumer").
+This is the fix for the failure this backend surfaced: on 2026-07-17, three herdr spawns whose launch send never landed against a freshly restarted `herdr-server.service` left the pane in the `no-agent` state (`pane get` succeeds, `agent get` -> `agent_not_found`), yet fm-spawn printed `spawned` and the tasks went In flight running nothing.
+Because herdr is verifiable for every harness, a spawn into a `no-agent` pane now re-sends the launch once and, if the pane is still `no-agent`, fails loudly instead of reporting success.
+
 ## End-to-end verification (spawn -> steer -> peek -> done -> merge -> teardown)
 
 Beyond the fake-CLI unit tests (`tests/fm-backend-herdr.test.sh`) and the real-CLI smoke tests (`tests/fm-backend-herdr-smoke.test.sh` and `tests/fm-backend-autodetect-smoke.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME`, a scratch `local-only` git project, and an isolated `HERDR_SESSION`:

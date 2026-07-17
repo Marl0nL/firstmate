@@ -34,6 +34,15 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Disable fm-spawn.sh's post-launch agent-start confirmation for the suite
+# (bin/fm-spawn.sh). Behaviour tests drive fm-spawn against FAKE panes that never
+# host a real harness process, so the liveness probe could only ever time out and
+# either fail the spawn or waste its full window - noise unrelated to what each
+# test checks. The confirmation has its own dedicated coverage in
+# tests/fm-spawn-agent-confirm.test.sh, which models the probe explicitly and
+# sets FM_SPAWN_CONFIRM=1. A test that wants the check simply overrides this.
+export FM_SPAWN_CONFIRM=0
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

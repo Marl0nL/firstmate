@@ -79,6 +79,18 @@
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
+# Post-launch start confirmation: after sending the launch command, poll
+# fm_backend_agent_alive until the agent is confirmed running before printing
+# `spawned` - a created pane and a sent command do NOT prove an agent started
+# (observed live: a launch send that never landed left a bare no-agent shell yet
+# still reported success). A confidently dead pane triggers one launch re-send
+# (race mitigation) and, if still dead, a LOUD non-zero failure that names the
+# pane instead of printing `spawned`. Only runs for a backend+harness whose
+# liveness probe can reach a confident verdict (fm_backend_agent_probe_verifiable
+# in bin/fm-backend.sh: herdr for any harness, tmux for non-pi harnesses);
+# others keep the pre-confirmation behaviour, a documented gap. Tunables:
+# FM_SPAWN_CONFIRM=0 disables the check, FM_SPAWN_CONFIRM_TIMEOUT (default 15s)
+# and FM_SPAWN_CONFIRM_INTERVAL (default 0.5s) size the poll window.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1049,13 +1061,84 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
+send_launch_command() {  # type the launch command into the pane and submit it
+  spawn_send_literal "$T" "$LAUNCH"
+  sleep 0.3
+  spawn_send_key "$T" Enter
+}
+
+# confirm_agent_started: poll fm_backend_agent_alive until the launched agent is
+# confirmed running, up to a bounded timeout. Prints nothing on stdout; returns
+#   0 - a real agent process is confirmed (alive)
+#   1 - CONFIDENTLY no agent (a bare shell / no-agent pane persisted the whole
+#       window): the launch never produced an agent - the silent-failure case
+#   2 - unverifiable: the probe never reached a confident verdict (only
+#       `unknown`). Never treat this as a failure - fail-safe toward proceeding,
+#       exactly as fm_backend_agent_alive's own `unknown` contract requires.
+# The happy path returns as soon as the first `alive` read lands (a few seconds
+# for a normally-starting crew), so a successful spawn is not appreciably slower;
+# only the dead/unverifiable paths pay the full timeout.
+confirm_agent_started() {  # <timeout-secs> <interval-secs>
+  local timeout=$1 interval=$2 steps n state
+  steps=$(awk -v t="$timeout" -v i="$interval" 'BEGIN{ if(i<=0)i=0.5; s=t/i; if(s<1)s=1; printf "%d", s }')
+  for ((n=0; n<steps; n++)); do
+    state=$(fm_backend_agent_alive "$BACKEND" "$T")
+    [ "$state" = alive ] && return 0
+    sleep "$interval"
+  done
+  # One final authoritative read after the window elapses.
+  state=$(fm_backend_agent_alive "$BACKEND" "$T")
+  case "$state" in
+    alive) return 0 ;;
+    dead) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
-spawn_send_key "$T" Enter
+send_launch_command
+
+# Post-launch start confirmation: a pane was created and the launch text was
+# sent, but neither proves an agent is actually running (observed live: a herdr
+# spawn whose launch send never landed against a freshly restarted server left
+# the pane at a bare no-agent shell, yet fm-spawn still printed `spawned` and the
+# task went In flight with nothing running). AGENTS.md task lifecycle already
+# requires firstmate to "confirm the worker is processing the brief" after a
+# spawn; do it here, cheaply and automatically, so a dead launch fails LOUDLY
+# instead of masquerading as success. Only run for a backend+harness whose
+# agent-liveness probe can reach a confident verdict; others keep the
+# pre-confirmation behaviour (the gap is documented, not silently trusted).
+# FM_SPAWN_CONFIRM=0 disables the check (firstmate's own test suite sets this in
+# tests/lib.sh - a fake pane has no real agent process to detect); the timeout
+# and interval are tunable for tests and slow hosts.
+CONFIRM=${FM_SPAWN_CONFIRM:-1}
+CONFIRM_TIMEOUT=${FM_SPAWN_CONFIRM_TIMEOUT:-15}
+CONFIRM_INTERVAL=${FM_SPAWN_CONFIRM_INTERVAL:-0.5}
+if [ "$CONFIRM" != 0 ] && fm_backend_agent_probe_verifiable "$BACKEND" "$HARNESS"; then
+  confirm_rc=0
+  confirm_agent_started "$CONFIRM_TIMEOUT" "$CONFIRM_INTERVAL" || confirm_rc=$?
+  if [ "$confirm_rc" -eq 1 ]; then
+    # Confidently no agent after the first window. The observed trigger looked
+    # like a race between pane creation and the launch send against a
+    # freshly-restarted backend server, so re-send the launch once and re-poll.
+    # A retry that ALSO cannot confirm still fails loudly - never a silent
+    # retry-until-the-print-looks-right (AGENTS.md "Report outcomes faithfully").
+    echo "warning: $ID: no agent detected in pane $META_WINDOW after ${CONFIRM_TIMEOUT}s; re-sending launch once" >&2
+    send_launch_command
+    confirm_rc=0
+    confirm_agent_started "$CONFIRM_TIMEOUT" "$CONFIRM_INTERVAL" || confirm_rc=$?
+  fi
+  if [ "$confirm_rc" -eq 1 ]; then
+    echo "error: $ID: agent did not start - pane $META_WINDOW is a bare shell with no agent after two launch attempts (${CONFIRM_TIMEOUT}s each). The launch never produced a running agent; refusing to report success. Inspect/clean the pane before retrying." >&2
+    exit 1
+  fi
+  if [ "$confirm_rc" -eq 2 ]; then
+    echo "warning: $ID: could not confirm agent liveness for pane $META_WINDOW (probe inconclusive); proceeding unconfirmed" >&2
+  fi
+fi
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
