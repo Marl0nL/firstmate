@@ -1337,6 +1337,74 @@ test_composer_state_codex_non_faint_same_text_is_pending() {
   pass "fm_backend_herdr_composer_state: non-faint codex prompt text still reads pending"
 }
 
+# --- wait_for_composer_clear: the busy-baseline repaint window --------------
+# fm_backend_herdr_send_text_submit falls back to composer reading when the
+# pre-Enter agent-state baseline is NOT legibly idle - which is exactly the
+# mid-turn claude case, because a mid-turn claude QUEUES a submitted message
+# and stays `working` across the whole send. claude repaints its composer a few
+# hundred ms after Enter (measured live: still showing the typed text at ~0.4s,
+# repainted by ~0.8s), so a single sample per Enter reads the harness's render
+# lag as a swallowed Enter and fm-send reports a false failure for a message
+# that landed. See docs/herdr-backend.md "Incident (2026-07-17b)".
+#
+# The real captured rows (claude 2.x on herdr 0.7.4): the composer carries a
+# truecolor prompt glyph, U+00A0 padding, and a trailing CR; the queued state
+# repaints the same row with a DIM placeholder.
+HERDR_TYPED_ROW=$'\033[0m\033[38;2;153;153;153m\xe2\x9d\xaf\xc2\xa0steer the crew\r'
+HERDR_QUEUED_ROW=$'\033[0m\033[38;2;153;153;153m\xe2\x9d\xaf\xc2\xa0 \033[0m\033[2mPress up to edit queued messages\033[0m\r'
+
+test_wait_for_composer_clear_catches_a_slow_repaint() {
+  local dir log resp fb out calls
+  dir="$TMP_ROOT/composer-clear-slow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Two samples still showing the typed text (claude has not repainted yet),
+  # then the queued placeholder. A single check-at-the-end read would have
+  # reported `pending` - the false "Enter swallowed".
+  printf '%s\n' "$HERDR_TYPED_ROW" > "$resp/1.out"
+  printf '%s\n' "$HERDR_TYPED_ROW" > "$resp/2.out"
+  printf '%s\n' "$HERDR_QUEUED_ROW" > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_for_composer_clear default:w1:p2 0.03 3' "$ROOT" )
+  [ "$out" = empty ] \
+    || fail "wait_for_composer_clear should catch a repaint landing on a later sample within the SAME window, got '$out'"
+  calls=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
+  [ "$calls" -eq 3 ] || fail "expected exactly 3 pane-read polls (typed, typed, queued), got $calls"
+  pass "fm_backend_herdr_wait_for_composer_clear: a slow composer repaint landing on a later sample is still confirmed (no false 'Enter swallowed')"
+}
+
+# The direction that must never regress: a GENUINELY swallowed Enter leaves the
+# text in the composer for the whole budget, so every sample reads pending and
+# the verdict stays pending. Widening the window must not soften the verdict.
+test_wait_for_composer_clear_still_reports_a_real_swallow() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-clear-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' "$HERDR_TYPED_ROW" > "$resp/1.out"
+  printf '%s\n' "$HERDR_TYPED_ROW" > "$resp/2.out"
+  printf '%s\n' "$HERDR_TYPED_ROW" > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_for_composer_clear default:w1:p2 0.03 3' "$ROOT" )
+  [ "$out" = pending ] \
+    || fail "a composer holding real text for the WHOLE budget must still report pending (fail closed), got '$out'"
+  pass "fm_backend_herdr_wait_for_composer_clear: text that never clears still reports pending (a real swallowed Enter fails closed)"
+}
+
+# An unreadable pane short-circuits as `unknown` rather than being retried into
+# a `pending` verdict - fm-send treats unknown leniently, the daemon strictly,
+# and both behaviors are pre-existing and unchanged by the widened window.
+test_wait_for_composer_clear_short_circuits_on_unknown() {
+  local dir log resp fb out calls
+  dir="$TMP_ROOT/composer-clear-unknown"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\n' > "$resp/1.out"   # no composer row found anywhere in the capture
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_for_composer_clear default:w1:p2 0.03 3' "$ROOT" )
+  [ "$out" = unknown ] || fail "an unreadable composer should short-circuit as unknown, got '$out'"
+  calls=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
+  [ "$calls" -eq 1 ] || fail "wait_for_composer_clear should stop on the first non-pending verdict, made $calls poll(s)"
+  pass "fm_backend_herdr_wait_for_composer_clear: a non-pending verdict short-circuits instead of spending the budget"
+}
+
 # --- wait_for_working: the native agent-state poll-and-classify primitive ---
 # Direct unit coverage for fm_backend_herdr_wait_for_working, the helper
 # fm_backend_herdr_send_text_submit now uses instead of composer scraping
@@ -1542,7 +1610,14 @@ test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
   printf '  \xe2\x9d\xaf hello captain\n' > "$resp/4.out"
   printf '  \xe2\x9d\xaf hello captain\n' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  # SUBMIT_POLLS=1 pins the busy path to ONE composer read per Enter, which is
+  # what makes the call-numbered response script and the exact read_count
+  # assertion below meaningful (see FM_BACKEND_HERDR_SUBMIT_POLLS). The VERDICT
+  # this test guards - preexisting working is never proof, a composer still
+  # holding the message reads pending - is poll-count independent; the
+  # multi-poll repaint window has its own coverage in
+  # test_wait_for_composer_clear_still_reports_a_real_swallow.
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
   [ "$out" = pending ] || fail "send_text_submit must not accept preexisting working as proof that this Enter landed, got '$out'"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
@@ -2331,6 +2406,9 @@ test_composer_state_grok_bright_truecolor_real_text_is_pending
 test_composer_state_codex_bare_prompt_glyph_is_empty
 test_composer_state_codex_faint_suggestion_is_empty
 test_composer_state_codex_non_faint_same_text_is_pending
+test_wait_for_composer_clear_catches_a_slow_repaint
+test_wait_for_composer_clear_still_reports_a_real_swallow
+test_wait_for_composer_clear_short_circuits_on_unknown
 test_wait_for_working_returns_busy_on_first_poll
 test_wait_for_working_catches_a_slow_transition_mid_window
 test_wait_for_working_samples_budget_endpoint_without_final_sleep

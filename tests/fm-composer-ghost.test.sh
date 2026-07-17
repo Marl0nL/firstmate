@@ -276,8 +276,72 @@ test_peek_output_is_escape_free() {
   pass "fm-peek output is escape-free (no raw -e bytes reach firstmate context)"
 }
 
+# --- claude's queued-message composer row (2026-07-17b incident) ------------
+# Captured live from a real mid-turn claude 2.x pane on herdr 0.7.4 (2026-07-17)
+# with `herdr pane read --format ansi`. Reproduced here BYTE-FOR-BYTE: the
+# truecolor prompt glyph, claude's U+00A0 composer padding, the SGR-2 dim
+# placeholder, and the trailing CR the capture carries. Every pre-existing
+# fixture in this suite used a plain ASCII prompt and no NBSP/CR, which is
+# exactly why three composer incidents reached production green.
+#
+# Real capture, queued (message submitted while claude was mid-turn):
+#   ESC[0m ESC[38;2;153;153;153m ❯ NBSP ESC[0m ESC[2m Press up to edit queued messages ESC[0m CR
+# Real capture, same pane BEFORE Enter (the swallowed-Enter shape):
+#   ESC[0m ESC[38;2;153;153;153m ❯ NBSP <typed text> CR
+QUEUED_ROW_ANSI=$'\033[0m\033[38;2;153;153;153m\xe2\x9d\xaf\xc2\xa0 \033[0m\033[2mPress up to edit queued messages\033[0m\r'
+TYPED_ROW_ANSI=$'\033[0m\033[38;2;153;153;153m\xe2\x9d\xaf\xc2\xa0fix findings 1 and 3\r'
+
+test_queued_placeholder_real_capture_is_not_pending() {
+  local dir fb capture
+  dir="$TMP_ROOT/queued-real"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  printf '%s\n' "$QUEUED_ROW_ANSI" > "$capture"
+  if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+     fm_pane_input_pending "fakepane"; then
+    fail "the real captured queued-message composer row falsely read as pending (false 'Enter swallowed')"
+  fi
+  pass "fm_pane_input_pending: claude's real queued-message composer row is NOT pending"
+}
+
+# The regression that the dim-ghost stripper alone did NOT cover: when no styled
+# capture is available - herdr's plain-capture fallback, or the orca/cmux
+# adapters, which read an unstyled screen - the placeholder arrives as ordinary
+# text and used to read `pending`. The shared FM_COMPOSER_PLACEHOLDER_RE is what
+# makes the verdict identical with and without styling.
+test_queued_placeholder_survives_plain_capture() {
+  local dir fb capture
+  dir="$TMP_ROOT/queued-plain"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/plain.txt"
+  # The same row with every escape sequence gone: what an unstyled capture sees.
+  printf '\xe2\x9d\xaf\xc2\xa0 Press up to edit queued messages\r\n' > "$capture"
+  if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+     fm_pane_input_pending "fakepane"; then
+    fail "the queued placeholder read as pending on an UNSTYLED capture (herdr plain fallback / orca / cmux)"
+  fi
+  pass "fm_pane_input_pending: the queued placeholder reads not-pending even with no styling to strip"
+}
+
+# The other direction: the queued-state fix must not swallow a real swallow.
+test_real_typed_text_on_claude_row_still_pending() {
+  local dir fb capture
+  dir="$TMP_ROOT/queued-swallow"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  printf '%s\n' "$TYPED_ROW_ANSI" > "$capture"
+  if ! PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+       fm_pane_input_pending "fakepane"; then
+    fail "a genuinely swallowed Enter on the real claude composer row must still read pending"
+  fi
+  pass "fm_pane_input_pending: real typed text on the real claude row still reads pending (swallowed Enter fails closed)"
+}
+
 test_strip_ghost_drops_dim_keeps_normal
 test_strip_ghost_handles_combined_and_boundary_codes
+test_queued_placeholder_real_capture_is_not_pending
+test_queued_placeholder_survives_plain_capture
+test_real_typed_text_on_claude_row_still_pending
 test_strip_ghost_keeps_colored_text_with_2_payloads
 test_strip_ghost_drops_dark_truecolor_ghost
 test_dim_ghost_only_composer_is_not_pending

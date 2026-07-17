@@ -873,6 +873,115 @@ When a lab and the log disagree, capture the actual failing pane read-only and r
 **Upstream.** This arrived with the upstream sync (commit `a55448a`) and both bugs are very likely upstream too - the titled rule and the NBSP padding are both claude's own rendering.
 Nothing was opened upstream from here.
 
+## Incident (2026-07-17b): `fm-send` reported a FALSE submit failure for a message claude had queued
+
+Twice on 2026-07-17, a steer to a live crew exited non-zero with:
+
+```
+error: text not submitted to default:w1:pM (Enter swallowed; text left in composer;
+       tried meta=.../customer-session-w4.meta; backend=from-meta)
+```
+
+Both messages had in fact landed: the text was in the crew's transcript, the composer was empty, and the crew acted on it.
+
+This inverts the fail-closed contract rather than merely mis-wording it.
+`fm-send` exiting non-zero is how firstmate LEARNS an instruction did not land, so the obvious next action is to re-send - which double-instructs a live crew, potentially duplicating a destructive or lifecycle instruction.
+The 2026-07-03 grok incident proves the guard itself is right; only the verdict was wrong.
+
+### What claude actually renders when it queues
+
+When claude is mid-turn it QUEUES a submitted message instead of starting a new turn, and stays `agent_status=working` across the whole send.
+`fm_backend_herdr_send_text_submit`'s idle-baseline path (native `agent get` confirmation) therefore never applies: a mid-turn steer takes the `else` branch and confirms by READING THE COMPOSER, the path the 2026-07-07 incident had already found too sensitive to harness rendering.
+
+Captured live and read-only from a real mid-turn claude 2.x pane on herdr 0.7.4 (2026-07-17), same pane, before and after Enter:
+
+```
+$ herdr pane read "$HERDR_PANE_ID" --source recent --lines 200 --format ansi | grep -a '❯' | cat -v
+# BEFORE Enter (text typed, not yet submitted):
+^[[0m^[[38;2;153;153;153mM-bM-^]M-/M-BM- ^[[0mignore this line, it is a composer probe^M
+#         ❯=rgb(153,153,153)  NBSP        real text: NORMAL intensity
+# AFTER Enter (message queued, composer empty):
+^[[0m^[[38;2;153;153;153mM-bM-^]M-/M-BM- ^[[0m^[[2mPress up to edit queued messages^[[0m^M
+#         ❯=rgb(153,153,153)  NBSP        placeholder: SGR 2 = DIM
+```
+
+The incoming diagnosis named the placeholder row correctly but named the wrong mechanism.
+It supposed the verifier reads that row and concludes the text is still pending.
+It does not, on this path: the placeholder is rendered **dim**, so `fm_composer_strip_ghost` already drops it and the row classifies `empty`.
+Replayed through the real code, the styled row was correct before this fix.
+Two separate defects produced the false failure instead, and both were established from the live pane.
+
+### Bug 1 (deterministic): the queued placeholder was recognized ONLY by its styling
+
+The dim strip works only where a STYLED capture exists.
+`fm_backend_herdr_composer_state` falls back to a PLAIN capture whenever its ANSI read fails (`capture_ansi ... || capture ...`), and the `orca`/`cmux` adapters read an unstyled screen and have no styling at all.
+On every one of those paths the placeholder arrives as ordinary text and the row reads `pending` - a queued, delivered message reported as a swallowed Enter:
+
+```
+$ . bin/fm-composer-lib.sh
+$ fm_composer_classify_content 0 "$(printf '\xe2\x9d\xaf\xc2\xa0Press up to edit queued messages')" '^Type a message\.\.\.$'
+pending      # <- the false failure; the styled row on the same pane reads empty
+```
+
+**Fix.** `FM_COMPOSER_PLACEHOLDER_RE` in the fleet-wide owner (`bin/fm-composer-lib.sh`) matches claude's queued placeholder literally, at the same two points the per-harness `idle_re` is already matched.
+That fixes all four adapters at once rather than the one that happened to fail, exactly as `idle_re` already does for grok's `Type a message...`.
+The placeholder is claude's own EMPTY-composer text - drawn INSTEAD of composer content, never beside it, as the capture above shows - so its presence on the composer row is itself proof that whatever was typed is gone, i.e. that the Enter landed.
+The pattern is anchored end-to-end, so a transcript line merely containing the phrase cannot match.
+
+### Bug 2 (the race): the busy path sampled the composer once, before claude repainted
+
+claude does not repaint its composer instantly.
+Sampling the real pane in a tight loop immediately after Enter, the row still carried the just-typed text at ~0.4s and had repainted to the placeholder by ~0.8s:
+
+```
+$ herdr pane send-text "$HERDR_PANE_ID" 'race probe ignore'; herdr pane send-keys "$HERDR_PANE_ID" Enter
+$ for i in $(seq 1 14); do fm_backend_herdr_composer_state "default:$HERDR_PANE_ID"; done
+pending      # <- sample 1: composer not yet repainted; indistinguishable from a swallow
+empty        # <- samples 2-14
+```
+
+The busy path took ONE composer sample per Enter (`sleep "$sleep_s"; verdict=$(composer_state)`), and `fm-send` sends at most `FM_SEND_RETRIES` (3) Enters at `FM_SEND_SLEEP` (0.4s).
+On a loaded host - and 2026-07-16 wedged this host outright - the whole ~1.2s budget can land inside that repaint lag, every sample reads `pending`, and `fm-send` reports a swallowed Enter for a message already queued.
+This is the same hazard `fm_backend_herdr_wait_for_working` already guards on the idle path, in the composer path's own currency.
+
+**Fix.** `fm_backend_herdr_wait_for_composer_clear` mirrors `wait_for_working`: it samples `composer_state` across the per-Enter confirmation budget and returns the first non-`pending` verdict.
+It cannot convert a genuine swallow into a success - swallowed text sits in the composer for EVERY sample in the budget, so the verdict stays `pending`.
+It only widens the window in which a composer that DOES clear is allowed to prove it.
+
+### Both directions are pinned
+
+| pane state | verdict | consequence |
+| --- | --- | --- |
+| queued, styled capture (pre-fix) | `empty` | already correct; the dim strip covered it |
+| queued, UNSTYLED capture (pre-fix) | `pending` | **false failure** - Bug 1 |
+| queued, either capture (post-fix) | `empty` | success, correctly |
+| swallowed Enter, real text (post-fix) | `pending` | **failure, correctly** - fails closed |
+| dead-shell husk (post-fix) | `unknown` | injection-safety rule intact |
+
+**Regression coverage.**
+`tests/fm-composer-ghost.test.sh`: `test_queued_placeholder_survives_plain_capture` reproduces the unstyled row and fails against the pre-fix code with `pending`; `test_queued_placeholder_real_capture_is_not_pending` replays the real styled bytes; `test_real_typed_text_on_claude_row_still_pending` holds the swallowed-Enter direction.
+`tests/fm-backend-herdr.test.sh`: `test_wait_for_composer_clear_catches_a_slow_repaint` reproduces the race; `test_wait_for_composer_clear_still_reports_a_real_swallow` holds the fail-closed direction.
+`tests/fm-composer-lib.test.sh` pins the owner directly, including that the anchored match cannot be fooled by text merely containing the phrase.
+All fixtures use claude's real NBSP padding and CRLF: every pre-existing fixture used a plain ASCII prompt with neither, which is why three composer incidents reached production green.
+`bin/fm-lint.sh` passes clean.
+
+### Known latent hazard, NOT fixed here: the queued-message echo row
+
+While a message is queued, claude also renders it above the composer as an echo row, which is structurally indistinguishable from a composer holding that text:
+
+```
+  ^[[0m^[[38;2;80;80;80m^[[48;2;55;55;55mM-bM-^]M-/ ^[[0m^[[38;2;255;255;255m...second probe line ignore me^[[0m
+#            ❯=rgb(80,80,80) DARK                        echoed text: BRIGHT
+```
+
+`fm_composer_strip_ghost` drops the dark glyph (luma 80 < 128) and KEEPS the bright text, so the row classifies `pending` carrying the exact text just sent - the "Enter swallowed; text left in composer" shape precisely.
+It is currently masked only by row ORDER: `fm_backend_herdr_composer_state` keeps the LAST structural match scanning forward, and the real composer is always below the echo row, so the echo row never wins in steady state (verified across every sample above).
+
+This was deliberately left alone.
+Every available discriminator (the dark glyph, the NBSP-vs-space after the glyph, the row's background colour, the indent) identifies the LIVE composer by a claude rendering detail, and each one fails toward a FALSE SUCCESS: if claude shifts its palette so the live `❯` drops under `FM_COMPOSER_GHOST_LUMA_MAX`, or drops the NBSP, the real composer stops being recognized, no candidate is found, the verdict becomes `unknown`, and `fm-send`'s lenient policy reads `unknown` as delivered - a genuinely swallowed Enter reported as sent, which is strictly worse than the false failure fixed here.
+The two fixes above need no such discriminator.
+If the echo row is ever observed winning the scan, the fix is to make the scan pick the composer by STRUCTURE (position relative to the composer's own rules) rather than by styling - and it needs its own captured evidence first.
+
 ## Native `pane.agent_status_changed` push escalation (immediate blocked wake)
 
 Herdr exposes a native, push-based agent-state event stream, and firstmate folds it into the watcher so a crew entering `blocked` (waiting on the human at a permission/trust dialog, an interactive menu, or a wedged prompt) wakes its supervisor sub-second instead of after the ~240s stale-pane wedge timer.
@@ -975,6 +1084,12 @@ Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry
 - **Composer padding can be invisible whitespace the locale does not trim.** See "Incident (2026-07-17)" above.
   A harness may pad its empty composer row with a blank the C locale's `[:space:]` class does not cover (real claude uses U+00A0); `fm_composer_trim` (`bin/fm-composer-lib.sh`) normalizes U+00A0 specifically, on captured evidence, and is the place to extend if another harness turns up a different invisible pad.
   A pad that is not normalized fails safe (`pending`, so the injector defers rather than overwriting a draft) and surfaces through the max-defer alarm - but it defers FOREVER, so the alarm is the only signal.
+- **A harness placeholder recognized only by its STYLING is recognized only where styling survives.** See "Incident (2026-07-17b)" above.
+  The dim/dark-truecolor strip covers the two ANSI-capable adapters and only while a styled capture is actually available; herdr falls back to a plain capture on any ANSI read failure, and `orca`/`cmux` never have styling at all.
+  A placeholder whose text is known belongs in `FM_COMPOSER_PLACEHOLDER_RE` (fleet-wide) or a per-harness `idle_re` as well as the strip, so all four adapters agree.
+  Note this gap fails in OPPOSITE directions for the two callers: the away-mode injector defers (safe, surfaced by the max-defer alarm), while `fm-send` reports a FALSE submit failure - which invites a re-send into a live crew and is surfaced by nothing.
+- **The queued-message echo row is a latent false `pending` candidate.** See "Incident (2026-07-17b)" above, "Known latent hazard".
+  It is masked only by the scan's last-match-wins ordering, and every styling-based discriminator that would exclude it fails toward a false SUCCESS, which is why it was left alone.
 - **Ghost/placeholder suggestion handling depends on ANSI style.** See "Incident (2026-07-08)" and "Incident (2026-07-10)" above.
   Herdr 0.7.3 preserves the harness's own de-emphasis style (dim/faint and truecolor foreground) in `pane read --format ansi`, and `fm_backend_herdr_composer_state` extracts real typed content with the shared `fm_composer_strip_ghost` (`bin/fm-composer-lib.sh`), which drops dim/faint AND dark-truecolor runs to distinguish ghost suggestions/placeholders from real typed text.
   If a future herdr build strips ANSI style from `--format ansi`, the classifier loses its ghost signal and falls back to reading the suggestion text as `pending` - the fail-safe direction (it defers rather than risks overwriting a human draft), which the max-defer alarm then surfaces.

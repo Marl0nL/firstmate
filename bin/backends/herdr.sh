@@ -977,6 +977,11 @@ EOF
 #     across herdr's per-attempt confirmation budget (not once at the end), so a
 #     transition landing partway through a window is still caught before this
 #     loop gives up and sends a needless extra Enter.
+#   - Slow repaint (busy baseline): the composer path pays the same hazard in
+#     its own currency - claude repaints its composer row a few hundred ms after
+#     Enter - so it samples across the budget too, via
+#     fm_backend_herdr_wait_for_composer_clear. Reading the harness's render lag
+#     as a swallowed Enter was the 2026-07-17b false-failure incident.
 #   - Instant round-trip (a turn starts AND returns to idle between two
 #     polls): unavoidable in the absolute, but bounded by how tightly polls
 #     are packed into the budget; real claude/codex measured first-working
@@ -1007,8 +1012,8 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
     else
-      sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target")
+      verdict=$(fm_backend_herdr_wait_for_composer_clear "$target" \
+        "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
     fi
     case "$verdict" in
       busy) printf 'empty'; return 0 ;;
@@ -1130,6 +1135,43 @@ fm_backend_herdr_submit_confirm_budget() {  # <caller-budget-seconds>
     if (m > b) b = m
     printf "%.4f", b
   }' 2>/dev/null || printf '%s' "${1:-0}"
+}
+
+# fm_backend_herdr_wait_for_composer_clear: the busy-baseline mirror of
+# fm_backend_herdr_wait_for_working. Samples fm_backend_herdr_composer_state
+# repeatedly across ONE Enter attempt's confirmation budget and returns the
+# first verdict that is not `pending`; if every sample reads `pending` the
+# budget expires and `pending` is returned, exactly as the previous
+# single-sample read did.
+#
+# WHY (docs/herdr-backend.md "Incident (2026-07-17b)"): the busy path used to
+# take ONE composer sample per Enter, `sleep <enter-sleep>` after sending it.
+# claude does not repaint its composer instantly - measured live, the row still
+# carried the just-typed text ~0.4s after Enter and had repainted by ~0.8s - so
+# an early sample reads the harness's own render lag as a swallowed Enter. With
+# retries=3 x 0.4s the whole budget could land inside that lag on a loaded host
+# and report a false failure for a message that was already queued and delivered.
+# Sampling across the budget instead of once at its end is the same fix, for the
+# same reason, that fm_backend_herdr_wait_for_working already applies to the
+# idle path.
+#
+# This CANNOT convert a genuine swallow into a success: a swallowed Enter leaves
+# the text in the composer for every sample in the budget, so all of them read
+# `pending` and the verdict is unchanged. It only widens the window in which a
+# composer that DOES clear is allowed to prove it.
+fm_backend_herdr_wait_for_composer_clear() {  # <target> <budget-seconds> <polls>
+  local target=$1 budget=$2 polls=${3:-1} i interval verdict
+  case "$polls" in ''|*[!0-9]*|0) polls=1 ;; esac
+  interval=$(awk -v b="$budget" -v p="$polls" 'BEGIN { d = p - 1; if (d < 1) d = 1; v = b / d; if (v < 0) v = 0; printf "%.4f", v }' 2>/dev/null)
+  case "$interval" in ''|*[!0-9.]*) interval=0 ;; esac
+  for ((i = 0; i < polls; i++)); do
+    if [ "$polls" -eq 1 ] || [ "$i" -gt 0 ]; then
+      sleep "$interval"
+    fi
+    verdict=$(fm_backend_herdr_composer_state "$target")
+    [ "$verdict" = pending ] || { printf '%s' "$verdict"; return 0; }
+  done
+  printf 'pending'; return 0
 }
 
 fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <polls>

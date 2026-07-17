@@ -181,8 +181,79 @@ test_composer_trim_normalizes_nbsp_and_space() {
   pass "fm_composer_trim: trims NBSP padding and CR alongside the locale's [:space:] class"
 }
 
+# --- Queued-message placeholder (2026-07-17b incident) ----------------------
+# When claude is mid-turn it QUEUES a submitted message instead of starting a
+# new turn, and repaints its now-EMPTY composer row as the placeholder below.
+# The row is rendered dim, so the two ANSI-capable adapters already dropped it
+# as ghost text - but ONLY when a styled capture is available. herdr falls back
+# to a plain capture when its ANSI read fails, and orca/cmux never have styling
+# at all; on those paths the placeholder survived as ordinary text and the row
+# read `pending`, so fm-send reported "Enter swallowed" for a message that had
+# in fact been queued and delivered. See docs/herdr-backend.md
+# "Incident (2026-07-17b)".
+#
+# These fixtures use the REAL captured row shape - claude's NBSP padding after
+# the glyph and the trailing CR that herdr's capture carries - because every
+# pre-existing fixture used a plain ASCII prompt, which is exactly how three
+# composer incidents reached production green.
+QUEUED_PLACEHOLDER='Press up to edit queued messages'
+
+test_queued_placeholder_reads_empty() {
+  local out
+  # The real plain-capture row: "❯" + NBSP + placeholder + CR.
+  out=$(classify 0 $'\xe2\x9d\xaf\xc2\xa0'"$QUEUED_PLACEHOLDER"$'\r')
+  [ "$out" = empty ] \
+    || fail "the real captured queued row ('❯' + NBSP + placeholder + CR) must read empty (submitted and queued), got '$out'"
+  # Matched after the glyph is stripped, and on its own with no glyph at all.
+  out=$(classify 0 "❯ $QUEUED_PLACEHOLDER")
+  [ "$out" = empty ] || fail "'❯ <queued placeholder>' must read empty, got '$out'"
+  out=$(classify 0 "$QUEUED_PLACEHOLDER")
+  [ "$out" = empty ] || fail "a bare queued placeholder must read empty, got '$out'"
+  # Every adapter gets it, with or without a per-harness idle_re passed.
+  out=$(classify 0 "❯ $QUEUED_PLACEHOLDER" '^Type a message\.\.\.$')
+  [ "$out" = empty ] || fail "the queued placeholder must read empty alongside a harness idle_re, got '$out'"
+  out=$(classify 1 "$QUEUED_PLACEHOLDER")
+  [ "$out" = empty ] || fail "the queued placeholder must read empty inside a bordered box, got '$out'"
+  pass "fm_composer_classify_content: claude's queued-message placeholder reads empty on every adapter, styled capture or not"
+}
+
+# The other direction, and the one that matters most: recognizing the queued
+# state must NEVER become a blanket "claude is mid-turn, assume it landed".
+# A genuinely swallowed Enter leaves REAL text on the composer row and must
+# still read `pending` so fm-send fails closed (the grok 2026-07-03 incident).
+test_swallowed_enter_still_reads_pending() {
+  local out
+  # The real captured shape of a swallowed Enter: same NBSP padding, real text.
+  out=$(classify 0 $'\xe2\x9d\xaf\xc2\xa0fix findings 1 and 3\r')
+  [ "$out" = pending ] \
+    || fail "real typed text on the NBSP-padded claude row must read pending (swallowed Enter), got '$out'"
+  # Text that merely CONTAINS the placeholder phrase is not the placeholder: the
+  # pattern is anchored end-to-end so a transcript line or a crewmate quoting it
+  # cannot manufacture a false success.
+  out=$(classify 0 "❯ tell the crew: $QUEUED_PLACEHOLDER")
+  [ "$out" = pending ] || fail "text merely containing the placeholder phrase must read pending, got '$out'"
+  out=$(classify 0 "❯ $QUEUED_PLACEHOLDER now")
+  [ "$out" = pending ] || fail "the placeholder with a real trailing word must read pending, got '$out'"
+  pass "fm_composer_classify_content: a genuinely swallowed Enter still reads pending; the placeholder match is anchored, not a substring"
+}
+
+# The queued placeholder must not weaken the dead-shell injection-safety rule:
+# a bare shell husk stays unknown even though claude's placeholder now resolves.
+test_queued_placeholder_does_not_weaken_dead_shell_rule() {
+  local g out
+  for g in '>' '$' '%' '#'; do
+    out=$(classify 0 "${g}${NBSP}")
+    [ "$out" = unknown ] \
+      || fail "an NBSP-padded shell husk '$g' must still read unknown, got '$out'"
+  done
+  pass "fm_composer_classify_content: the queued placeholder leaves the dead-shell 'unknown' rule intact"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
+test_queued_placeholder_reads_empty
+test_swallowed_enter_still_reads_pending
+test_queued_placeholder_does_not_weaken_dead_shell_rule
 test_nbsp_padded_agent_glyph_is_empty
 test_nbsp_padded_shell_glyphs_are_still_unknown
 test_nbsp_padded_real_text_is_pending
