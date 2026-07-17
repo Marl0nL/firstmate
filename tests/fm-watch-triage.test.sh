@@ -105,7 +105,18 @@ test_stale_is_terminal_classifier() {
   printf 'working: compiling\n' > "$state/nonterm.status"
   stale_is_terminal "sess:fm-nonterm" "$state" && fail "non-terminal stale classified terminal"
   stale_is_terminal "sess:fm-missing" "$state" && fail "stale with no status classified terminal"
-  pass "stale_is_terminal: terminal status surfaces, non-terminal and no-status are benign"
+  # A crew that finished, then durably CLOSED its blocker key, ends its log
+  # done: ... / resolved: ... . The trailing resolved: is bookkeeping, not a state
+  # change, so the terminal test must scan past it to the done: line - otherwise a
+  # genuinely-done idle pane is misread as non-terminal and false-wedged (the
+  # 2026-07-17 incident this classifier owns the fix for).
+  printf 'blocked: waiting on infra\ndone: PR https://x/y/pull/9\nresolved: infra granted [key=infra]\n' > "$state/done-resolved.status"
+  stale_is_terminal "sess:fm-done-resolved" "$state" || fail "done: then resolved: not classified terminal (false-wedge)"
+  # But a crew that resolved a blocker MID-TASK and kept working ends working: then
+  # resolved: - that must stay NON-terminal, else a still-working crew reads as done.
+  printf 'working: building\nresolved: infra granted [key=infra]\n' > "$state/working-resolved.status"
+  stale_is_terminal "sess:fm-working-resolved" "$state" && fail "working: then resolved: wrongly classified terminal"
+  pass "stale_is_terminal: terminal status surfaces, non-terminal and no-status are benign, resolved: bookkeeping skipped"
 }
 
 test_scan_captain_relevant_statuses_classifier() {
@@ -126,6 +137,19 @@ test_classifier_primitives() {
   dir=$(make_case classify-primitives); state="$dir/state"
   printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
+  # last_state_status_line / status_line_is_resolved: the terminal-state input skips
+  # trailing resolved: bookkeeping to recover the real STATE verb.
+  status_line_is_resolved "resolved: closed [key=q1]" || fail "status_line_is_resolved missed a resolved: line"
+  status_line_is_resolved "done: b" && fail "status_line_is_resolved matched a non-resolved line"
+  printf 'blocked: waiting\ndone: PR https://x/y/pull/3\nresolved: unblocked [key=q1]\n' > "$state/dr.status"
+  [ "$(last_state_status_line "$state/dr.status")" = "done: PR https://x/y/pull/3" ] \
+    || fail "last_state_status_line did not skip trailing resolved: to reach done:"
+  printf 'working: building\nresolved: unblocked [key=q1]\n' > "$state/wr.status"
+  [ "$(last_state_status_line "$state/wr.status")" = "working: building" ] \
+    || fail "last_state_status_line did not skip resolved: to reach working:"
+  printf 'resolved: a\nresolved: b\n' > "$state/onlyres.status"
+  [ -z "$(last_state_status_line "$state/onlyres.status")" ] \
+    || fail "last_state_status_line returned a value for a resolved-only log"
   status_is_captain_relevant "done: b" || fail "done: not recognized as captain-relevant"
   status_is_captain_relevant "needs-decision [key=q1]: b" || fail "keyed needs-decision not recognized as captain-relevant"
   status_is_captain_relevant "working: b" && fail "working: wrongly recognized as captain-relevant"

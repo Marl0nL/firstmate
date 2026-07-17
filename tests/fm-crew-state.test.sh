@@ -955,7 +955,18 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   out=$(run_crew_state "$d" mate)
   assert_contains "$out" "state: working" "a real trailing state verb still renders"
   assert_contains "$out" "reconciling routed items" "a real state line still carries its detail"
-  pass "a trailing resolved: event does not corrupt state render (idle stays idle)"
+  # But a crew that FINISHED and THEN closed a blocker key ends done: ... / resolved:
+  # ... . Unlike a blocked:/needs-decision: that the resolve CLOSED (idle above), a
+  # done: is TERMINAL - a later resolved: does not un-finish it - so it must still
+  # read as done, not `unknown - no source` which the stale path would false-wedge
+  # (the 2026-07-17 incident). Only a terminal revealed verb is promoted this way.
+  printf 'done: PR https://github.com/o/r/pull/9\nresolved: infra granted [key=infra]\n' > "$d/state/mate.status"
+  out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "state: done" "done: then resolved: still reads as done, not unknown"
+  assert_contains "$out" "source: status-log" "the revealed done: is a real status-log state source"
+  assert_contains "$out" "pull/9" "the revealed done: line carries its own PR detail"
+  assert_not_contains "$out" "infra granted" "the resolved: bookkeeping prose must not leak into the detail"
+  pass "a trailing resolved: event does not corrupt state render (idle stays idle; done stays done)"
 }
 
 test_dead_window_ignores_stale_status_log() {

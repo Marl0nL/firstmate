@@ -571,6 +571,25 @@ if [ -n "$LOG_VERB" ]; then
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi
+  # LOG_STATE is unknown here. When the raw last line is a resolved: bookkeeping
+  # entry, look PAST it (last_state_status_line) to the real state verb. A crew that
+  # FINISHED and then durably closed a blocker key ends its log
+  #   done: PR ...
+  #   resolved: <blocker cleared> [key=...]
+  # and must still read as its terminal state, not `unknown - no source`, which the
+  # stale path would then false-wedge. Only a TERMINAL revealed verb (done/failed) is
+  # promoted: a resolved: that CLOSED the preceding blocked:/needs-decision:/working:
+  # leaves the crew IDLE, so resurrecting that now-closed non-terminal state would be
+  # wrong - it falls through to the idle default below exactly as before. This is the
+  # verb-only complement to the keyed fold: which key a resolve closes stays owned by
+  # fm-classify-lib.sh's status_open_decisions, consulted in the run-step path above.
+  if status_line_is_resolved "$LOG_LINE"; then
+    REVEALED=$(last_state_status_line "$LOG")
+    case "$(map_log_state "$REVEALED")" in
+      done|failed)
+        emit "$(map_log_state "$REVEALED")" status-log "$(status_line_note "$REVEALED")" ;;
+    esac
+  fi
 fi
 
 emit unknown none "no current-state source available"

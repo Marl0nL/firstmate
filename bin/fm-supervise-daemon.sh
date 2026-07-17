@@ -356,7 +356,7 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen
+  local win=$1 state=$2 task last term seen
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
   if [ -n "$last" ] && status_is_paused "$last"; then
@@ -368,15 +368,21 @@ classify_stale() {  # <window> <state>
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
     return
   fi
-  if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+  # Terminal test reads the last REAL STATE line (last_state_status_line skips
+  # trailing `resolved:` bookkeeping), so a crew that finished and then durably
+  # closed its blocker key (done: ... / resolved: ...) is recognized as terminal
+  # instead of false-wedged. Same shared owner the always-on watcher's
+  # stale_is_terminal uses, so both modes agree.
+  term=$(last_state_status_line "$state/$task.status")
+  if [ -n "$term" ] && status_is_captain_relevant "$term"; then
     # Dedupe against the signal path: if this status was already escalated
     # (seen marker matches), self-handle to avoid a duplicate in the digest.
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-    if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
-      printf 'self|stale + terminal (already escalated by signal): %s' "$last"
+    if [ "$(cat "$seen" 2>/dev/null || true)" = "$term" ]; then
+      printf 'self|stale + terminal (already escalated by signal): %s' "$term"
       return
     fi
-    printf 'escalate|stale + terminal status: %s' "$last"
+    printf 'escalate|stale + terminal status: %s' "$term"
     return
   fi
   # Non-terminal (or no status): defer to the persistence recheck. The caller
@@ -518,8 +524,11 @@ mark_escalated_seen() {  # <kind> <arg> <state>
         mark_status_seen "$state" "$task" "$last"
       done ;;
     stale)
+      # Match classify_stale's terminal test: the last REAL STATE line, past any
+      # trailing `resolved:` bookkeeping, so the seen marker records the exact
+      # line classify_stale escalated (a finished done: ... / resolved: ... pane).
       task=$(window_to_task "$arg" "$state")
-      last=$(last_status_line "$state/$task.status")
+      last=$(last_state_status_line "$state/$task.status")
       [ -n "$last" ] && status_is_captain_relevant "$last" \
         && mark_status_seen "$state" "$task" "$last" ;;
   esac
@@ -1208,7 +1217,10 @@ handle_wake() {  # <reason> <state>
       # wake, escalates a wedge.
       if [ "$kind" = "stale" ]; then
         task=$(window_to_task "$arg" "$state")
-        last=$(last_status_line "$state/$task.status")
+        # Terminal test on the last REAL STATE line (trailing `resolved:` skipped),
+        # matching classify_stale: a finished done: ... / resolved: ... pane must not
+        # be wedge-aged just because its last line is a resolved: bookkeeping entry.
+        last=$(last_state_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_captain_relevant "$last"; then
           stale_marker_remove "$arg" "$state"
         else
