@@ -125,8 +125,68 @@ test_real_text_is_pending() {
   pass "fm_composer_classify_content: real unsubmitted text reads pending (including a popup argument-hint fill)"
 }
 
+# --- NBSP composer padding (2026-07-17 incident) ----------------------------
+# Real claude 2.x pads its EMPTY composer row with U+00A0 after the prompt glyph
+# ("❯" + NBSP), and glibc's en_US.UTF-8 [:space:] does not include U+00A0, so a
+# plain bash trim leaves it attached. fm_composer_trim normalizes it BEFORE the
+# glyph cases run, which is what both fixes the false `pending` AND keeps the
+# dead-shell rule intact. See docs/herdr-backend.md "Incident (2026-07-17)".
+NBSP=$'\xc2\xa0'   # explicit UTF-8 bytes: see FM_COMPOSER_NBSP in the owner
+
+test_nbsp_padded_agent_glyph_is_empty() {
+  local g out
+  for g in '❯' '›'; do
+    out=$(classify 0 "${g}${NBSP}")
+    [ "$out" = empty ] \
+      || fail "an NBSP-padded agent glyph '$g' must read empty (a real idle claude composer), got '$out'"
+  done
+  out=$(classify 0 "❯${NBSP}${NBSP}")
+  [ "$out" = empty ] || fail "repeated NBSP padding must still read empty, got '$out'"
+  pass "fm_composer_classify_content: an NBSP-padded agent prompt glyph reads empty (the 2026-07-17 wedge shape)"
+}
+
+# The safety rule must survive the normalization: the NBSP is trimmed BEFORE the
+# exact glyph cases, so a padded shell husk trims back to a bare glyph and stays
+# unknown rather than stripping the glyph and hitting the post-strip empty path.
+test_nbsp_padded_shell_glyphs_are_still_unknown() {
+  local g out
+  for g in '>' '$' '%' '#'; do
+    out=$(classify 0 "${g}${NBSP}")
+    [ "$out" = unknown ] \
+      || fail "an NBSP-padded bare shell glyph '$g' must still read unknown (dead shell), got '$out'"
+    out=$(classify 1 "${g}${NBSP}")
+    [ "$out" = empty ] \
+      || fail "an NBSP-padded shell glyph '$g' INSIDE a composer box must still read empty, got '$out'"
+  done
+  pass "fm_composer_classify_content: NBSP padding never widens a dead-shell prompt into an injection target"
+}
+
+test_nbsp_padded_real_text_is_pending() {
+  local out
+  out=$(classify 0 "❯${NBSP}land pr 416 now")
+  [ "$out" = pending ] || fail "NBSP-padded real text must still read pending, got '$out'"
+  out=$(classify 0 "${NBSP}❯ land pr 416 now${NBSP}")
+  [ "$out" = pending ] || fail "NBSP-surrounded real text must still read pending, got '$out'"
+  pass "fm_composer_classify_content: NBSP padding never hides real unsubmitted text"
+}
+
+test_composer_trim_normalizes_nbsp_and_space() {
+  local out
+  out=$(fm_composer_trim "${NBSP} ❯ hi ${NBSP}")
+  [ "$out" = '❯ hi' ] || fail "fm_composer_trim must trim NBSP and ASCII blanks from both ends, got '$out'"
+  out=$(fm_composer_trim "${NBSP}${NBSP}")
+  [ -z "$out" ] || fail "an NBSP-only row must trim to empty, got '$out'"
+  out=$(fm_composer_trim $'\xe2\x9d\xaf\xc2\xa0\r')
+  [ "$out" = '❯' ] || fail "the real claude row ('❯' + NBSP + CR) must trim to a bare glyph, got '$out'"
+  pass "fm_composer_trim: trims NBSP padding and CR alongside the locale's [:space:] class"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
+test_nbsp_padded_agent_glyph_is_empty
+test_nbsp_padded_shell_glyphs_are_still_unknown
+test_nbsp_padded_real_text_is_pending
+test_composer_trim_normalizes_nbsp_and_space
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare

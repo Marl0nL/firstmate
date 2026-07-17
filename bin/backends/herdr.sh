@@ -732,6 +732,12 @@ fm_backend_herdr_strip_ansi() {  # <text>
 # afk-herdr-false-pending); it superseded a herdr-only faint byte-pattern check
 # that recognized only codex's bold-wrapped bare prompt and missed claude's own
 # dim ghost - the overnight away-mode injection wedge on the primary claude pane.
+#
+# NBSP padding note (docs/herdr-backend.md "Incident (2026-07-17)"): real claude
+# 2.x pads its EMPTY composer row as "❯" + U+00A0, which glibc's [:space:] does
+# not trim, so every trim here routes through the NBSP-aware fm_composer_trim
+# (bin/fm-composer-lib.sh). Without it the row read `pending` on every poll and
+# away-mode injection deferred forever.
 FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
 # Known ghost/placeholder composer text. Extend this if another
 # herdr-verified harness needs its own idle placeholder recognized.
@@ -820,9 +826,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   # kept for ANSI-aware content extraction after the scan.
   while IFS= read -r line; do
     row=$((row + 1))
-    trimmed=$(fm_backend_herdr_strip_ansi "$line")
-    trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
-    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    trimmed=$(fm_composer_trim "$(fm_backend_herdr_strip_ansi "$line")")
     [ -n "$trimmed" ] || continue
     case "$trimmed" in
       '│'*'│'|'┃'*'┃'|'|'*'|')
@@ -872,9 +876,32 @@ EOF
     esac
   elif [ "$FM_BACKEND_HERDR_PI_PAIR_FOUND" -eq 0 ] \
        && [ "$FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE" -gt "$generic_line" ]; then
-    # A lower unmatched separator proves the generic row is stale, but does
-    # not provide the complete Pi composer structure required for injection.
-    found=0
+    # An unmatched separator BELOW the generic row is Pi-specific evidence of
+    # staleness, and only Pi-specific: Pi's composer lives BETWEEN separators, so
+    # a separator below the generic row means that row sits outside the live
+    # composer. For a non-Pi agent the very same row is the composer's OWN bottom
+    # border - claude draws a rule between its composer and its footer - and
+    # proves nothing about staleness. Consulting identity here mirrors the
+    # complete-pair branch above; NOT consulting it was the 2026-07-17 outage
+    # (docs/herdr-backend.md): claude renders its workspace title INSIDE the
+    # composer's top rule ("──── Personal-Firstmate ──"), which is not a pure `─`
+    # run and so never pairs, leaving one unmatched rule below the live `❯` row.
+    # The veto then fired on every poll and away-mode injection deferred for 87
+    # minutes straight.
+    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    case "$agent:$agent_status" in
+      pi:*|:*)
+        # Pi (any status), or an unreadable identity: keep the conservative
+        # refusal. Without a complete separator pair there is no Pi composer
+        # structure to inject into, and an unreadable identity can never
+        # authorize one.
+        found=0
+        ;;
+      *) : ;; # A known non-Pi agent keeps its established generic verdict.
+    esac
   fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   # Content: extract the real typed text from the raw row with the shared,
@@ -885,16 +912,13 @@ EOF
   # afk-herdr-false-pending wedge) and, in a dark theme, drops the composer's own
   # dark box border too, which is why the bordered flag was read from the plain
   # shape above, not from this ghost-stripped content.
-  stripped=$(printf '%s\n' "$raw_match" | fm_composer_strip_ghost)
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  stripped=$(fm_composer_trim "$(printf '%s\n' "$raw_match" | fm_composer_strip_ghost)")
   if [ "$shape" = bordered ]; then
     bordered=1
     stripped=${stripped//│/}
     stripped=${stripped//┃/}
     stripped=${stripped//|/}
-    stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-    stripped="${stripped%"${stripped##*[![:space:]]}"}"
+    stripped=$(fm_composer_trim "$stripped")
   elif [ "$shape" = separated ]; then
     # The native Pi identity plus the complete separator pair is the genuine
     # composer container, equivalent to a bordered box for shared content

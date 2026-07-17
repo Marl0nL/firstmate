@@ -1055,6 +1055,226 @@ test_composer_state_claude_dim_ghost_row_with_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: real typed text on the same claude prompt row still reads pending"
 }
 
+# --- composer_state: claude's NBSP composer padding (2026-07-17 incident) -----
+# Captured live from a real `claude` under herdr 0.7.4 in an isolated lab
+# session (docs/herdr-backend.md "Incident (2026-07-17)"). Real claude renders
+# its EMPTY composer row as "❯" + U+00A0 (NBSP, \xc2\xa0), NOT "❯" + an ASCII
+# space, and herdr's `pane read --format ansi` returns CRLF line endings. glibc's
+# en_US.UTF-8 [:space:] class does NOT contain U+00A0, so the pre-fix trim left
+# the NBSP attached: the row never matched the exact bare-'❯' case, the leading
+# glyph was stripped, and the leftover NBSP read as real text -> `pending` on
+# every poll, forever. bin/fm-supervise-daemon.sh's inject_msg requires an
+# affirmative `empty`, so away-mode injection into a claude supervisor pane
+# deferred indefinitely (2026-07-17: zero successful sends, 00:09-01:35).
+#
+# Every pre-existing claude fixture above uses a plain ASCII "❯" with no NBSP
+# and no CRLF, which is exactly why none of them caught this. These fixtures
+# reproduce the real bytes: NBSP padding, CRLF endings, and the FULL-WIDTH
+# horizontal rules claude draws above and below its composer.
+herdr_claude_rule() {  # -> claude's full-width composer rule row, styled + CRLF
+  printf '\x1b[0m\x1b[38;2;136;136;136m'
+  local i; for i in $(seq 1 53); do printf '\xe2\x94\x80'; done
+  printf '\x1b[0m\r\n'
+}
+
+# claude's composer TOP rule on a WIDE pane carries the workspace title inside
+# the rule ("──── Personal-Firstmate ──"), so the row is NOT a pure `─` run and
+# fm_backend_herdr_pi_separator_row correctly declines it. Captured verbatim from
+# the live supervisor pane; see test_composer_state_claude_titled_top_rule_is_empty.
+herdr_claude_titled_rule() {  # <title> -> claude's titled composer rule + CRLF
+  local title=$1 i
+  printf '\x1b[0m\x1b[38;2;136;136;136m'
+  for i in $(seq 1 40); do printf '\xe2\x94\x80'; done
+  printf ' %s ' "$title"
+  printf '\xe2\x94\x80\xe2\x94\x80'
+  printf '\x1b[0m\r\n'
+}
+
+test_composer_state_claude_nbsp_padded_prompt_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-nbsp-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  {
+    printf '\xe2\x9c\xbb Churned for 5s\r\n\r\n'
+    herdr_claude_rule
+    printf '\xe2\x9d\xaf\xc2\xa0\r\n'
+    herdr_claude_rule
+    printf '  \x1b[0m\x1b[38;2;153;153;153m\xe2\x8f\xb8 manual mode on \xc2\xb7 ? for shortcuts\x1b[0m\r\n'
+  } > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p1' "$ROOT" )
+  [ "$out" = empty ] || fail "a real idle claude composer ('❯' + U+00A0 NBSP + CRLF, between full-width rules) must read empty, got '$out' (regression: the NBSP survived the trim and read as pending forever, wedging away-mode injection)"
+  pass "fm_backend_herdr_composer_state: real claude's NBSP-padded idle '❯' row reads empty (the 2026-07-17 wedge shape)"
+}
+
+# The same NBSP-padded row with REAL typed text must still refuse injection, so
+# the NBSP fix never widens the guard over a human's half-typed line.
+test_composer_state_claude_nbsp_padded_prompt_with_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-nbsp-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  {
+    herdr_claude_rule
+    printf '\xe2\x9d\xaf\xc2\xa0hello captain real typed text\r\n'
+    herdr_claude_rule
+    printf '  \x1b[0m\x1b[38;2;153;153;153m\xe2\x8f\xb8 manual mode on\x1b[0m\r\n'
+  } > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p1' "$ROOT" )
+  [ "$out" = pending ] || fail "real typed text on an NBSP-padded claude composer row must still read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: NBSP-padded claude row with real text still reads pending"
+}
+
+# The dead-shell safety rule under the same NBSP padding: a bare shell husk
+# whose prompt carries NBSP padding must still refuse. The NBSP normalization
+# runs BEFORE the exact bare-glyph cases precisely so this row trims back to a
+# bare '>' and stays `unknown`, instead of stripping the glyph and falling
+# through to the post-strip empty path.
+test_composer_state_nbsp_padded_shell_husk_is_unknown() {
+  local dir log resp fb out glyph idx=1
+  dir="$TMP_ROOT/composer-nbsp-husk"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  for glyph in '>' '$' '%' '#'; do
+    printf '%s\xc2\xa0\r\n' "$glyph" > "$resp/$idx.out"
+    idx=$((idx + 1))
+  done
+  fb=$(make_herdr_fakebin "$dir")
+  for glyph in '>' '$' '%' '#'; do
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p1' "$ROOT" )
+    [ "$out" = unknown ] || fail "an NBSP-padded dead-shell prompt '$glyph' must still read unknown, got '$out' (the NBSP fix must never widen a shell husk into an injection target)"
+  done
+  pass "fm_backend_herdr_composer_state: NBSP-padded bare shell husks still read unknown"
+}
+
+# --- composer_state: claude's TITLED composer rule (the 2026-07-17 outage) ----
+# THE outage shape, captured read-only from the live primary claude-on-herdr
+# supervisor pane default:w1:p1 (docs/herdr-backend.md "Incident (2026-07-17)").
+# claude renders the workspace title INSIDE its composer's TOP rule on a wide
+# pane:
+#
+#   17  ──────────…──── Personal-Firstmate ──   <- NOT a pure ─ run
+#   18  ❯ <NBSP>                                 <- the live composer
+#   19  ──────────────────────────────────────   <- a pure ─ run
+#   20    ⏵⏵ auto mode on … · esc to interrupt
+#
+# fm_backend_herdr_pi_separator_row only accepts a row of PURE `─`, so the titled
+# rule never registers as a separator: the pair is incomplete
+# (FM_BACKEND_HERDR_PI_PAIR_FOUND=0) while one unmatched separator sits BELOW the
+# generic match (LAST_SEPARATOR_LINE=19 > generic_line=18). The Pi veto then fired
+# on EVERY poll and the daemon logged `state=unknown` 365 times (00:09-01:35,
+# zero successful sends). The veto's premise - "a lower unmatched separator proves
+# the generic row is stale" - is true only for Pi, whose composer lives BETWEEN
+# separators; for claude that lower rule is the composer's own bottom border.
+#
+# A narrow pane hides this: claude drops the title when there is no room, leaving
+# a pure rule that pairs normally. The pre-existing claude fixtures all use short
+# untitled rules, which is why the suite never caught it.
+test_composer_state_claude_titled_top_rule_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-titled-rule"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  {
+    printf '\xe2\x9c\xbb Inferring\xe2\x80\xa6 (13s \xc2\xb7 \xe2\x86\x93 213 tokens \xc2\xb7 thinking)\r\n'
+    printf '  \xe2\x94\x9d  Tip: Run /install-slack-app to use Claude in Slack\r\n'
+    herdr_claude_titled_rule 'Personal-Firstmate'
+    printf '\x1b[0m\x1b[38;2;153;153;153m\xe2\x9d\xaf\xc2\xa0\x1b[0m\r\n'
+    herdr_claude_rule
+    printf '  \x1b[0m\x1b[38;2;153;153;153m\xe2\x8f\xb5\xe2\x8f\xb5 auto mode on (shift+tab to cycle) \xc2\xb7 esc to interrupt\x1b[0m\r\n'
+  } > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p1' "$ROOT" )
+  [ "$out" = empty ] || fail "the real supervisor-pane shape (titled top rule, so the separator pair never completes) must read empty, got '$out' (regression: this is the 87-minute away-mode outage - the Pi veto fired on a claude pane and the daemon logged state=unknown 365 times)"
+  pass "fm_backend_herdr_composer_state: claude's TITLED composer rule no longer trips the Pi veto (the 2026-07-17 outage shape)"
+}
+
+# The COMPLETE real shape, captured verbatim from the live supervisor pane
+# default:w1:p1 while it was idle (agent_status=done): the titled top rule, the
+# NBSP-padded prompt, AND claude's SGR-2 dim rotating ghost suggestion on the
+# same row. This is the exact stack the 87-minute outage ran on, and it needs
+# all three mechanisms working together to reach `empty`:
+#   1. the identity-aware veto      (else `unknown`  - the veto short-circuits)
+#   2. the shared dim-ghost strip   (else `pending`  - the suggestion reads real)
+#   3. the NBSP-aware trim          (else `pending`  - the pad reads real)
+# Verified against the real pane: main -> unknown, veto fix alone -> pending,
+# NBSP fix alone -> unknown, both -> empty.
+test_composer_state_claude_titled_rule_with_dim_ghost_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-titled-ghost"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  {
+    printf '\xe2\x9c\xbb Inferring\xe2\x80\xa6 (13s \xc2\xb7 \xe2\x86\x93 213 tokens \xc2\xb7 thinking)\r\n'
+    printf '  \xe2\x94\x9d  Tip: Run /install-slack-app to use Claude in Slack\r\n'
+    herdr_claude_titled_rule 'Personal-Firstmate'
+    printf '\xe2\x9d\xaf\xc2\xa0\x1b[0m\x1b[2mrebase 17 onto main while the review runs\x1b[0m\r\n'
+    herdr_claude_rule
+    printf '  \xe2\x8f\xb5\xe2\x8f\xb5 auto mode on (shift+tab to cycle)\r\n'
+  } > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"done"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p1' "$ROOT" )
+  [ "$out" = empty ] || fail "the complete real supervisor shape (titled rule + NBSP pad + dim ghost, idle) must read empty, got '$out' (this is the exact 2026-07-17 outage stack)"
+  pass "fm_backend_herdr_composer_state: the complete real outage shape (titled rule + NBSP + dim ghost) reads empty"
+}
+
+# The same titled-rule shape carrying REAL typed text must still refuse: making
+# the veto identity-aware must not cost the pending guard.
+test_composer_state_claude_titled_top_rule_with_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-titled-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  {
+    herdr_claude_titled_rule 'Personal-Firstmate'
+    printf '\xe2\x9d\xaf\xc2\xa0land pr 8 when green\r\n'
+    herdr_claude_rule
+    printf '  \xe2\x8f\xb5\xe2\x8f\xb5 auto mode on\r\n'
+  } > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p1' "$ROOT" )
+  [ "$out" = pending ] || fail "real typed text under a titled composer rule must still read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: the identity-aware veto still refuses real typed text under a titled rule"
+}
+
+# The veto stays conservative exactly where its Pi-specific premise still holds:
+# an incomplete separator pair under a Pi identity (any status), or under an
+# identity that cannot be read at all, must never authorize injection.
+test_composer_state_unmatched_separator_still_refuses_pi_and_unreadable() {
+  local dir log resp fb out case_id
+  for case_id in pi-idle pi-working unreadable; do
+    dir="$TMP_ROOT/composer-veto-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    {
+      printf '\xe2\x9d\xaf\xc2\xa0\r\n'
+      herdr_claude_rule
+      printf '  footer\r\n'
+    } > "$resp/1.out"
+    case "$case_id" in
+      pi-idle) printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out" ;;
+      pi-working) printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/2.out" ;;
+      unreadable) printf '1\n' > "$resp/2.exit" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p1' "$ROOT" )
+    [ "$out" = unknown ] || fail "an unmatched separator below the generic row must still refuse for '$case_id', got '$out'"
+  done
+  pass "fm_backend_herdr_composer_state: an incomplete separator pair still refuses for Pi (any status) and for an unreadable identity"
+}
+
+# Pi's separated composer under the same NBSP normalization: an idle Pi row
+# padded with NBSP still reads empty, and Pi's identity conjunction is unchanged.
+test_composer_state_pi_nbsp_padded_idle_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-pi-nbsp-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\r\n\xc2\xa0\x1b[7m \x1b[0m\r\n\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\r\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "an NBSP-padded idle Pi separator composer should read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: an NBSP-padded idle Pi separator composer still reads empty"
+}
+
 # grok's TRUECOLOR placeholder gap (harness-adapters "Known gap"), now covered by
 # the same owner. grok renders its composer inside a bordered box whose border
 # and placeholder/hint text use a dark, muted truecolor foreground (verified live
@@ -2098,6 +2318,14 @@ test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
 test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
 test_composer_state_claude_dim_ghost_row_with_real_text_is_pending
+test_composer_state_claude_nbsp_padded_prompt_is_empty
+test_composer_state_claude_nbsp_padded_prompt_with_real_text_is_pending
+test_composer_state_nbsp_padded_shell_husk_is_unknown
+test_composer_state_claude_titled_top_rule_is_empty
+test_composer_state_claude_titled_rule_with_dim_ghost_is_empty
+test_composer_state_claude_titled_top_rule_with_real_text_is_pending
+test_composer_state_unmatched_separator_still_refuses_pi_and_unreadable
+test_composer_state_pi_nbsp_padded_idle_is_empty
 test_composer_state_grok_dark_truecolor_placeholder_is_empty
 test_composer_state_grok_bright_truecolor_real_text_is_pending
 test_composer_state_codex_bare_prompt_glyph_is_empty
