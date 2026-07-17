@@ -196,7 +196,9 @@ fm_composer_trim() {  # <content>
 #   [idle_re]  optional per-harness idle-placeholder regex (e.g. grok's
 #              "Type a message...") that reads as empty; matched both before and
 #              after a leading prompt glyph is stripped, so a pattern written
-#              with or without the glyph both land.
+#              with or without the glyph both land. The fleet-wide
+#              FM_COMPOSER_PLACEHOLDER_RE is matched at the same two points for
+#              every caller, whether or not one is passed.
 fm_composer_idle_matches() {
   local content=$1 idle_re=$2 idle_case=$3
   [ -n "$idle_re" ] || return 1
@@ -204,6 +206,44 @@ fm_composer_idle_matches() {
     insensitive) printf '%s' "$content" | grep -qiE "$idle_re" ;;
     *) printf '%s' "$content" | grep -qE "$idle_re" ;;
   esac
+}
+
+# FM_COMPOSER_PLACEHOLDER_RE: fleet-wide harness placeholders that PROVE the
+# composer holds no real unsubmitted text, recognized by every adapter rather
+# than by a single harness's idle_re. Today it carries one entry: claude's
+# queued-state placeholder (docs/herdr-backend.md "Incident (2026-07-17b)").
+# When claude is mid-turn it QUEUES a submitted message instead of starting a
+# new turn, and repaints its (now empty) composer row as
+# "❯" + U+00A0 + dim "Press up to edit queued messages" (verified live, claude
+# 2.x on herdr 0.7.4, 2026-07-17).
+#
+# WHY A LITERAL MATCH AND NOT JUST THE DIM STYLING: the placeholder is rendered
+# SGR 2 (dim), so fm_composer_strip_ghost already drops it on the two
+# ANSI-capable adapters (tmux, herdr) - but ONLY when a styled capture is
+# actually available. herdr falls back to a PLAIN capture whenever its ANSI read
+# fails, and the orca/cmux adapters read a plain screen and have no styling at
+# all. On every one of those paths the placeholder survives as ordinary text and
+# the row reads `pending` - a submitted-and-queued message misreported as an
+# Enter swallowed by the composer. Matching the literal here fixes all four
+# adapters at once, exactly as the per-harness idle_re already does for grok's
+# "Type a message..." placeholder.
+#
+# WHY THIS CANNOT MANUFACTURE A FALSE SUCCESS: this string is claude's own
+# EMPTY-composer placeholder - it is drawn INSTEAD of composer content, never
+# beside it. A composer holding real typed text renders that text and no
+# placeholder (verified live: the same pane, mid-turn, reads
+# "❯" + NBSP + "<typed text>" before Enter and "❯" + NBSP + dim placeholder
+# after). So the placeholder appearing on the composer row is itself the proof
+# that whatever was typed is no longer there - i.e. that the Enter landed. The
+# residual collision (a crewmate typing this exact sentence and having its Enter
+# genuinely swallowed) is the same accepted risk grok's idle placeholder already
+# carries, and it is anchored end-to-end so a transcript line merely CONTAINING
+# the phrase cannot match.
+FM_COMPOSER_PLACEHOLDER_RE=${FM_COMPOSER_PLACEHOLDER_RE:-'^Press up to edit queued messages$'}
+
+fm_composer_placeholder_matches() {  # <content> <idle_re> <idle_case>
+  fm_composer_idle_matches "$1" "$FM_COMPOSER_PLACEHOLDER_RE" sensitive && return 0
+  fm_composer_idle_matches "$1" "$2" "$3"
 }
 
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
@@ -233,8 +273,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   esac
   # Nothing on the row = empty composer.
   [ -n "$content" ] || { printf 'empty'; return 0; }
-  # Known idle placeholder (matched before a leading glyph is stripped).
-  if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
+  # Known idle/queued placeholder (matched before a leading glyph is stripped).
+  if fm_composer_placeholder_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
   # Strip a leading prompt glyph, then re-judge the remainder.
@@ -244,9 +284,9 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   esac
   content=$(fm_composer_trim "$content")
   [ -n "$content" ] || { printf 'empty'; return 0; }
-  # Known idle placeholder (matched again after the leading glyph was stripped,
-  # e.g. "❯ Type a message...").
-  if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
+  # Known idle/queued placeholder (matched again after the leading glyph was
+  # stripped, e.g. "❯ Type a message...", "❯ Press up to edit queued messages").
+  if fm_composer_placeholder_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
   # Real, unsubmitted content remains.
