@@ -71,6 +71,44 @@ last_status_line() {
   grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
 }
 
+# 0 if a status line's leading verb is the decision-closing resolve verb
+# (resolved: <how it was closed>). A pure read of the line's verb, so the
+# terminal-state scan below and any consumer can recognize a bookkeeping line
+# without hardcoding the verb literal. FM_CLASSIFY_RESOLVE_VERB overrides it.
+status_line_is_resolved() {  # <status-line>
+  local line=$1
+  [ -n "$line" ] || return 1
+  [ "$(status_line_verb "$line")" = "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" ]
+}
+
+# Return the last non-blank status line that carries a REAL STATE verb, scanning
+# backward past trailing `resolved:` bookkeeping lines (empty if the file is
+# missing/blank or holds only resolved: lines). This is the terminal-state input:
+# AGENTS.md section 11 tells a crew that OPENED a keyed decision or blocker to
+# durably CLOSE it with a `resolved:` line, so a crew that finished correctly ends
+# its log
+#     done: PR https://.../pull/NN
+#     resolved: <how the blocker cleared> [key=...]
+# A `resolved:` line records that a KEY closed, NOT that the TASK changed state, so
+# reading the raw last line (last_status_line) misreads that finished log as
+# non-terminal and false-wedges an idle-but-done pane. Skipping only resolved:
+# lines recovers the real state verb: `done:` then `resolved:` -> `done:` (terminal);
+# `working:` then `resolved:` -> `working:` (NOT terminal), because a crew can close a
+# blocker MID-TASK and keep working. This is deliberately verb-only, not the keyed
+# fold: it answers "what is the last real state verb", which is exactly the
+# terminal/stale question. Current-crew-state readers that must honor which key a
+# resolve CLOSED use the keyed fold (status_open_decisions) instead.
+last_state_status_line() {  # <status-file>
+  local f=$1 line keep=''
+  [ -e "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    status_line_is_resolved "$line" && continue
+    keep=$line
+  done < "$f"
+  printf '%s' "$keep"
+}
+
 # 0 if the given (last) status line matches a captain-relevant verb.
 status_is_captain_relevant() {
   local line=$1 verb
@@ -339,13 +377,16 @@ signal_crew_provably_working() {  # <file> ...
   return 0
 }
 
-# 0 (terminal/actionable) if a stale window's last status line is
-# captain-relevant; 1 otherwise, including the no-status case. A 1 only means
+# 0 (terminal/actionable) if a stale window's last REAL STATE line (trailing
+# `resolved:` bookkeeping skipped - see last_state_status_line) is captain-relevant;
+# 1 otherwise, including the no-status case. Reading past resolved: is what stops a
+# crew that finished and then durably closed its blocker key (done: ... / resolved:
+# ...) from being misread as non-terminal and false-wedged. A 1 only means
 # "non-terminal"; the always-on watcher then applies crew_is_provably_working,
 # while the away-mode daemon applies its persistence recheck.
 stale_is_terminal() {  # <window> <state>
   local win=$1 state=$2 last
-  last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
+  last=$(last_state_status_line "$state/$(window_to_task "$win" "$state").status")
   [ -n "$last" ] && status_is_captain_relevant "$last"
 }
 
