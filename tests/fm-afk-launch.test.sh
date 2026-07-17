@@ -31,11 +31,22 @@ SLEEPER=$(mktemp "${TMPDIR:-/tmp}/fm-afk-sleeper.XXXXXX")
 printf '#!/usr/bin/env bash\nexec sleep 600\n' > "$SLEEPER"
 chmod +x "$SLEEPER"
 TRACK_TMUX_SESSIONS=""
+
+# Every per-test scratch dir is appended to this array right after its mktemp
+# call (never through a helper invoked via command substitution - that runs in
+# a subshell and any append inside it never reaches this array) so
+# GLOBAL_CLEANUP removes it unconditionally on EXIT: on failure, on interrupt,
+# or when a test is killed before reaching its own inline `rm -rf`.
+AFK_TMP_DIRS=()
+
 GLOBAL_CLEANUP() {
   rm -f "$SLEEPER" 2>/dev/null || true
-  local s
+  local s d
   for s in $TRACK_TMUX_SESSIONS; do
     tmux kill-session -t "$s" 2>/dev/null || true
+  done
+  for d in "${AFK_TMP_DIRS[@]:-}"; do
+    [ -n "$d" ] && rm -rf "$d" 2>/dev/null
   done
 }
 trap GLOBAL_CLEANUP EXIT
@@ -45,7 +56,7 @@ trap GLOBAL_CLEANUP EXIT
 # ---------------------------------------------------------------------------
 unit_clear_stale() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-clear.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-clear.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
   : > "$st/state/.subsuper-escalations.since"
@@ -76,7 +87,7 @@ unit_clear_stale() {
 # ---------------------------------------------------------------------------
 unit_fresh_vs_refresh() {
   local st sleep_pid lock
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
   : > "$st/state/.subsuper-inject-wedged"
@@ -105,7 +116,7 @@ unit_fresh_vs_refresh() {
 # ---------------------------------------------------------------------------
 unit_stop_ordering() {
   local st lock marker daemon_pid
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   date '+%s' > "$st/state/.afk"
   marker="$st/afk-at-term"
@@ -143,7 +154,7 @@ unit_stop_ordering() {
 
 unit_stop_rejects_reused_pid() {
   local st lock sleeper_pid
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-pid-reuse.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-pid-reuse.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   date '+%s' > "$st/state/.afk"
   sleep 600 &
@@ -165,7 +176,7 @@ unit_stop_rejects_reused_pid() {
 
 unit_failed_start_rolls_back_state() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-failed-start.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-failed-start.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   printf 'pending\n' > "$st/state/.subsuper-escalations"
   printf 'wedged\n' > "$st/state/.subsuper-inject-wedged"
@@ -185,7 +196,7 @@ unit_failed_start_rolls_back_state() {
 unit_concurrent_start_serialized() {
   command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (concurrent start)"; return 0; }
   local st cap_session cap_pane first second rec count
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-concurrent.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-concurrent.XXXXXX"); AFK_TMP_DIRS+=("$st")
   cap_session="fm-afk-concurrent-cap-$$"
   tmux new-session -d -s "$cap_session" 2>/dev/null || { fail "concurrent start: captain session creation failed"; rm -rf "$st"; return 0; }
   TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $cap_session"
@@ -210,7 +221,7 @@ unit_concurrent_start_serialized() {
 
 unit_lock_initialization_grace() {
   local st marker initializer
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-lock-init.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-lock-init.XXXXXX"); AFK_TMP_DIRS+=("$st")
   marker="$st/initialized"
   mkdir -p "$st/state/.afk-launch.lock"
   (
@@ -239,7 +250,7 @@ unit_lock_initialization_grace() {
 
 unit_signal_exits_with_lock_cleanup() {
   local st marker child
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-signal.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-signal.XXXXXX"); AFK_TMP_DIRS+=("$st")
   marker="$st/resumed"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
@@ -264,7 +275,7 @@ unit_signal_exits_with_lock_cleanup() {
 
 unit_herdr_partial_create_recovery() {
   local st recorded
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-partial.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-partial.XXXXXX"); AFK_TMP_DIRS+=("$st")
   recorded="$st/recorded"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY=/bin/true \
     FM_AFK_LAUNCH_LABEL=afk-exact-label RECORDED="$recorded" bash -c '
@@ -294,7 +305,7 @@ unit_herdr_partial_create_recovery() {
 
 unit_herdr_error_with_exact_ids_closes_exact() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-error-exact.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-error-exact.XXXXXX"); AFK_TMP_DIRS+=("$st")
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
     fm_backend_source() { return 0; }
@@ -321,7 +332,7 @@ unit_herdr_error_with_exact_ids_closes_exact() {
 
 unit_herdr_run_failure_preserves_unconfirmed_record() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-run-fail.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-run-fail.XXXXXX"); AFK_TMP_DIRS+=("$st")
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
     fm_backend_source() { return 0; }
@@ -350,7 +361,7 @@ unit_herdr_run_failure_preserves_unconfirmed_record() {
 
 unit_record_failure_closes_terminal() {
   local st closed
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-record-fail.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-record-fail.XXXXXX"); AFK_TMP_DIRS+=("$st")
   closed="$st/closed"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" CLOSED="$closed" bash -c '
     . "$1"
@@ -368,7 +379,7 @@ unit_record_failure_closes_terminal() {
 
 unit_readiness_failure_rolls_back_terminal() {
   local st closed
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-not-ready.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-not-ready.XXXXXX"); AFK_TMP_DIRS+=("$st")
   closed="$st/closed"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" CLOSED="$closed" bash -c '
     . "$1"
@@ -388,7 +399,7 @@ unit_readiness_failure_rolls_back_terminal() {
 
 unit_readiness_failure_preserves_unconfirmed_record() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-not-ready-unconfirmed.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-not-ready-unconfirmed.XXXXXX"); AFK_TMP_DIRS+=("$st")
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
     fm_afk_launch_wait_ready() { return 1; }
@@ -406,7 +417,7 @@ unit_readiness_failure_preserves_unconfirmed_record() {
 
 unit_tmux_absence_distinguishes_probe_failure() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-probe.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-probe.XXXXXX"); AFK_TMP_DIRS+=("$st")
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
     tmux() { printf "%s" "can'\''t find session: exact-session" >&2; return 1; }
@@ -423,7 +434,7 @@ unit_tmux_absence_distinguishes_probe_failure() {
 
 unit_native_lifecycle() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
@@ -445,7 +456,7 @@ unit_native_lifecycle() {
 
 unit_native_entry_preserves_prepared_state() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-entry.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-entry.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   : > "$st/state/.afk"
   : > "$st/state/.subsuper-escalations"
@@ -464,7 +475,7 @@ unit_native_entry_preserves_prepared_state() {
 
 unit_close_failure_preserves_record() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-close-fail.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-close-fail.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   printf 'tmux\texact-session\towned\n' > "$st/state/.afk-daemon-terminal"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
@@ -483,7 +494,7 @@ unit_close_failure_preserves_record() {
 
 unit_record_publication_atomic() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-record-atomic.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-record-atomic.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   printf 'tmux\told-session\towned\n' > "$st/state/.afk-daemon-terminal"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
@@ -502,7 +513,7 @@ unit_record_publication_atomic() {
 
 unit_malformed_record_fails_closed() {
   local st acted
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-record-malformed.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-record-malformed.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
   acted="$st/acted"
@@ -521,7 +532,7 @@ unit_malformed_record_fails_closed() {
 
 unit_stop_malformed_record_fails_closed() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-malformed.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-malformed.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   : > "$st/state/.afk"
   printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
@@ -538,7 +549,7 @@ unit_stop_malformed_record_fails_closed() {
 
 unit_tmux_planned_record_and_collision() {
   local st first second
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-plan.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-plan.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
@@ -560,7 +571,7 @@ unit_tmux_planned_record_and_collision() {
   first=$(cat "$st/created-name")
   rm -rf "$st"
 
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-unique.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-unique.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
@@ -585,7 +596,7 @@ unit_tmux_planned_record_and_collision() {
 
 unit_stop_validates_before_signal() {
   local st sleeper_pid
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-validate.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-validate.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   : > "$st/state/.afk"
   printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
@@ -606,7 +617,7 @@ unit_stop_validates_before_signal() {
 
 unit_lock_requires_complete_metadata() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-lock-metadata.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-lock-metadata.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
@@ -622,7 +633,7 @@ unit_lock_requires_complete_metadata() {
 
 unit_stop_surfaces_afk_removal_failure() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-remove.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-remove.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   : > "$st/state/.afk"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
@@ -639,7 +650,7 @@ unit_stop_surfaces_afk_removal_failure() {
 
 unit_stop_confirms_daemon_exit() {
   local st daemon_pid
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-live.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-live.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state/.supervise-daemon.lock"
   : > "$st/state/.afk"
   printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
@@ -672,7 +683,7 @@ unit_stop_confirms_daemon_exit() {
 
 unit_refresh_validates_record() {
   local st daemon_pid
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-record.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-record.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state/.supervise-daemon.lock"
   printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
   sleep 30 & daemon_pid=$!
@@ -694,7 +705,7 @@ unit_refresh_validates_record() {
 
 unit_clear_failure_aborts_entry() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-clear-fail.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-clear-fail.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
@@ -712,7 +723,7 @@ unit_clear_failure_aborts_entry() {
 
 unit_confirmed_absence_succeeds() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-confirmed-absent.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-confirmed-absent.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   printf 'tmux\texact-session\towned\n' > "$st/state/.afk-daemon-terminal"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
@@ -730,7 +741,7 @@ unit_confirmed_absence_succeeds() {
 
 unit_incomplete_restore_retains_backup() {
   local st backup
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-restore-fail.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-restore-fail.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   backup=$(mktemp -d "$st/state/.afk-launch-backup.XXXXXX")
   printf 'prior\n' > "$backup/.afk"
@@ -748,7 +759,7 @@ unit_incomplete_restore_retains_backup() {
 
 unit_flag_write_failure_aborts() {
   local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-flag-fail.XXXXXX")
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-flag-fail.XXXXXX"); AFK_TMP_DIRS+=("$st")
   mkdir -p "$st/state"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
@@ -778,7 +789,7 @@ e2e_herdr() {
   local before during after ws_before ws_during ws_after out dtgt dtab
   SESSION="fm-lab-afk-launch-e2e-$$"
   export HERDR_SESSION="$SESSION"
-  home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-e2e-home.XXXXXX")
+  home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-e2e-home.XXXXXX"); AFK_TMP_DIRS+=("$home_tmp")
   E2E_HERDR_CLEANUP() {
     FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
       FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=herdr "$LAUNCH" stop >/dev/null 2>&1 || true
@@ -832,7 +843,7 @@ e2e_tmux() {
   command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (tmux e2e)"; return 0; }
   local cap_session home_tmp cap_pane before during after rec
   cap_session="fm-afk-launch-cap-$$"
-  home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-home.XXXXXX")
+  home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-home.XXXXXX"); AFK_TMP_DIRS+=("$home_tmp")
   tmux new-session -d -s "$cap_session" 2>/dev/null || { fail "tmux e2e: could not create captain session"; rm -rf "$home_tmp"; return 0; }
   TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $cap_session"
   cap_pane=$(tmux display-message -p -t "$cap_session" '#{pane_id}')

@@ -35,7 +35,7 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 SEND="$ROOT/bin/fm-send.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 
-TMP=$(fm_test_tmproot fm-gate-refuse)
+fm_test_tmproot TMP fm-gate-refuse
 fm_git_identity fmtest fmtest@example.invalid
 
 # The env marker's exact stderr fragment (the primary signal).

@@ -15,7 +15,7 @@ set -u
 command -v jq >/dev/null 2>&1 || { pass "fm-usage-poll: jq unavailable, skipping"; exit 0; }
 
 POLL="$ROOT/bin/fm-usage-poll.sh"
-TMP=$(fm_test_tmproot fm-usage-poll)
+fm_test_tmproot TMP fm-usage-poll
 HOME_DIR="$TMP/home"
 TX="$TMP/tx/proj"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$TX/subagents"
