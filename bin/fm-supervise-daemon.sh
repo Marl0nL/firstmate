@@ -375,6 +375,24 @@ classify_stale() {  # <window> <state>
   # stale_is_terminal uses, so both modes agree.
   term=$(last_state_status_line "$state/$task.status")
   if [ -n "$term" ] && status_is_captain_relevant "$term"; then
+    # A crew PARKED AWAITING MERGE (reconciled done + armed merge-monitor + idle, via
+    # crew_is_parked_awaiting_merge - the same shared predicate the always-on watcher
+    # uses, so both modes agree) legitimately idles until its PR merges; the
+    # merge-monitor, not a stale poll, is the live signal. Self-handle it so the stale
+    # path never re-escalates the same done: line on each churny idle-pane hash. Its
+    # done: PR-ready still reaches the away digest via the signal path and the
+    # heartbeat catch-all scan (both independent of this stale path and untouched
+    # here, since this branch records no seen marker), so nothing is lost. Returning
+    # `self` routes to handle_wake's self branch, which drops any wedge stale marker
+    # for this captain-relevant (done) crew - no wedge aging survives. Re-read from
+    # CURRENT state every wake, never latched: a re-activated crew (busy pane, or its
+    # verb moved off done) fails the predicate and its stale path returns to full
+    # sensitivity, so a re-activated crew that then wedges is escalated as any working
+    # crew would be.
+    if crew_is_parked_awaiting_merge "$task" "$state"; then
+      printf 'self|parked awaiting merge (merge-monitor is the live signal): %s' "$term"
+      return
+    fi
     # Dedupe against the signal path: if this status was already escalated
     # (seen marker matches), self-handle to avoid a duplicate in the digest.
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"

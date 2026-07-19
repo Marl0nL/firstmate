@@ -354,6 +354,43 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
+# 0 (absorb: parked-awaiting-merge) iff crew <id> is RIGHT NOW a finished crew
+# idling on its open PR: its authoritative reconciled current state is `done`
+# (bin/fm-crew-state.sh, which folds the no-mistakes run-step, the pane
+# busy-signature, and the status log's last REAL state verb - trailing `resolved:`
+# bookkeeping skipped via last_state_status_line - into one verdict) AND an armed
+# merge-monitor (state/<id>.check.sh) is present. Such a crew legitimately sits idle
+# until its PR merges; its merge-check, not a stale-pane poll, is the live signal,
+# so the stale seam ABSORBS it instead of wedge-escalating each churny idle-pane
+# hash (a redraw-jittered idle pane is not byte-stable, so its captured hash keeps
+# changing and would otherwise re-surface as a fresh possible-wedge every poll).
+#
+# Sibling of crew_is_provably_working, pinned to the SAME escalation seam and re-read
+# from CURRENT state on every evaluation - NEVER a latched "was done once" flag. The
+# instant the crew is re-activated the predicate fails and full stale sensitivity
+# resumes with no manual re-arm, because fm-crew-state reports `working` (not `done`)
+# whenever the crew is put back to work:
+#   - the pane is busy again (source pane), or
+#   - a steer moved its latest state verb off done to working:/fixing: (source
+#     status-log), or
+#   - a re-triggered no-mistakes run is active (source run-step).
+# Fails CLOSED toward supervision: a missing armed check, an unreadable verdict, or
+# any non-`done` state (working/parked/paused/blocked/failed/unknown) all return
+# non-parked, so the wake surfaces exactly as today. A positive `done` verdict is the
+# ONLY absorb, so an ambiguous pane busy-state (read as unknown, never as done) can
+# never mask a wedge. The check.sh test is FIRST so a crew with no armed
+# merge-monitor costs no fm-crew-state.sh read - the same cheap-gate discipline
+# crew_absorb_class relies on. FM_CREW_STATE_BIN lets tests stub the verdict.
+crew_is_parked_awaiting_merge() {  # <id> <state-dir>
+  local id=$1 state=$2 line st
+  [ -n "$id" ] && [ -n "$state" ] || return 1
+  [ -f "$state/$id.check.sh" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  st=${line#state: }; st=${st%% *}
+  [ "$st" = "done" ]
+}
+
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
 # working; 1 (actionable/surface) if any is not, or no task can be resolved. Pass the
 # same space-separated file list as signal_reason_is_actionable. Files are mapped to
