@@ -769,7 +769,24 @@ EOF
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+            task=$(window_to_task "$w" "$STATE")
+            if crew_is_parked_awaiting_merge "$task" "$STATE"; then
+              # Parked awaiting merge: a finished crew (reconciled done) with an
+              # armed merge-monitor idling on its open PR. Its merge-check, not this
+              # churny idle-pane hash, is the live signal, so ABSORB the stale wake
+              # and arm NO wedge timer (a parked crew has nothing to wedge on; clear
+              # any leftover timer from a prior working phase). The predicate is
+              # re-read on every distinct hash, so the moment the crew is re-activated
+              # (busy pane, or its latest state verb moves off done) it stops
+              # reporting done and full stale sensitivity resumes here on the next
+              # poll - a re-activated crew that then wedges is surfaced exactly as any
+              # working crew would be. The done: PR-ready itself already reached
+              # firstmate via the signal path when the crew appended it; re-surfacing
+              # this idle pane adds nothing.
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf" "$ewf"
+              triage_log "absorbed stale (parked awaiting merge - merge-check is the live signal): $w"
+            elif crew_is_provably_working "$task"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
@@ -777,7 +794,7 @@ EOF
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
+              mark_surfaced "$STATE/$task.status"
               wake "stale: $w"
             fi
           elif [ -e "$ssf" ]; then

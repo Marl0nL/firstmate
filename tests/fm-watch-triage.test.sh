@@ -269,6 +269,62 @@ test_crew_absorb_class_classifier() {
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
 }
 
+# crew_is_parked_awaiting_merge: 0 ONLY when a crew is a finished, idle crew waiting
+# on its open PR - reconciled state done AND an armed state/<id>.check.sh present. It
+# is the sibling absorb condition that lets the stale seam stop churning on a
+# done-but-unmerged crew's redraw-jittered idle pane, while staying fail-closed and
+# re-evaluated every call so a re-activated crew (verb off done, or a busy pane)
+# instantly loses the exclusion.
+test_crew_is_parked_awaiting_merge_classifier() {
+  local dir fakebin state
+  dir=$(make_case parked-awaiting-merge); fakebin="$dir/fakebin"; state="$dir/state"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE
+
+  # Positive: reconciled done + armed merge-monitor + idle -> parked (absorb).
+  FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR https://x/pr/1'
+  : > "$state/a.check.sh"
+  crew_is_parked_awaiting_merge a "$state" \
+    || fail "done crew with an armed merge-monitor not classed parked"
+  # Done + resolved: is still reconciled done by fm-crew-state, so it stays parked.
+  FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR https://x/pr/1 · run still monitoring PR'
+  crew_is_parked_awaiting_merge a "$state" \
+    || fail "reconciled-done crew not classed parked"
+
+  # Reactivation direction A - a steer moved the latest state verb off done, so
+  # fm-crew-state reports working: full stale sensitivity must resume (not parked).
+  FM_FAKE_CREW_STATE='state: working · source: status-log · working: enhancing the PR'
+  ! crew_is_parked_awaiting_merge a "$state" \
+    || fail "a crew whose verb moved off done (steered) was still classed parked"
+  # Reactivation direction B - the pane is busy again (re-tasked): not parked.
+  FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  ! crew_is_parked_awaiting_merge a "$state" \
+    || fail "a re-activated busy pane was still classed parked"
+
+  # Fail closed: an armed check but an unreadable/unknown verdict must NOT absorb.
+  FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
+  ! crew_is_parked_awaiting_merge a "$state" \
+    || fail "an unknown verdict with an armed check was wrongly classed parked"
+  # Fail closed: a done verdict but NO armed merge-monitor must NOT absorb - the
+  # done: is a plain terminal status the stale path surfaces as before.
+  FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR https://x/pr/1'
+  rm -f "$state/a.check.sh"
+  ! crew_is_parked_awaiting_merge a "$state" \
+    || fail "a done crew with no armed merge-monitor was classed parked"
+  # A non-done terminal (needs-decision/blocked/failed) even with an armed check must
+  # surface - firstmate action is needed, so it is not parked.
+  : > "$state/a.check.sh"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
+  ! crew_is_parked_awaiting_merge a "$state" \
+    || fail "a crew parked at a gate was classed parked-awaiting-merge"
+  # Guard the arguments: empty id or empty state-dir is never parked.
+  FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR https://x/pr/1'
+  ! crew_is_parked_awaiting_merge "" "$state" || fail "empty id classed parked"
+  ! crew_is_parked_awaiting_merge a "" || fail "empty state-dir classed parked"
+  unset FM_FAKE_CREW_STATE
+  pass "crew_is_parked_awaiting_merge: done+armed-check+idle only; reactivation and missing check fail closed"
+}
+
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
 # task it references is provably working; if any crew has stopped, or no task can be
 # resolved, it surfaces. Files map to ids by stripping .status / .turn-ended.
@@ -474,6 +530,130 @@ test_stale_terminal_status_overridden_by_active_run() {
   grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge"
   unset FM_FAKE_CREW_STATE
   pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
+}
+
+# --- parked awaiting merge: absorbed without a wedge timer -------------------
+# A crew that finished, opened its PR, and armed a merge-monitor (state/<id>.check.sh)
+# sits idle until the PR merges. Its idle pane is not byte-stable (cursor/redraw), so
+# its hash keeps changing and the stale seam would re-surface it as a fresh possible
+# wedge every poll - pure churn, since the merge-check is the real live signal.
+# crew_is_parked_awaiting_merge absorbs it and arms NO wedge timer (unlike the
+# provably-working absorb, a parked crew has nothing to wedge on).
+test_parked_awaiting_merge_stale_absorbed() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case parked-merge-absorbed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-parked"
+  printf 'awaiting merge, PR open' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/parked.meta"
+  printf 'done: PR https://example.test/pr/7\n' > "$state/parked.status"
+  : > "$state/parked.check.sh"   # armed merge-monitor
+  sig=$(seen_sig "$state/parked.status"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "awaiting merge, PR open")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR https://example.test/pr/7'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a parked-awaiting-merge crew (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "the parked-awaiting-merge crew printed a wake reason during absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "the parked-awaiting-merge crew enqueued a wake during absorb"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on parked absorb"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a parked crew must not arm a wedge timer"
+  [ ! -e "$state/.hb-surfaced-parked" ] || fail "an absorbed parked crew must not be marked surfaced"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a done crew with an armed merge-monitor and an idle pane is absorbed (no wake, no wedge timer)"
+}
+
+# --- reactivation regression, direction A: verb moved off done -> surfaces ----
+# The merge-monitor is STILL armed, but a steer moved the crew's latest state verb
+# OFF done to working: and its idle pane has no running pipeline. Reconciled state is
+# no longer done, so the parked exclusion lifts and the crew SURFACES at full stale
+# sensitivity (it may have wedged on the PR improvement) - the armed check never keeps
+# a non-done crew excluded.
+test_parked_reactivated_verb_off_done_surfaces() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case parked-react-verb); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-reactverb"
+  printf 'stuck mid-edit' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/reactverb.meta"
+  printf 'done: PR https://example.test/pr/11\nworking: enhancing the PR per steer\n' > "$state/reactverb.status"
+  : > "$state/reactverb.check.sh"   # STILL armed
+  # Quiet the signal path (status pre-seen) so this exercises the STALE seam: the
+  # crew must surface HERE despite the still-armed merge-monitor.
+  sig=$(seen_sig "$state/reactverb.status"); printf '%s' "$sig" > "$state/.seen-reactverb_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "stuck mid-edit")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: status-log · working: enhancing the PR per steer'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a re-activated (verb off done) crew with an armed check did not surface"
+  grep -F "stale: $window" "$out" >/dev/null || fail "reactivation (verb off done) did not print a stale wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the reactivation surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "reactivation stale was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a re-activated crew whose verb moved off done surfaces despite an armed merge-monitor"
+}
+
+# --- reactivation regression, direction B: pane busy again -> wedge-escalates -
+# The merge-monitor is STILL armed and the status log still shows the pre-steer done:
+# (sparse reporting), but the crew was re-tasked and is working again (reconciled
+# working via a busy pane). The parked exclusion keys off CURRENT reconciled state,
+# not a latched "was done once", so it MUST NOT apply: the crew falls to the normal
+# provably-working path (absorb + arm a wedge timer), and when it then wedges it
+# escalates past the threshold exactly as any working crew would. Phase A proves a
+# wedge timer IS armed (a parked crew arms none); phase B proves it wedge-escalates.
+test_parked_reactivated_working_crew_still_wedge_escalates() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case parked-react-busy); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-reactbusy"
+  printf 'enhancing the PR...' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/reactbusy.meta"
+  printf 'done: PR https://example.test/pr/9\n' > "$state/reactbusy.status"
+  : > "$state/reactbusy.check.sh"
+  sig=$(seen_sig "$state/reactbusy.status"); printf '%s' "$sig" > "$state/.seen-reactbusy_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "enhancing the PR...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+
+  # Phase A: high threshold -> absorbed, but the wedge timer IS armed (NOT parked).
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a re-activated working crew that should absorb-with-timer: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a re-activated working crew printed a wake during the absorb phase"
+  [ -s "$state/.stale-since-$key" ] || fail "a re-activated working crew (armed check) was wrongly parked - no wedge timer armed"
+  reap "$pid"
+
+  # Phase B: backdate the timer; the crew wedges and escalates like any working crew.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a re-activated working crew that wedged did not escalate past the threshold"
+  grep -F "stale: $window" "$out" >/dev/null || fail "reactivation wedge did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "reactivation wedge did not flag a possible wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "a re-activated (working) crew with an armed merge-monitor is NOT parked: it wedge-escalates like any working crew"
 }
 
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
@@ -1149,6 +1329,7 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_crew_is_parked_awaiting_merge_classifier
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
@@ -1157,6 +1338,9 @@ test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
+test_parked_awaiting_merge_stale_absorbed
+test_parked_reactivated_verb_off_done_surfaces
+test_parked_reactivated_working_crew_still_wedge_escalates
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
