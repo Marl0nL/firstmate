@@ -725,6 +725,43 @@ fm_backend_agent_alive() {  # <backend> <target>
   esac
 }
 
+# fm_backend_process_state: does a REAL OS process exist behind <target>?
+# Strictly weaker than fm_backend_agent_alive (a bare shell left behind by an
+# exited agent still has a process, so `live` here is NOT "an agent is
+# running"), and strictly stronger than fm_backend_target_exists, which asks
+# only whether the endpoint record is present. It exists so REPORTING callers
+# can say how much they actually know instead of printing presence as
+# liveness. Prints one of:
+#   live        - a terminal with a foreground process is confirmed attached.
+#   dead        - confirmed no process, whatever the endpoint record claims.
+#                 On herdr this is the replayed-ghost shape exactly.
+#   unknown     - the probe ran but could not decide.
+#   unsupported - this backend has no verified process-level probe, so a
+#                 caller must not read anything into the absence of one.
+# Only herdr has a verified probe today (fm_backend_herdr_pane_process_state;
+# docs/herdr-backend.md), and herdr is also the backend that needs one: it
+# replays its persisted session layout across a server restart, so its
+# metadata surface can outlive the processes it describes. tmux and the rest
+# report `unsupported` rather than `unknown` so callers can distinguish "no
+# corroboration available here" from "corroboration attempted and
+# inconclusive" - the former is not a reason to hedge a report, the latter is.
+fm_backend_process_state() {  # <backend> <target>
+  local backend=$1 target=$2 session pane
+  case "$backend" in
+    herdr)
+      fm_backend_source herdr || { printf 'unknown'; return 0; }
+      session=${target%%:*}
+      pane=${target#*:}
+      if [ -z "$session" ] || [ -z "$pane" ] || [ "$pane" = "$target" ]; then
+        printf 'unknown'
+        return 0
+      fi
+      fm_backend_herdr_pane_process_state "$session" "$pane"
+      ;;
+    *) printf 'unsupported' ;;
+  esac
+}
+
 # fm_backend_agent_probe_verifiable: 0 when fm_backend_agent_alive can, for this
 # <backend>+<harness> pair, be expected to reach a CONFIDENT alive-or-dead
 # verdict rather than a permanent `unknown`. It is the gate for fm-spawn.sh's

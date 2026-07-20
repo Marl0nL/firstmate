@@ -30,10 +30,20 @@ SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
 
 printf '%s\n' "$SNAPSHOT" | jq -r '
   def dash($v): if $v == null or $v == "" then "-" else $v end;
+  # "present" is endpoint-record presence, not liveness, so it is never
+  # rendered bare when the backend could say more: a present record with no
+  # process behind it is a replayed ghost and reads "ghost", and a present
+  # record the backend could not corroborate reads "present?" rather than
+  # asserting health this view does not actually know. Only a backend with no
+  # process probe at all (endpoint.process_state == "unsupported") still
+  # renders a plain "present" - there is nothing further to know there.
   def endpoint_exists($t):
     if $t.endpoint.exists == null then "unknown"
-    elif $t.endpoint.exists then "present"
-    else "absent" end;
+    elif $t.endpoint.exists | not then "absent"
+    elif $t.endpoint.process_state == "live" then "present (process-confirmed)"
+    elif $t.endpoint.process_state == "dead" then "ghost (record only, no process)"
+    elif $t.endpoint.process_state == "unsupported" then "present"
+    else "present?" end;
   def endpoint_of($t):
     if $t.kind == "secondmate" then "\(endpoint_exists($t)) / \($t.endpoint.agent_alive)"
     else endpoint_exists($t) end;

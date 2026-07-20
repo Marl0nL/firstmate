@@ -170,6 +170,10 @@ SH
 # for the given pane id - the exact primitive fm_backend_target_exists uses
 # for a herdr endpoint liveness read. No version/server-start calls: a
 # liveness check must never auto-start a server (fm-backend.sh's contract).
+# `pane process-info` is deliberately UNHANDLED here (falls through to
+# `exit 1` with no body), which fm_backend_herdr_pane_process_state reads as
+# `unknown` - this fake gives no process-level corroboration at all, the
+# shape that must report `alive (unconfirmed)`, never a bare `alive`.
 make_fake_herdr() {
   local fakebin=$1 live=$2
   cat > "$fakebin/herdr" <<SH
@@ -178,6 +182,55 @@ set -u
 if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
   [ "\${3:-}" = "$live" ] && exit 0
   exit 1
+fi
+exit 1
+SH
+  chmod +x "$fakebin/herdr"
+}
+
+# make_fake_herdr_process <fakebin> <confirmed-pane> <ghost-pane>: `pane get`
+# succeeds for BOTH panes (both are structurally present, matching
+# fm_backend_target_exists), but `pane process-info --pane <id>` answers
+# differently per pane - the exact split fm_backend_herdr_pane_process_state
+# (bin/backends/herdr.sh) exists to read:
+#   <confirmed-pane> - a real process_info body: a genuine foreground process
+#     is attached, so the caller must report `alive (process-confirmed)`.
+#   <ghost-pane> - {"error":{"code":"pane_not_found"}}: the exact replayed-
+#     ghost shape (docs/herdr-backend.md) - the pane record survived a herdr
+#     restart but the process behind it did not, so the caller must report
+#     `alive (record only, no process - replayed ghost, treat as gone)`, never
+#     plain `alive`.
+make_fake_herdr_process() {
+  local fakebin=$1 confirmed=$2 ghost=$3
+  cat > "$fakebin/herdr" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
+  case "\${3:-}" in
+    "$confirmed"|"$ghost") exit 0 ;;
+    *) exit 1 ;;
+  esac
+fi
+if [ "\${1:-}" = pane ] && [ "\${2:-}" = process-info ]; then
+  pane=""
+  prev=""
+  for a in "\$@"; do
+    [ "\$prev" = "--pane" ] && pane="\$a"
+    prev="\$a"
+  done
+  case "\$pane" in
+    "$confirmed")
+      printf '{"result":{"process_info":{"foreground_process_group_id":123,"argv":["claude"]}}}\n'
+      exit 0
+      ;;
+    "$ghost")
+      printf '{"error":{"code":"pane_not_found"}}\n' >&2
+      exit 1
+      ;;
+    *)
+      exit 1
+      ;;
+  esac
 fi
 exit 1
 SH
@@ -560,10 +613,38 @@ EOF
   printf 'window=sess:p-dead\nkind=ship\nbackend=herdr\n' > "$home/state/task-dead.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"
+  assert_contains "$out" "endpoint: alive (unconfirmed) (backend=herdr window=sess:p-live)" "live herdr endpoint with no process corroboration not reported unconfirmed"
   assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-dead)" "dead herdr endpoint not reported dead"
 
-  pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
+  pass "herdr endpoint liveness is reported per task: unconfirmed-alive for a present pane with no process corroboration, dead for a gone one"
+}
+
+test_endpoint_liveness_herdr_process_confirmation() {
+  local rec root home fakebin out
+  rec=$(new_world liveness-herdr-process)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_herdr_process "$fakebin" "p-confirmed" "p-ghost"
+
+  printf 'window=sess:p-confirmed\nkind=ship\nbackend=herdr\n' > "$home/state/task-confirmed.meta"
+  printf 'window=sess:p-ghost\nkind=ship\nbackend=herdr\n' > "$home/state/task-ghost.meta"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "endpoint: alive (process-confirmed) (backend=herdr window=sess:p-confirmed)" \
+    "a herdr pane with a real corroborated process was not reported process-confirmed"
+  assert_not_contains "$out" "endpoint: alive (unconfirmed) (backend=herdr window=sess:p-confirmed)" \
+    "a process-confirmed herdr pane was also reported unconfirmed"
+
+  assert_contains "$out" "endpoint: alive (record only, no process - replayed ghost, treat as gone) (backend=herdr window=sess:p-ghost)" \
+    "a replayed-ghost herdr pane (record present, no process) was not flagged as a ghost"
+  assert_not_contains "$out" "endpoint: alive (process-confirmed) (backend=herdr window=sess:p-ghost)" \
+    "a replayed-ghost herdr pane was reported process-confirmed"
+
+  pass "herdr endpoint liveness distinguishes a process-confirmed pane from a replayed ghost record"
 }
 
 # --- composition: real scripts run, not reimplemented ------------------------
@@ -792,6 +873,7 @@ test_status_tail_bounding
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
+test_endpoint_liveness_herdr_process_confirmation
 test_composition_invokes_real_scripts
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence

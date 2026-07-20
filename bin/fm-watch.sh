@@ -295,6 +295,51 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
+# Consecutive terminal-capture failures required before an unreadable endpoint
+# wakes firstmate. Capture is the one signal that touches reality (it must
+# reach a real terminal), so a failure is the CORRECT detection of a gone
+# endpoint - but it is also what a transient socket blip looks like, so the
+# first failures are tolerated silently. 3 keeps a blip quiet while still
+# surfacing a genuinely gone endpoint within a few polls, matching the spirit
+# of the 2-consecutive-hashes stale threshold below.
+FM_CAPTURE_FAIL_WAKE_COUNT=${FM_CAPTURE_FAIL_WAKE_COUNT:-3}
+
+# capture_failure: count one consecutive capture failure for <window> and, at
+# the threshold, surface an endpoint-gone wake.
+#
+# This exists because the alternative - the bare `|| continue` this replaced -
+# threw away the only correct signal firstmate had. A crew whose pane dies in
+# a herdr server restart (reboot, update, service restart) leaves a REPLAYED
+# metadata record behind, so every presence check still reports it healthy;
+# only capture notices. With `|| continue` that crew was skipped every poll
+# forever: it never got a pane hash, so it never accumulated a stale count, so
+# it never reached stale triage, so the watcher became structurally incapable
+# of ever mentioning it again. The task stalled silently and permanently.
+#
+# Surfaced ONCE per gone episode (.capfail-surfaced-<key>), mirroring the
+# once-per-distinct-stale-hash convention below rather than re-waking every
+# poll; the heartbeat's whole-fleet review is the backstop if firstmate does
+# not act. Both markers are cleared as soon as capture succeeds again, so a
+# blip that resolves leaves no trace and a later real disappearance surfaces
+# fresh. The wake reason deliberately quotes fm-crew-state.sh's existing
+# verdict for this case ("backend target gone") rather than inventing a second
+# vocabulary for it - that script stays the owner of the verdict.
+capture_failure() {  # <window> <key>
+  local win=$1 key=$2 cff n reason
+  cff="$STATE/.capfail-$key"
+  n=$(( $(cat "$cff" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$cff"
+  if [ "$n" -lt "$FM_CAPTURE_FAIL_WAKE_COUNT" ]; then
+    triage_log "absorbed capture failure $n/$FM_CAPTURE_FAIL_WAKE_COUNT (transient?): $win"
+    return 0
+  fi
+  [ -e "$STATE/.capfail-surfaced-$key" ] && return 0
+  reason="stale: $win (backend target gone: $n consecutive terminal-capture failures - the endpoint cannot be read, so the crew is unsupervised; confirm with bin/fm-crew-state.sh and recover or tear down, demand-deep-inspection)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  : > "$STATE/.capfail-surfaced-$key"
+  wake "$reason"
+}
+
 # Absorb a stale pane whose crew is in a DECLARED external-wait pause (paused:),
 # and re-surface it once every PAUSE_RESURFACE_SECS for a recheck so it cannot rot
 # invisibly. Called on any stale poll once the crew is known paused (first sight,
@@ -721,7 +766,11 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      capture_failure "$w" "$key"
+      continue
+    fi
+    rm -f "$STATE/.capfail-$key" "$STATE/.capfail-surfaced-$key"
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"

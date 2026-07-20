@@ -24,7 +24,14 @@
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
-#     endpoint.exists is the cheap backend endpoint-presence read.
+#     endpoint.exists is the cheap backend endpoint-presence read. It is NOT
+#     liveness: a backend that replays a persisted session layout across a
+#     server restart reports present for panes whose processes are gone.
+#     endpoint.process_state qualifies it with whatever process-level
+#     corroboration the backend can give (live|dead|unknown|unsupported;
+#     fm_backend_process_state), so a replayed ghost is distinguishable from a
+#     confirmed-running endpoint. endpoint.status folds the two: a confirmed
+#     dead process is "absent" even when the record is still present.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
 #   scout_reports[]: present data/<id>/report.md pointers.
@@ -419,14 +426,27 @@ task_json_lines() {
     pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
     blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
 
+    # endpoint.exists is PRESENCE of the endpoint record, not liveness, and on
+    # a backend that replays a persisted session layout across a server
+    # restart (herdr) a crew whose process died still reports present forever.
+    # Since this snapshot is the heartbeat's primary situational-awareness
+    # input, presence alone must not read as health: endpoint.process_state
+    # carries whatever process-level corroboration the backend can give
+    # (fm_backend_process_state - `unsupported` where there is no probe), so a
+    # ghost is visibly distinguishable from a confirmed-running endpoint
+    # instead of being folded into a bare `present`.
     endpoint_exists=null
+    process_state=unsupported
     if [ -n "$target" ]; then
       if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
         endpoint_exists=true
+        process_state=$(fm_backend_process_state "$backend" "$target" 2>/dev/null || printf unknown)
       else
         endpoint_exists=false
+        process_state=dead
       fi
     fi
+    [ -n "$process_state" ] || process_state=unknown
     agent_alive=not_checked
     if [ "$kind" = secondmate ] && [ -n "$target" ]; then
       agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
@@ -454,6 +474,7 @@ task_json_lines() {
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
       --arg agent_alive "$agent_alive" \
+      --arg process_state "$process_state" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
       --argjson current_state "$current_json" \
@@ -485,7 +506,9 @@ task_json_lines() {
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
         current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
+          process_state:$process_state,
           status:(if $endpoint_exists == false then "absent"
+                  elif $process_state == "dead" then "absent"
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
