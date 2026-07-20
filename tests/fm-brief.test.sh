@@ -305,6 +305,11 @@ test_commit_capable_briefs_forbid_agent_coauthor() {
   brief="$home/data/$id/brief.md"
   assert_grep 'Co-Authored-By' "$brief" "scout brief missing the no-agent-co-author rule"
 
+  id="brief-coauthor-secondmate"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='x' "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep 'Co-Authored-By' "$brief" "secondmate charter missing the no-agent-co-author rule"
+
   pass "fm-brief.sh: every commit-capable brief forbids an agent commit co-author"
 }
 
