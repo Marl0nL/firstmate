@@ -39,12 +39,15 @@ Run these as the captain, in order.
 FM_HOME_DIR=/var/home/marlon/firstmate
 
 # 1. Tell the shim where the firstmate home is and where versions live.
+#    Written with printf rather than a heredoc on purpose: a heredoc here
+#    silently breaks if this block is ever pasted inside another heredoc, and
+#    the commands below it would then run unintentionally.
 mkdir -p ~/.config/firstmate
-cat > ~/.config/firstmate/claude-shim.conf <<EOF
-home=$FM_HOME_DIR
-real=$HOME/.local/bin/claude-real
-versions_dir=$HOME/.local/share/claude/versions
-EOF
+printf 'home=%s\nreal=%s\nversions_dir=%s\n' \
+  "$FM_HOME_DIR" \
+  "$HOME/.local/bin/claude-real" \
+  "$HOME/.local/share/claude/versions" \
+  > ~/.config/firstmate/claude-shim.conf
 
 # 2. Preserve the original launcher, symlink and all, as a fallback.
 cp -P ~/.local/bin/claude ~/.local/bin/claude-real
