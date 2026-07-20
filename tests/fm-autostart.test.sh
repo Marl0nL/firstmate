@@ -23,6 +23,19 @@
 # the agent list, so the ghost cases can prove the script starts firstmate
 # instead of mistaking a replayed record for a live supervisor and doing nothing
 # at every boot, forever.
+#
+# Liveness is judged on `pane process-info` alone - existence of a process,
+# plus its kernel-reported cwd for a cwd-matched entry - because on herdr
+# 0.7.4 `agent get`'s agent_status reports "unknown" for a genuinely live
+# agent, and consulting it made the unit declare two working boots failures
+# (verified 2026-07-20). The fake's process-info therefore carries the real
+# 0.7.4 body shape, including per-process cwd.
+#
+# The suite also drives the NETWORK GATE against fake `curl` and `ping` on
+# PATH: reachable, unreachable (bounded, polled, exit 5, nothing started),
+# reachable-only-later, ICMP-filtered-but-endpoint-fine, and the no-op and
+# dry-run paths that must not depend on the network at all. No real network is
+# ever probed.
 # docs/firstmate-autostart.md owns the install, rollback, and verification steps.
 set -u
 
@@ -53,19 +66,24 @@ export PATH
 #   start_fail    if present, `agent start` exits non-zero
 #   start.log     appended with the argv of every `agent start` call
 #   polls         appended with one line per `status server` call
-#   panes/<id>    this pane's state, one word (default when absent: live):
-#                   live      pane get, agent get and process-info all answer
-#                   ghost     pane get and agent get answer from the persisted
-#                             layout, process-info says pane_not_found - the
-#                             post-reboot shape that made this guard a no-op
-#                   no-agent  pane exists, nothing registered in it
-#                   dead      the pane itself is gone
-#                   garbage   pane get answers something unparseable
+#   panes/<id>    this pane's state: a state word, optionally followed by the
+#                 cwd process-info should report for the live process (default
+#                 when the file is absent: live, cwd /x):
+#                   live [cwd]  process-info answers with a real process body
+#                               carrying the given cwd - the real 0.7.4 shape
+#                   ghost       pane get and agent get answer from the persisted
+#                               layout, process-info says pane_not_found - the
+#                               post-reboot shape that made this guard a no-op
+#                   no-agent    pane exists, nothing registered in it
+#                   dead        the pane itself is gone
+#                   garbage     pane get and process-info answer unparseably
 cat > "$FAKEBIN/herdr" <<'SH'
 #!/usr/bin/env bash
 d=${FAKE_HERDR_DIR:?FAKE_HERDR_DIR unset}
 
 pane_state() { cat "$d/panes/$1" 2>/dev/null || printf 'live\n'; }
+pane_state_kind() { pane_state "$1" | { read -r kind _ || :; printf '%s' "${kind:-live}"; }; }
+pane_state_cwd() { pane_state "$1" | { read -r _ cwd || :; printf '%s' "${cwd:-/x}"; }; }
 # Error bodies go to STDERR, exactly as real herdr writes them.
 err() { printf '{"error":{"code":"%s","message":"fake"},"id":"cli:fake"}\n' "$1" >&2; exit 1; }
 pane_body() {
@@ -75,14 +93,14 @@ pane_body() {
 
 case "$1 ${2:-}" in
   "pane get")
-    case "$(pane_state "$3")" in
+    case "$(pane_state_kind "$3")" in
       dead) err pane_not_found ;;
       garbage) printf 'not json at all\n'; exit 0 ;;
       *) pane_body "$3" pane pane_info; exit 0 ;;
     esac
     ;;
   "agent get")
-    case "$(pane_state "$3")" in
+    case "$(pane_state_kind "$3")" in
       dead) err pane_not_found ;;
       no-agent) err agent_not_found ;;
       *) pane_body "$3" agent agent_info; exit 0 ;;
@@ -95,11 +113,15 @@ case "$1 ${2:-}" in
       [ "$1" = "--pane" ] && pane=$2
       shift
     done
-    case "$(pane_state "$pane")" in
+    case "$(pane_state_kind "$pane")" in
       live)
-        printf '{"id":"cli:fake","result":{"process_info":{"foreground_process_group_id":1,"foreground_processes":[{"argv":["claude"]}]},"type":"process_info"}}\n'
+        # The verified herdr 0.7.4 body: foreground_processes entries carry
+        # argv, cmdline, cwd, name, and pid.
+        printf '{"id":"cli:fake","result":{"process_info":{"foreground_process_group_id":1,"shell_pid":1,"pane_id":"%s","foreground_processes":[{"argv":["claude"],"cmdline":"claude","cwd":"%s","name":"claude","pid":1}]},"type":"pane_process_info"}}\n' \
+          "$pane" "$(pane_state_cwd "$pane")"
         exit 0
         ;;
+      garbage) printf 'not json at all\n'; exit 0 ;;
       *) err pane_not_found ;;
     esac
     ;;
@@ -132,9 +154,12 @@ case "$1 ${2:-}" in
       shift
     done
     # A real start produces a real pane with a real process behind it, so the
-    # started agent's pane is left at the default `live` state.
+    # started agent's pane is left at the default `live` state. agent_status
+    # is "unknown" because that is what herdr 0.7.4 really reports for a
+    # freshly started, genuinely live agent (verified 2026-07-20): the
+    # confirmation must succeed in spite of it.
     jq --arg n "$name" --arg c "$cwd" \
-      '.result.agents += [{"name":$n,"cwd":$c,"agent":"claude","agent_status":"idle","pane_id":"w9:pS"}]' \
+      '.result.agents += [{"name":$n,"cwd":$c,"agent":"claude","agent_status":"unknown","pane_id":"w9:pS"}]' \
       "$d/agents.json" > "$d/agents.json.new" && mv "$d/agents.json.new" "$d/agents.json"
     exit 0
     ;;
@@ -143,6 +168,33 @@ echo "fake herdr: unexpected argv: $*" >&2
 exit 99
 SH
 chmod +x "$FAKEBIN/herdr"
+
+# The fake network probes. The script's decisive probe is curl against the
+# registration endpoint; ping is diagnostic only. Both log every call so cases
+# can prove the gate polled (bounded, repeated) rather than hung or slept.
+#   net_curl_fail      if present, curl fails every time
+#   net_curl_ok_after  curl fails until it has been called this many times
+#   net_ping_fail      if present, ping gets no reply
+cat > "$FAKEBIN/curl" <<'SH'
+#!/usr/bin/env bash
+d=${FAKE_HERDR_DIR:?FAKE_HERDR_DIR unset}
+printf '%s\n' "$*" >> "$d/net_curl.log"
+[ -e "$d/net_curl_fail" ] && exit 7
+n=$(wc -l < "$d/net_curl.log" | tr -d ' ')
+after=$(cat "$d/net_curl_ok_after" 2>/dev/null || echo 0)
+[ "$n" -gt "$after" ] || exit 7
+exit 0
+SH
+chmod +x "$FAKEBIN/curl"
+
+cat > "$FAKEBIN/ping" <<'SH'
+#!/usr/bin/env bash
+d=${FAKE_HERDR_DIR:?FAKE_HERDR_DIR unset}
+printf '%s\n' "$*" >> "$d/net_ping.log"
+[ -e "$d/net_ping_fail" ] && exit 1
+exit 0
+SH
+chmod +x "$FAKEBIN/ping"
 
 # A firstmate-shaped home: the structural markers fm-autostart.sh tests for.
 make_home() {
@@ -239,6 +291,7 @@ pass "idempotence: an agent named firstmate makes the run a no-op"
 # case that actually stands between the captain and two supervisors.
 server=$(new_server "$TMP_ROOT/s-bycwd" \
   "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w1:p1\"}]")
+set_pane "$server" w1:p1 "live $HOME_ABS"
 out=$(run_autostart "$server" "$HOME_DIR")
 rc=$?
 expect_code 0 "$rc" "an unnamed agent in the firstmate home must be a clean no-op: $out"
@@ -249,6 +302,7 @@ pass "idempotence: an UNNAMED agent in the firstmate home makes the run a no-op"
 # Same, via foreground_cwd only.
 server=$(new_server "$TMP_ROOT/s-byfg" \
   "[{\"name\":null,\"cwd\":null,\"foreground_cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"pane_id\":\"w1:p1\"}]")
+set_pane "$server" w1:p1 "live $HOME_ABS"
 out=$(run_autostart "$server" "$HOME_DIR")
 rc=$?
 expect_code 0 "$rc" "an agent whose foreground_cwd is the home must be a no-op: $out"
@@ -261,6 +315,7 @@ ALIAS_ROOT="$TMP_ROOT/alias"
 ln -s "$TMP_ROOT" "$ALIAS_ROOT"
 server=$(new_server "$TMP_ROOT/s-alias" \
   "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w1:p1\"}]")
+set_pane "$server" w1:p1 "live $HOME_ABS"
 out=$(run_autostart "$server" "$ALIAS_ROOT/firstmate")
 rc=$?
 expect_code 0 "$rc" "an aliased path spelling of the home must still be a no-op: $out"
@@ -318,7 +373,7 @@ pass "ghost: a dead pane and an agent-less pane both fail to block the start"
 # licence to duplicate.
 server=$(new_server "$TMP_ROOT/s-reallive" \
   "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w1:p1\"}]")
-set_pane "$server" w1:p1 live
+set_pane "$server" w1:p1 "live $HOME_ABS"
 out=$(run_autostart "$server" "$HOME_DIR")
 rc=$?
 expect_code 0 "$rc" "a genuinely live firstmate must be a clean no-op: $out"
@@ -333,13 +388,47 @@ server=$(new_server "$TMP_ROOT/s-ghost-and-live" \
   "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w1:p1\"},
     {\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w1:p2\"}]")
 set_pane "$server" w1:p1 ghost
-set_pane "$server" w1:p2 live
+set_pane "$server" w1:p2 "live $HOME_ABS"
 out=$(run_autostart "$server" "$HOME_DIR")
 rc=$?
 expect_code 0 "$rc" "a live firstmate beside a ghost must be a no-op: $out"
 [ "$(started_count "$server")" = 0 ] ||
   fail "IDEMPOTENCE: a ghost listed before the live firstmate must not license a start"
 pass "liveness: a ghost listed beside the live firstmate does not license a start"
+
+# THE 2026-07-20 BOOT REGRESSION. herdr 0.7.4 reports agent_status "unknown"
+# for a genuinely live, registered, captain-serving firstmate - verified live
+# against the running one. Judging liveness on that metadata made two real
+# boots report failure (exit 4 after a successful start, exit 3 on the
+# already-up no-op). A live process must be believed regardless of what
+# agent_status claims.
+server=$(new_server "$TMP_ROOT/s-status-unknown" \
+  "[{\"name\":\"firstmate\",\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"unknown\",\"pane_id\":\"w1:p1\"}]")
+set_pane "$server" w1:p1 "live $HOME_ABS"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 0 "$rc" "a live firstmate with agent_status 'unknown' must be a clean no-op: $out"
+assert_contains "$out" "already up" \
+  "REGRESSION: the herdr 0.7.4 'unknown' status must not hide a live firstmate"
+[ "$(started_count "$server")" = 0 ] ||
+  fail "REGRESSION: agent_status 'unknown' must never license a duplicate start"
+pass "regression: agent_status 'unknown' (herdr 0.7.4) no longer breaks the no-op"
+
+# The identity guard behind a cwd match: the MATCH came from replayable
+# metadata, so the pane's live process must really work in the firstmate home.
+# A live process that cannot be tied to the home is unknown - it might be the
+# firstmate mid-tool-call - so nothing is started and nothing is claimed.
+server=$(new_server "$TMP_ROOT/s-cwd-mismatch" \
+  "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w1:p1\"}]")
+set_pane "$server" w1:p1 "live /somewhere/entirely/else"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 3 "$rc" "a cwd-matched entry whose process works elsewhere must fail closed: $out"
+assert_not_contains "$out" "already up" \
+  "IDENTITY: a process that cannot be tied to the home must not count as firstmate"
+[ "$(started_count "$server")" = 0 ] ||
+  fail "IDENTITY: an unconfirmable process must never license a start"
+pass "identity: a cwd-matched entry needs the process really working in the home"
 
 # Uncertainty is still uncertainty: a matching entry whose pane cannot be
 # classified is neither live nor a confirmed husk, so nothing is started.
@@ -423,6 +512,75 @@ assert_contains "$out" "already up" "the second run must report firstmate alread
   fail "IDEMPOTENCE: running the unit twice must never produce a second firstmate"
 pass "idempotence: running twice against one server starts exactly one firstmate"
 
+# --- the network gate -------------------------------------------------------
+
+# Unreachable network: the gate must poll (not sleep once), stay bounded by
+# --net-timeout, exit 5 - its own distinct code - and start NOTHING. The
+# failure report must name the endpoint and say which layer looks broken.
+server=$(new_server "$TMP_ROOT/s-netdown")
+: > "$server/net_curl_fail"
+: > "$server/net_ping_fail"
+out=$(run_autostart "$server" "$HOME_DIR" --net-timeout 1)
+rc=$?
+expect_code 5 "$rc" "an unreachable network must exit 5: $out"
+assert_contains "$out" "network gate FAILED" "the gate must fail loudly"
+assert_contains "$out" "api.anthropic.com" "the failure must name the endpoint it probed"
+assert_contains "$out" "started nothing" "the failure must state that nothing was started"
+assert_contains "$out" "ICMP" "the failure must report the routing diagnosis too"
+[ "$(started_count "$server")" = 0 ] ||
+  fail "NETWORK GATE: an unreachable network must never start an agent"
+[ "$(wc -l < "$server/net_curl.log" | tr -d ' ')" -gt 1 ] ||
+  fail "NETWORK GATE: reachability must be POLLED, not probed once and slept"
+pass "network gate: an unreachable network exits 5, bounded, polling, starting nothing"
+
+# Reachable only on a later poll: the captain accepts boot delay, so the gate
+# waits and then proceeds. This is the slow-DHCP/slow-WiFi boot.
+server=$(new_server "$TMP_ROOT/s-netlater")
+printf '3\n' > "$server/net_curl_ok_after"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 0 "$rc" "a network that comes up during the wait must allow the start: $out"
+assert_contains "$out" "network gate passed" "the gate must log that it passed, and when"
+[ "$(started_count "$server")" = 1 ] ||
+  fail "NETWORK GATE: a late-arriving network must still produce exactly one firstmate"
+pass "network gate: a network arriving on a later poll is waited for, then used"
+
+# ICMP filtered but the endpoint reachable: ping is diagnostic only, and a
+# network that filters ICMP must never wedge the boot.
+server=$(new_server "$TMP_ROOT/s-noicmp")
+: > "$server/net_ping_fail"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 0 "$rc" "a filtered-ICMP network with a reachable endpoint must start: $out"
+[ "$(started_count "$server")" = 1 ] ||
+  fail "NETWORK GATE: filtered ICMP must not block a start when the endpoint answers"
+pass "network gate: filtered ICMP does not block a reachable start"
+
+# An already-live firstmate needs nothing from the network: the no-op must
+# stay exit 0 with the network fully down, or a WiFi blip would flip the unit
+# to failed over a fleet that is fine.
+server=$(new_server "$TMP_ROOT/s-netdown-noop" \
+  "[{\"name\":\"firstmate\",\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"unknown\",\"pane_id\":\"w1:p1\"}]")
+set_pane "$server" w1:p1 "live $HOME_ABS"
+: > "$server/net_curl_fail"
+: > "$server/net_ping_fail"
+out=$(run_autostart "$server" "$HOME_DIR" --net-timeout 1)
+rc=$?
+expect_code 0 "$rc" "the already-up no-op must not depend on the network: $out"
+assert_contains "$out" "already up" "the no-op must still report firstmate already up"
+pass "network gate: the already-up no-op succeeds with the network down"
+
+# --skip-net-check is the deliberate offline escape hatch.
+server=$(new_server "$TMP_ROOT/s-netskip")
+: > "$server/net_curl_fail"
+out=$(run_autostart "$server" "$HOME_DIR" --skip-net-check)
+rc=$?
+expect_code 0 "$rc" "--skip-net-check must bypass the gate: $out"
+[ "$(started_count "$server")" = 1 ] ||
+  fail "NETWORK GATE: --skip-net-check must still start exactly one agent"
+[ -f "$server/net_curl.log" ] && fail "--skip-net-check must not probe at all"
+pass "network gate: --skip-net-check starts without probing"
+
 # --- start failures ---------------------------------------------------------
 
 server=$(new_server "$TMP_ROOT/s-startfail")
@@ -442,7 +600,25 @@ expect_code 0 "$rc" "--dry-run must succeed: $out"
 assert_contains "$out" "herdr agent start firstmate --cwd $HOME_ABS" \
   "--dry-run must print the exact command"
 [ "$(started_count "$server")" = 0 ] || fail "--dry-run must never start an agent"
+assert_contains "$out" "network gate would pass" \
+  "--dry-run must report the gate's current verdict"
 pass "dry run: reports the decision and the command without starting anything"
+
+# A dry run on a dead network still succeeds - it reports what a real run
+# would do (poll, then exit 5) instead of holding the shell for --net-timeout.
+server=$(new_server "$TMP_ROOT/s-dry-netdown")
+: > "$server/net_curl_fail"
+: > "$server/net_ping_fail"
+out=$(run_autostart "$server" "$HOME_DIR" --dry-run)
+rc=$?
+expect_code 0 "$rc" "--dry-run must succeed even offline: $out"
+assert_contains "$out" "would currently FAIL" \
+  "an offline dry run must report the gate verdict without failing"
+assert_contains "$out" "would run:" "an offline dry run must still print the command"
+[ "$(started_count "$server")" = 0 ] || fail "an offline --dry-run must never start an agent"
+[ "$(wc -l < "$server/net_curl.log" | tr -d ' ')" -le 2 ] ||
+  fail "an offline --dry-run must probe once, not poll for --net-timeout"
+pass "dry run: reports an offline gate verdict without waiting or failing"
 
 server=$(new_server "$TMP_ROOT/s-argv")
 out=$(run_autostart "$server" "$HOME_DIR" -- echo hello)
@@ -482,6 +658,12 @@ assert_contains "$tmpl" "__FM_ROOT__/bin/fm-autostart.sh" \
   "the template's ExecStart must run fm-autostart.sh under the placeholder root"
 assert_contains "$tmpl" "After=herdr-server.service" "the template must be ordered after herdr-server"
 assert_contains "$tmpl" "Wants=herdr-server.service" "the template must want herdr-server"
+assert_contains "$tmpl" "After=network-online.target" \
+  "the template must carry the captain-decided network ordering"
+assert_contains "$tmpl" "Wants=network-online.target" \
+  "the template must pull in network-online.target where a provider exists"
+assert_contains "$tmpl" 'Environment="PATH=%h/.local/bin' \
+  "the template must set the PATH a user unit does not inherit (herdr lives in ~/.local/bin)"
 assert_contains "$tmpl" "Type=oneshot" "the template must be a oneshot"
 assert_contains "$tmpl" "RemainAfterExit=yes" "the template must remain after exit"
 assert_contains "$tmpl" "WantedBy=default.target" "the template must install into default.target"
