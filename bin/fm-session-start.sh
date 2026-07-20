@@ -271,8 +271,28 @@ for meta in "$STATE"/*.meta; do
   target=$(fm_backend_target_of_meta "$meta")
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
+    # `alive` here is endpoint PRESENCE, not liveness, and the two can
+    # disagree: a backend that replays a persisted session layout across a
+    # server restart (herdr) still answers presence for panes whose processes
+    # are gone. AGENTS.md section 5 tells firstmate to trust this digest and
+    # not re-derive from it, so an unqualified "alive" for a crew that died in
+    # a restart is load-bearing - it is exactly what stops recovery from being
+    # triggered. So qualify the claim with whatever process-level
+    # corroboration the backend can actually give (fm_backend_process_state),
+    # rather than silently upgrading this cheap check into a strong one:
+    #   alive (process-confirmed)  presence AND a real process.
+    #   alive (record only, no process)  presence but NO process - a replayed
+    #     ghost. Treat as gone and reconcile before trusting any task state.
+    #   alive (unconfirmed)  presence, corroboration attempted, inconclusive.
+    #   alive  presence, and this backend has no process probe to corroborate
+    #     with (nothing is being hidden - there is nothing more to know here).
     if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      case "$(fm_backend_process_state "$backend" "${target:-$window}" 2>/dev/null)" in
+        live)        printf 'endpoint: alive (process-confirmed) (backend=%s window=%s)\n' "$backend" "$window" ;;
+        dead)        printf 'endpoint: alive (record only, no process - replayed ghost, treat as gone) (backend=%s window=%s)\n' "$backend" "$window" ;;
+        unsupported) printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window" ;;
+        *)           printf 'endpoint: alive (unconfirmed) (backend=%s window=%s)\n' "$backend" "$window" ;;
+      esac
     else
       printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
     fi

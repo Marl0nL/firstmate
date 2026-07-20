@@ -4,7 +4,12 @@ This document records the empirical verification behind `bin/backends/herdr.sh`,
 It is the herdr equivalent of the tmux facts recorded in the `harness-adapters` skill and `docs/architecture.md`'s "Runtime session backends" section.
 
 Herdr is [an agent-native terminal multiplexer](https://herdr.dev) with a socket API, CLI wrappers, and native per-pane agent-state detection.
-Originally verified against herdr 0.7.1, protocol 14, on macOS aarch64; the latest dated evidence below uses herdr 0.7.3, protocol 16.
+Originally verified against herdr 0.7.1, protocol 14, on macOS aarch64; the latest dated evidence below uses herdr 0.7.4, protocol 16.
+
+**Version caveat, read before trusting any claim here.** The bulk of this document's evidence - including every `pane_agent_state` / husk / agent-liveness claim - was taken on **0.7.1 / protocol 14**.
+On **0.7.4 / protocol 16** those classifications were measured to be inverted: replayed ghost panes read `live` and live crewmates read `no-agent`.
+See "Verified inversion (2026-07-20, herdr 0.7.4 / protocol 16)" for the measurements, and note that the destructive paths built on those classifications are **still unfixed**.
+Undated or 0.7.1-dated claims below have NOT been re-confirmed against 0.7.4; a full recalibration pass is separately queued.
 Current real-herdr verification uses isolated `HERDR_SESSION` names plus the guarded teardown helper in `tests/herdr-test-safety.sh`.
 A 2026-07-02 cleanup bug proved that `HERDR_SESSION` alone is not a safe way to target destructive session cleanup; see "Session targeting: the `--session` flag, not `HERDR_SESSION` alone" below.
 All real-herdr verification in this document uses isolated sessions and guarded cleanup; the captain's default herdr session and live tmux fleet were never intended targets.
@@ -507,6 +512,46 @@ Anything that must not be fooled by a replayed record needs both classifiers to 
 
 **Known consequence, not yet addressed:** `fm_backend_herdr_agent_alive` (previous section) inherits the same blind spot, so a post-reboot session-start liveness sweep can report a ghost secondmate as `alive`.
 That path was deliberately left unchanged here: its verdict also feeds the husk close-and-replace decision, and widening a classifier that authorises closing panes deserves its own change with its own e2e coverage.
+
+## Verified inversion (2026-07-20, herdr 0.7.4 / protocol 16): metadata calls ghosts `live` and live crewmates `no-agent`
+
+The section above found ghosts reading `live`.
+A follow-up audit found the metadata surface is not merely permissive but **inverted in both directions**, and that two firstmate paths act on the false-dead direction destructively.
+
+Two independent facts combine.
+First, firstmate never registers its crewmates as herdr agents: `bin/fm-spawn.sh` creates a pane and types the launch command into it (`send_launch_command`), and only `bin/fm-autostart.sh` uses `herdr agent start`, for firstmate itself.
+Second, on 0.7.4 a pane-typed claude gets a detected `agent_session` but **no agent-registry entry**, so `agent get` returns `agent_not_found` - the exact response this adapter documents above as the restored-plain-shell husk shape.
+So on 0.7.4 `no-agent` no longer means "husk"; it means "not started via `herdr agent start`", which describes every firstmate crewmate.
+
+Measured live across four panes on the captain's host, calling this adapter's real functions read-only:
+
+| pane | reality | `pane_agent_state` | `agent_alive` | `tab_is_husk` | `capture` (`pane read`) | `pane_process_state` |
+|---|---|---|---|---|---|---|
+| `w1:p1` | ghost | `live` | `alive` | no | FAIL | `dead` |
+| `w1:pR` | ghost | `live` | `alive` | no | FAIL | `dead` |
+| `w2:p1` | ghost | `live` | `alive` | no | FAIL | `dead` |
+| `w1:p2N` | **live crewmate** | `no-agent` | **`dead`** | **YES** | OK | `live` |
+
+Every `pane get` / `agent get`-derived classifier was wrong in all four cases; the two reality-touching signals (`pane read` and `pane process-info`) were right in all four.
+
+### UNFIXED: the two destructive paths built on this classification
+
+**`fm_backend_herdr_tab_is_husk` and `fm_backend_herdr_agent_alive`'s `dead` verdict are still calibrated for 0.7.1 and are still wrong on 0.7.4.**
+`fm_backend_herdr_create_task` CLOSES what `tab_is_husk` calls a husk - so a live crewmate's tab can be closed, killing the agent and orphaning its uncommitted worktree changes.
+`bin/fm-bootstrap.sh`'s secondmate liveness sweep KILLS the endpoint and respawns over it on `dead` - so a live secondmate can be killed mid-task.
+Both are prime directive #3 exposure and both remain open; a fix is written and parked pending a decision on its cost (composing `pane process-info` into these verdicts also makes automatic husk recovery inert, because a restored husk is a live bare shell and reads `live` at the process level).
+Until that lands, treat any respawn or session-start sweep on a herdr-backed home as capable of destroying live work.
+
+### What IS fixed: the reporting surfaces no longer assert what they do not know
+
+`fm_backend_process_state` (`bin/fm-backend.sh`) is the generic accessor over this backend's `pane process-info` probe, reporting `live`, `dead`, `unknown`, or `unsupported` for a backend that has no such probe.
+The session-start digest, `bin/fm-fleet-snapshot.sh`'s `endpoint.process_state`, and `bin/fm-fleet-view.sh` use it to distinguish a process-confirmed endpoint from an unconfirmed one and from a record-only ghost.
+This matters because AGENTS.md section 5 tells firstmate to trust the one session-start digest and not re-derive from it, so a digest that reported a replayed ghost as plainly `alive` was load-bearing: it was the reason recovery never fired for a crew that died in a restart.
+
+Note the caveat that keeps both classifiers necessary: `process_state=live` means "a terminal with a foreground process exists", not "an agent is running" - a bare shell left after an agent exits also reads `live`.
+So `pane process-info` composes with `pane_agent_state` and can never replace it.
+
+Regression coverage for the reporting change, and for the watcher's endpoint-gone detection, is `tests/fm-watch-capture-failure.test.sh`.
 
 ## End-to-end verification (spawn -> steer -> peek -> done -> merge -> teardown)
 
