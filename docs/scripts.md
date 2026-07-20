@@ -69,6 +69,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-claude-shim.sh`      | Fail-open `claude` launcher shim that re-adds firstmate's launch flags after an external relaunch (docs/claude-resume-shim.md); installed by the captain, never automatically |
+| `fm-autostart.sh`        | Idempotently start the firstmate agent in a ready headless herdr server at boot (docs/firstmate-autostart.md); the unit is installed by the captain, never automatically |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |
 | `fm-x-poll.sh`           | One bounded X relay poll: stash pending mentions, print `x-mention <request_id>`     |
 | `fm-x-reply.sh`          | Post or dry-run preview a composed X-mode reply or follow-up                         |

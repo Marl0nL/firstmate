@@ -1,0 +1,32 @@
+# firstmate-autostart.service - TEMPLATE, not an installed unit.
+#
+# Boot brings up `herdr server`, which is headless and materialises no panes, so
+# nothing was actually supervising the fleet until a human ran `herdr` and
+# attached. This unit runs the missing client-side step over herdr's socket API.
+#
+# __FM_ROOT__ is a placeholder, NOT a shell variable: replace it with the
+# absolute path of the firstmate home before installing. The install, rollback,
+# and verification commands live in docs/firstmate-autostart.md - use those
+# rather than copying this file by hand.
+
+[Unit]
+Description=Start the firstmate primary agent in the herdr server
+Documentation=file://__FM_ROOT__/docs/firstmate-autostart.md
+# Wants, not Requires: this is a best-effort follower. Requires would also tear
+# this unit down whenever herdr-server restarts, and a herdr-server restart is
+# precisely when a resurrected-but-flagless firstmate is already handled
+# elsewhere (see docs/claude-resume-shim.md). After= orders us behind the server
+# PROCESS; the readiness poll in ExecStart handles the socket not yet answering.
+Wants=herdr-server.service
+After=herdr-server.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=__FM_ROOT__/bin/fm-autostart.sh --timeout 120
+# Must exceed the script's own budget (--timeout 120 plus its 20s start
+# confirmation) so systemd never kills the wait before it can report why.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
