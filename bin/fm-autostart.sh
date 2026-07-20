@@ -19,12 +19,40 @@
 # where the server answered and the answer positively contained no firstmate.
 #
 # WHAT COUNTS AS "a firstmate is already running"
-# Either an agent named --name (default `firstmate`), or ANY agent whose working
-# directory is the firstmate home. The second test is the load-bearing one: an
-# agent herdr resurrected, or one the captain launched by hand, carries no name
-# at all (`name` is null for every agent not started through `agent start
+# An agent list ENTRY IS NOT ENOUGH. The entry must first MATCH this home -
+# either an agent named --name (default `firstmate`), or ANY agent whose
+# working directory is the firstmate home - and then that match must be
+# CONFIRMED LIVE against the pane it claims to occupy.
+#
+# The directory match is the load-bearing half of matching: an agent herdr
+# resurrected, or one the captain launched by hand, carries no name at all
+# (`name` is absent or null for every agent not started through `agent start
 # <name>`), so name matching alone would happily start a duplicate next to the
-# live firstmate. Directory matching catches it.
+# live firstmate.
+#
+# The liveness confirmation is the load-bearing half of the answer, and it is
+# why this script once never started anything at all. `herdr agent list` is
+# served from the session layout herdr persists in ~/.config/herdr/session.json,
+# so after a reboot it REPLAYS records - agent, cwd, pane_id, even
+# agent_status "idle" - for agents that are not running. Matching those GHOST
+# records made the guard report "firstmate is already up" and start nothing, at
+# every boot, forever, silently: a permanent no-op wearing the costume of
+# idempotence. Verified live 2026-07-20 (herdr 0.7.4): two listed "idle" agents
+# claimed the firstmate home while exactly one claude process existed on the
+# machine, and neither of those panes had any process behind it.
+#
+# Confirmation asks bin/backends/herdr.sh, which owns this classification for
+# the whole fleet, two questions about the entry's pane:
+#   fm_backend_herdr_pane_agent_state    - does the pane exist and hold a
+#                                          REGISTERED agent (live), or is it a
+#                                          husk (dead / no-agent)?
+#   fm_backend_herdr_pane_process_state  - is there a real PROCESS behind it
+#                                          (live), or none (dead)?
+# Both must answer `live`. The second is not redundant: a ghost passes `pane
+# get` and `agent get` intact - they replay from the same persisted layout - and
+# only `pane process-info` sees that nothing is running there. Anything else,
+# including an entry that names no pane at all, is UNKNOWN, and unknown never
+# licenses a start (see THE ONE RULE above).
 #
 # PATH ALIASING IS PART OF THAT TEST, NOT A DETAIL.
 # On ostree/atomic Fedora `/home` is a symlink to `/var/home`, so the same
@@ -73,8 +101,9 @@
 #   0  a firstmate is up: either already present (no-op) or started and confirmed
 #   1  usage or environment error (bad flag, no herdr, no jq, no firstmate home)
 #   2  the herdr server did not become ready within --timeout
-#   3  the agent list could not be read or understood - state unknown, so nothing
-#      was started (fail closed)
+#   3  the agent list could not be read or understood, or an entry matching this
+#      home could not be classified live-or-not - state unknown, so nothing was
+#      started (fail closed)
 #   4  the start was attempted and failed, or the agent never appeared
 set -eu
 
@@ -152,6 +181,21 @@ FM_ROOT=$(cd "$FM_ROOT" && pwd -P)
 command -v herdr >/dev/null 2>&1 || die "herdr not found on PATH"
 command -v jq >/dev/null 2>&1 || die "jq not found on PATH (required to parse herdr's JSON)"
 
+# The pane classifiers are owned by the herdr adapter, not restated here: one
+# owner for "what does this pane actually hold" keeps this script and the
+# watcher/spawn paths from drifting apart about what counts as alive. FM_ROOT
+# is this script's own resolved home and the adapter assigns its own meaning to
+# that name, so it is saved across the source and restored immediately.
+FM_AUTOSTART_ROOT=$FM_ROOT
+# shellcheck source=bin/backends/herdr.sh
+. "$DEFAULT_ROOT/bin/backends/herdr.sh"
+FM_ROOT=$FM_AUTOSTART_ROOT
+# The same session `herdr agent start` below lands in: ambient HERDR_SESSION if
+# the operator set one, herdr's own `default` otherwise. Held in its own
+# variable rather than assigned back into HERDR_SESSION, which would change
+# which session the start itself targets.
+HERDR_SESSION_NAME=$(fm_backend_herdr_session)
+
 # --- helpers ----------------------------------------------------------------
 
 # Resolve to a physical path so /home and /var/home spellings of one directory
@@ -196,12 +240,38 @@ wait_for_server() {
   return 1
 }
 
+# Confirm that a matching agent-list entry is a LIVE agent rather than a ghost
+# record replayed from herdr's persisted session layout (see the header).
+#   0  live      - the pane exists, holds a registered agent, AND has a process
+#   1  not live  - positively a husk: no pane, no agent, or no process
+#   2  unknown   - could not be classified; the caller must fail closed
+entry_is_live() {
+  local pane=$1
+  # No pane id means nothing to verify against. That is not evidence of a ghost
+  # and not evidence of a live firstmate, so it is unknown, never "absent".
+  [ -n "$pane" ] || return 2
+  case "$(fm_backend_herdr_pane_agent_state "$HERDR_SESSION_NAME" "$pane")" in
+    dead | no-agent) return 1 ;;
+    live) : ;;
+    *) return 2 ;;
+  esac
+  # A husk passes the check above intact - `pane get` and `agent get` are served
+  # from the same persisted layout the ghost list came from. Only this second
+  # question reaches an actual process.
+  case "$(fm_backend_herdr_pane_process_state "$HERDR_SESSION_NAME" "$pane")" in
+    dead) return 1 ;;
+    live) return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
 # Answer "is a firstmate already running?" over the socket API.
-#   0  yes, one is present (prints the matching agent's identity)
+#   0  yes, one is present and confirmed live (prints the matching identity)
 #   1  no, positively absent
-#   2  unknown - the list could not be read or understood
+#   2  unknown - the list could not be read or understood, or a matching entry
+#      could not be confirmed live-or-not
 firstmate_present() {
-  local raw name cwd fgcwd line count seen=0
+  local raw name cwd fgcwd pane line desc count seen=0 rc unknown=0
   raw=$(herdr agent list 2>/dev/null) || return 2
   # A response that does not carry the agents array is an error or an
   # unrecognised shape, not an empty fleet. Never read it as "absent".
@@ -213,7 +283,7 @@ firstmate_present() {
     '' | *[!0-9]*) return 2 ;;
   esac
 
-  # NUL-delimited, three fields per agent, read through a process substitution.
+  # NUL-delimited, four fields per agent, read through a process substitution.
   # Not @tsv and not one-field-per-line: an absent name is the COMMON case, and
   # bash's `read` silently swallows a leading empty field when the delimiter is
   # whitespace (a tab is IFS whitespace), which would misread every unnamed
@@ -222,28 +292,55 @@ firstmate_present() {
   while
     IFS= read -r -d '' name &&
       IFS= read -r -d '' cwd &&
-      IFS= read -r -d '' fgcwd
+      IFS= read -r -d '' fgcwd &&
+      IFS= read -r -d '' pane
   do
     seen=$((seen + 1))
+    # Match first, then verify. A matching entry that turns out to be a ghost
+    # simply does not count, and the scan continues: another entry may still be
+    # the real firstmate.
+    desc=""
     if [ -n "$name" ] && [ "$name" = "$AGENT_NAME" ]; then
-      printf 'agent named %s\n' "$name"
-      return 0
+      desc="agent named $name"
+    else
+      for line in "$cwd" "$fgcwd"; do
+        [ -n "$line" ] || continue
+        if [ "$(physical_path "$line")" = "$FM_ROOT" ]; then
+          desc="agent running in $line"
+          break
+        fi
+      done
     fi
-    for line in "$cwd" "$fgcwd"; do
-      [ -n "$line" ] || continue
-      if [ "$(physical_path "$line")" = "$FM_ROOT" ]; then
-        printf 'agent running in %s\n' "$line"
-        return 0
-      fi
-    done
-  done < <(printf '%s' "$raw" | jq -j '(.result.agents // [])[] |
-      (.name // ""), "\u0000", (.cwd // ""), "\u0000", (.foreground_cwd // ""), "\u0000"')
+    [ -n "$desc" ] || continue
 
-  # Reaching here means no agent matched. Only trust that as "positively absent"
-  # if every agent the response claimed was actually examined; a short read means
-  # the extraction failed partway, and an unexamined agent could be the live
-  # firstmate.
+    # `if`, not a bare call plus $?: a non-zero return here is an ordinary,
+    # expected answer, and a bare call would be an errexit trip the moment a
+    # caller runs this function without disabling it.
+    if entry_is_live "$pane"; then rc=0; else rc=$?; fi
+    case "$rc" in
+      0)
+        printf '%s\n' "$desc"
+        return 0
+        ;;
+      # Positively a husk: a stale record of a firstmate that is not running.
+      # Not a reason to refuse - it is the exact state autostart exists to fix.
+      1) : ;;
+      # Matched but unclassifiable. Remembered rather than returned at once, so
+      # a later entry that IS confirmed live still wins and produces the clean
+      # no-op; only a scan that finds no live match at all fails closed.
+      *) unknown=1 ;;
+    esac
+  done < <(printf '%s' "$raw" | jq -j '(.result.agents // [])[] |
+      (.name // ""), "\u0000", (.cwd // ""), "\u0000", (.foreground_cwd // ""),
+      "\u0000", (.pane_id // ""), "\u0000"')
+
+  # Reaching here means no agent both matched and was confirmed live. Only trust
+  # that as "positively absent" if every agent the response claimed was actually
+  # examined - a short read means the extraction failed partway, and an
+  # unexamined agent could be the live firstmate - and if no entry that DID match
+  # was left unclassified.
   [ "$seen" -eq "$count" ] || return 2
+  [ "$unknown" -eq 0 ] || return 2
   return 1
 }
 
@@ -262,7 +359,7 @@ case "$present_rc" in
     exit 0
     ;;
   2)
-    die "could not read the agent list; refusing to start a possible duplicate firstmate" 3
+    die "could not determine whether a firstmate is already running; refusing to start a possible duplicate firstmate" 3
     ;;
 esac
 

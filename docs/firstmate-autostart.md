@@ -28,7 +28,7 @@ On start, the script:
 2. **Polls** `herdr status server` until the server reports running and protocol-compatible, bounded by `--timeout` (120s in the shipped unit).
    `After=herdr-server.service` orders the unit after the server *process* starts, which is not the same as the socket being answerable; a fixed `sleep` would be a guess in both directions.
    On timeout it exits non-zero and prints the last status it saw, so the journal records *why*.
-3. Asks whether a firstmate is already running, and **exits 0 as a no-op if one is**.
+3. Asks whether a firstmate is already **running** - a listed agent that is confirmed live, not merely a record - and **exits 0 as a no-op if one is**.
 4. Only then starts one:
 
 ```
@@ -43,12 +43,38 @@ herdr agent start firstmate --cwd /var/home/marlon/firstmate --no-focus -- \
 
 This is the sharp edge, not a nicety.
 Two firstmates on one home fight over the session lock and the fleet, which is strictly worse than no autostart at all.
-So every uncertainty resolves to *do not start*: a server that never becomes ready, an agent list that cannot be read, an unrecognised response shape - all exit non-zero having started nothing.
+So every uncertainty resolves to *do not start*: a server that never becomes ready, an agent list that cannot be read, an unrecognised response shape, a matching agent whose pane cannot be classified - all exit non-zero having started nothing.
 The only path that starts an agent is one where the server answered and the answer positively contained no firstmate.
 
-"A firstmate is already running" means **either** an agent named `firstmate`, **or** any agent whose working directory is the firstmate home.
-The second test is the load-bearing one.
-`name` is null for every agent not created through `agent start <name>` - which includes the firstmate the captain launched by hand and any pane herdr resurrected - so name matching alone would cheerfully start a duplicate right next to the live one.
+"A firstmate is already running" is two tests, and an agent-list entry alone satisfies neither.
+
+**First, does the entry match this home?**
+Either it is an agent named `firstmate`, or its working directory is the firstmate home.
+The second half is the load-bearing one.
+`name` is absent or null for every agent not created through `agent start <name>` - which includes the firstmate the captain launched by hand and any pane herdr resurrected - so name matching alone would cheerfully start a duplicate right next to the live one.
+
+**Second, is the matching entry actually alive?**
+This half was missing when the script first shipped, and its absence made the whole unit a silent permanent no-op.
+herdr persists its session layout in `~/.config/herdr/session.json`, so after a reboot `agent list` **replays records for agents that are not running** - full entries carrying `agent`, `cwd`, `pane_id` and an `agent_status` of `idle`.
+The guard matched one of those ghosts, printed `firstmate is already up`, and started nothing, at every boot.
+
+So a match is now confirmed against the pane it claims, through the two classifiers `bin/backends/herdr.sh` owns for the whole fleet:
+
+| Question | Owner | Must answer |
+| --- | --- | --- |
+| Does the pane exist and hold a registered agent? | `fm_backend_herdr_pane_agent_state` | `live` |
+| Is there a real process behind it? | `fm_backend_herdr_pane_process_state` | `live` |
+
+The second is not redundant.
+A ghost passes `pane get` **and** `agent get` intact, because those replay from the same persisted layout the list came from; only `pane process-info` reaches an actual process and answers `pane_not_found`.
+Verified live on the captain's host on 2026-07-20 (herdr 0.7.4, protocol 16): two listed `idle` agents claimed the firstmate home while the machine held exactly one claude process, and neither of those panes had a process behind it.
+
+A confirmed husk - no pane, no agent, or no process - simply does not count, and the scan continues; another entry may still be the real firstmate.
+Anything that cannot be classified, including a matching entry that names no pane at all, is unknown, and unknown still starts nothing and exits 3.
+
+One limit worth knowing: this guard sees only agents herdr knows about.
+A firstmate running outside herdr entirely is invisible to it.
+That is safe at boot, when nothing else is up yet, and firstmate's own session lock remains the backstop in every other case.
 
 Path spellings are resolved to physical paths before comparison.
 On this ostree Fedora `/home` is a symlink to `/var/home`, so the same home has two spellings and herdr may report the one the unit did not pass; a string compare would miss the live firstmate and duplicate it.
@@ -146,15 +172,22 @@ systemctl --user status firstmate-autostart.service
 #    one already up.
 journalctl --user -u firstmate-autostart.service -b
 
-# 4. The proof: a firstmate agent exists in the headless server, with no client
-#    ever attached.
+# 4. A firstmate agent exists in the headless server, with no client ever
+#    attached. Note its pane_id.
 herdr agent list
 
-# 5. Only now attach and confirm the pane is a live firstmate.
+# 5. The proof. `agent list` alone is NOT proof: it replays records for agents
+#    that are not running. Ask for the pane's actual process instead - it must
+#    return a real foreground_process_group_id and a claude argv.
+herdr pane process-info --pane <pane_id>
+
+# 6. Only now attach and confirm the pane is a live firstmate.
 herdr
 ```
 
-Step 4 is the one that matters: `herdr agent list` talks to the server over the socket, so a firstmate showing up there before any attach is exactly the gap this unit closes.
+Step 5 is the one that matters, and step 4 alone is the trap.
+`agent list` talks to the server over the socket, so a firstmate showing up there before any attach is the gap this unit closes - but a post-reboot list also replays ghost records for agents that are not running, which is precisely what once fooled the guard.
+Only `pane process-info` distinguishes the two.
 
 For the behavioural contract, `tests/fm-autostart.test.sh` drives the script against a fake `herdr` and covers the bounded readiness wait, the timeout path, the idempotence guard by name, by working directory, by `foreground_cwd`, and across aliased path spellings, plus failing closed on an unreadable agent list.
 It never contacts the real herdr server and never starts a real agent.

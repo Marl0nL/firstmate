@@ -472,6 +472,42 @@ The same `fm_backend_agent_alive` probe now has a second consumer: `bin/fm-spawn
 This is the fix for the failure this backend surfaced: on 2026-07-17, three herdr spawns whose launch send never landed against a freshly restarted `herdr-server.service` left the pane in the `no-agent` state (`pane get` succeeds, `agent get` -> `agent_not_found`), yet fm-spawn printed `spawned` and the tasks went In flight running nothing.
 Because herdr is verifiable for every harness, a spawn into a `no-agent` pane now re-sends the launch once and, if the pane is still `no-agent`, fails loudly instead of reporting success.
 
+Caveat, verified after this was written: `live` does not imply a running process after a machine reboot - see "Verified gap (2026-07-20)" below.
+
+## Verified gap (2026-07-20): after a REBOOT the metadata surface replays ghosts that classify `live`
+
+The two sections above establish that a restored pane comes back as a husk herdr itself reports honestly: `pane get` -> `pane_not_found`, or `agent get` -> `agent_not_found`.
+That holds for a `session stop` + fresh `herdr server` restart, which is how both were verified.
+It does **not** hold after a machine reboot with `herdr-server.service` starting the server at boot.
+
+In that shape herdr replays its persisted session layout (`~/.config/herdr/session.json`) into the metadata surface wholesale, and the replayed records are indistinguishable from live ones:
+
+```
+$ herdr agent list          # 2026-07-20, herdr 0.7.4, protocol 16, Fedora
+{"result":{"agents":[
+  {"agent":"claude","agent_status":"idle","cwd":"/var/home/marlon/firstmate","pane_id":"w1:p1",...},
+  {"agent":"claude","agent_status":"idle","cwd":"/var/home/marlon/firstmate","pane_id":"w1:pR",...},
+  {"agent":"claude","agent_status":"idle","cwd":"/var/home/marlon/challenges","pane_id":"w2:p1",...}]}}
+
+$ herdr pane get w1:p1      # answers in full, agent_status "idle"
+$ herdr agent get w1:p1     # answers in full, agent_status "idle"
+$ herdr pane process-info --pane w1:p1
+{"error":{"code":"pane_not_found","message":"pane not found"},"id":"cli:pane:process_info"}
+```
+
+The machine held exactly **one** live claude process at the time, running outside herdr entirely.
+All three listed "idle" agents were ghosts; `pane process-info` reported `pane_not_found` for every one of them, and for the one genuinely live pane on the box it returned a real `foreground_process_group_id` and argv.
+
+So `agent_status` is persisted, not probed, and `fm_backend_herdr_pane_agent_state` returns **`live` for a ghost** in this shape.
+Its four states remain correct for the question it asks - is a pane structurally present and is an agent REGISTERED in it - but `live` does not imply a running process after a reboot.
+
+`fm_backend_herdr_pane_process_state` is the classifier for the process question, and `pane process-info` is the only call in this adapter that touches reality rather than the persisted layout.
+Anything that must not be fooled by a replayed record needs both classifiers to answer `live`.
+`bin/fm-autostart.sh` is the first consumer and the reason this was found: reading `agent list` alone made its idempotence guard match a ghost, report "firstmate is already up", and start nothing at every boot, forever, silently (`docs/firstmate-autostart.md`, "Never a second firstmate"; regression coverage in `tests/fm-autostart.test.sh`).
+
+**Known consequence, not yet addressed:** `fm_backend_herdr_agent_alive` (previous section) inherits the same blind spot, so a post-reboot session-start liveness sweep can report a ghost secondmate as `alive`.
+That path was deliberately left unchanged here: its verdict also feeds the husk close-and-replace decision, and widening a classifier that authorises closing panes deserves its own change with its own e2e coverage.
+
 ## End-to-end verification (spawn -> steer -> peek -> done -> merge -> teardown)
 
 Beyond the fake-CLI unit tests (`tests/fm-backend-herdr.test.sh`) and the real-CLI smoke tests (`tests/fm-backend-herdr-smoke.test.sh` and `tests/fm-backend-autodetect-smoke.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME`, a scratch `local-only` git project, and an isolated `HERDR_SESSION`:

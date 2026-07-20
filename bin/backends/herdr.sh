@@ -416,6 +416,57 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   esac
 }
 
+# fm_backend_herdr_pane_process_state: classify <pane_id> in <session> as one
+# of live|dead|unknown by asking for its OS PROCESS, not its metadata. Purely
+# read-only (`pane process-info`), and, like the classifier above, judged from
+# the JSON body alone rather than the exit status.
+#
+# WHY THIS EXISTS ALONGSIDE fm_backend_herdr_pane_agent_state.
+# The metadata surface can outlive the processes it describes.
+# `herdr agent list`, `pane get`, `pane list` and `agent get` are all served
+# from the session layout herdr persists in ~/.config/herdr/session.json, so
+# after a server restart they REPLAY records - complete with `agent`,
+# `agent_session`, `cwd`, `pane_id` and an `agent_status` of "idle" - for
+# agents that are not running at all. Verified live on the captain's host
+# (2026-07-20, herdr 0.7.4, protocol 16): three "idle" agents were listed,
+# two of them claiming cwd=/var/home/marlon/firstmate, and `pane get` plus
+# `agent get` answered for all three, while the machine held exactly ONE live
+# claude process. `pane process-info` on each of those panes answered
+# {"error":{"code":"pane_not_found"}}, and on the one genuinely live pane it
+# returned a real foreground_process_group_id and argv.
+#
+# So process-info is the only call in this adapter that touches reality, and
+# it is the signal any "is something actually running there?" question must
+# use. fm_backend_herdr_pane_agent_state answers a different, still-correct
+# question - is a pane structurally present and is an agent REGISTERED in it -
+# and callers that must not be fooled by a replayed record need both.
+#
+#   live     - process-info returned a process_info body: a real terminal
+#              with a real foreground process group is attached.
+#   dead     - process-info responded with error code pane_not_found: no
+#              process exists for this pane, whatever the metadata claims.
+#   unknown  - any other error code, or an unparseable/unexpected body.
+#              Callers must fail safe toward refusal here, never toward
+#              treating the pane as either confirmed live or confirmed gone.
+fm_backend_herdr_pane_process_state() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 out code
+  # 2>&1 for the same verified reason as fm_backend_herdr_pane_agent_state:
+  # herdr writes an error response's JSON body to stderr, and that body is
+  # exactly the pane_not_found signal this function exists to read.
+  out=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>&1)
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ -n "$code" ]; then
+    [ "$code" = "pane_not_found" ] && printf 'dead' || printf 'unknown'
+    return 0
+  fi
+  if printf '%s' "$out" | jq -e 'has("result") and (.result | has("process_info"))' \
+    >/dev/null 2>&1; then
+    printf 'live'
+  else
+    printf 'unknown'
+  fi
+}
+
 # fm_backend_herdr_tab_is_husk: true (0) only for the two conservative husk
 # states (dead, no-agent) fm_backend_herdr_pane_agent_state can positively
 # confirm; live and unknown both refuse (1), so an inconclusive read never
