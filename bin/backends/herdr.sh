@@ -467,6 +467,35 @@ fm_backend_herdr_pane_process_state() {  # <session> <pane_id>
   fi
 }
 
+# fm_backend_herdr_pane_process_cwds: print the working directory of every
+# foreground process `pane process-info` reports for <pane_id>, one per line.
+#
+# This is the IDENTITY half of the reality-touching probe: process_state above
+# answers "is anything running there", and this answers "where is it running",
+# straight from the kernel's view of the process rather than from herdr's
+# replayable metadata. Callers use it to confirm that a live pane's process
+# actually operates in an expected directory (bin/fm-autostart.sh: is the live
+# process really the firstmate home's supervisor) without trusting `agent get`,
+# whose agent_status is miscalibrated on herdr 0.7.4 (a genuinely live,
+# registered claude reports "unknown" - verified live 2026-07-20 on the
+# captain's host, herdr 0.7.4 / protocol 16, against the running firstmate).
+#
+# Prints nothing and returns non-zero when the pane has no process, the
+# response cannot be parsed, or no process carries a cwd field. Callers must
+# treat that as UNKNOWN identity and fail closed; only a printed path is
+# evidence. Verified response shape (2026-07-20, herdr 0.7.4): each entry of
+# .result.process_info.foreground_processes carries argv, cmdline, cwd, name,
+# and pid.
+fm_backend_herdr_pane_process_cwds() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 out
+  # 2>&1 for the same verified reason as the two classifiers above: herdr
+  # writes error bodies to stderr.
+  out=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>&1)
+  printf '%s' "$out" |
+    jq -er '[.result.process_info.foreground_processes[]?.cwd // empty] |
+      select(length > 0) | .[]' 2>/dev/null
+}
+
 # fm_backend_herdr_tab_is_husk: true (0) only for the two conservative husk
 # states (dead, no-agent) fm_backend_herdr_pane_agent_state can positively
 # confirm; live and unknown both refuse (1), so an inconclusive read never

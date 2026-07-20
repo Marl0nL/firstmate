@@ -435,6 +435,15 @@ Destructive teardown goes only through `teardown <session>` (or a deliberate mid
 It also adds a before/after fleet-state tripwire: `provision` records the live `default` session before creating the lab session, and `teardown` verifies that recorded state is byte-identical afterward before clearing it, treating any missing, stopped, or changed default session as a hard failure rather than a warning.
 Crewmate briefs for tasks that drive Herdr lifecycle get this exact contract embedded by scaffolding with `bin/fm-brief.sh --herdr-lab`; every crewmate brief scaffolded without the flag instead carries a loud not-enabled gate, because the scaffold cannot detect from the caller-supplied repo string whether the task will touch Herdr lifecycle.
 
+### Verified hole (2026-07-20, herdr 0.7.4): `agent start ... -- <argv>` defeats the lab helper's trailing `--session`
+
+The trailing-flag rule above has one command shape it cannot scope: anything with a trailing `-- <argv>`.
+`bin/fm-herdr-lab.sh run` appends `--session <lab>` at the END of the argument list, so for `agent start <name> --cwd <dir> --no-focus -- <argv>` the flag lands INSIDE the agent argv - the started agent's own JSON echoes it back: `"argv":["sleep","600","--session","fm-lab-..."]` - and the herdr call itself carries no session flag at all.
+The ambient `HERDR_SESSION=<lab>` the helper also sets did NOT scope the call either: three such starts during the boot-network-gate task all materialised their panes in the captain's live `default` session (verified by `pane get` against default for each pane id), in the same tab as the live firstmate, while the lab session's own `agent list` stayed empty.
+The helper's before/after default-session tripwire did not trip on this, so it does not currently detect a leaked pane either.
+Until the helper inserts `--session` BEFORE the `--` separator, treat `run <session> agent start ... -- <argv>` as UNSAFE: it starts the agent in whatever session is ambient, which on the captain's host is the live fleet.
+The corollary: an ambient-only scope is not merely unreliable for destructive cleanup (the 0.7.1 lesson above) but also for `agent start` on 0.7.4.
+
 ## ID stability across a server restart
 
 The original design addendum flagged this as an open risk to verify.
@@ -552,6 +561,29 @@ Note the caveat that keeps both classifiers necessary: `process_state=live` mean
 So `pane process-info` composes with `pane_agent_state` and can never replace it.
 
 Regression coverage for the reporting change, and for the watcher's endpoint-gone detection, is `tests/fm-watch-capture-failure.test.sh`.
+
+## Verified (2026-07-20, herdr 0.7.4 / protocol 16): a live `agent start` claude reports `agent_status: "unknown"`, and `pane process-info` carries per-process cwd
+
+Two facts measured read-only against the captain's live, captain-serving firstmate (started by `herdr agent start firstmate` at boot, actively working at the time):
+
+```
+$ herdr agent get w1:p2R
+... "agent_status":"unknown","cwd":"/var/home/marlon/firstmate","name":"firstmate",
+    "agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"d8a8..."} ...
+$ herdr pane process-info --pane w1:p2R
+... "foreground_processes":[{"argv":["/home/marlon/.local/share/claude/versions/2.1.215",
+    "--dangerously-skip-permissions","--remote-control","--continue"],
+    "cmdline":"...","cwd":"/var/home/marlon/firstmate","name":"2.1.215","pid":1991}],
+    "shell_pid":1991 ...
+```
+
+So on 0.7.4 `agent_status` is untrustworthy in a THIRD direction beyond the inversion above: not only do ghosts read `idle` and pane-typed live crewmates read `no-agent`, but a genuinely live, registered, `agent start`-created agent reads `"unknown"` - a value `fm_backend_herdr_pane_agent_state` classifies as `unknown`, which fail-closed callers then refuse to act on.
+That refusal is exactly right for husk-recovery callers and exactly wrong for a caller trying to confirm a healthy agent: it made `bin/fm-autostart.sh` declare both of this day's working boots failures and broke its already-up no-op, which is why that script now judges liveness on `pane process-info` alone.
+An `agent start` response echoes `agent_status: "unknown"` from the very first moment, so this is the steady state, not a startup transient.
+The same probe run also showed a freshly `agent start`-created pane running a plain `bash`+`sleep` reading `agent_status: "idle"` in `pane get` - the status field's value tracks herdr's process recognition, not agent health, and nothing in it distinguishes live from replayed.
+
+`pane process-info`'s verified 0.7.4 body carries `argv`, `cmdline`, `cwd`, `name`, and `pid` for every foreground process, plus `shell_pid` and `foreground_process_group_id`.
+The per-process `cwd` is kernel-reported reality, and `fm_backend_herdr_pane_process_cwds` is the adapter accessor over it (used by `bin/fm-autostart.sh` to tie a live process to the firstmate home before trusting a metadata cwd match).
 
 ## End-to-end verification (spawn -> steer -> peek -> done -> merge -> teardown)
 

@@ -19,14 +19,31 @@ Documentation=file://__FM_ROOT__/docs/firstmate-autostart.md
 # PROCESS; the readiness poll in ExecStart handles the socket not yet answering.
 Wants=herdr-server.service
 After=herdr-server.service
+# The agent registers with Anthropic's remote-control service at launch, so it
+# must not start before the network is usable. Know the limit of these two
+# lines: they order against the USER manager's network-online.target, and a
+# user manager typically has NO provider for it (verified 2026-07-20 on the
+# captain's host: no unit file, permanently inactive), so on such hosts they
+# are inert - a user unit cannot order against system targets. The wait that
+# actually enforces "network first" is fm-autostart.sh's own bounded
+# reachability gate (exit 5); these lines engage only where a user-scope
+# provider exists.
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# systemd user units get a minimal PATH, and herdr lives in ~/.local/bin, so
+# without this line the script dies at boot with "herdr not found on PATH"
+# (data/learnings.md, 2026-07-20). %h is the user's home directory, expanded
+# by systemd, so the template stays host-neutral.
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
 ExecStart=__FM_ROOT__/bin/fm-autostart.sh --timeout 120
-# Must exceed the script's own budget (--timeout 120 plus its 20s start
-# confirmation) so systemd never kills the wait before it can report why.
-TimeoutStartSec=300
+# Must exceed the script's own budget (--timeout 120 for the server wait, plus
+# --net-timeout 120 for the network gate, plus its 20s start confirmation) so
+# systemd never kills the wait before it can report why.
+TimeoutStartSec=420
 
 [Install]
 WantedBy=default.target
