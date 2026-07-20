@@ -151,16 +151,30 @@ printf '%s\n' "$LOCK_OUT"
 READ_ONLY=0
 if [ "$LOCK_RC" -ne 0 ]; then
   READ_ONLY=1
+  # fm-lock.sh distinguishes its two refusals (see its header): 2 means this
+  # session could not identify its own harness process, so there is no competing
+  # session to go looking for. Both stay read-only; only the wording differs, so
+  # the captain is not sent hunting for a session that does not exist.
+  if [ "$LOCK_RC" -eq 2 ]; then
+    LOCK_HEADLINE='READ-ONLY SESSION - THIS SESSION CANNOT IDENTIFY ITS OWN HARNESS PROCESS (NO OTHER SESSION HOLDS THE LOCK)'
+  else
+    LOCK_HEADLINE='READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK'
+  fi
   BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '%s\n' "$BAR"
-    printf '●  READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK\n'
+    printf '●  %s\n' "$LOCK_HEADLINE"
     printf '●  %s\n' "$LOCK_OUT"
     printf '●  Skipping every mutating step: secondmate sync, X-mode artifacts,\n'
     printf '●  fleet sync, and wake-queue drain. Detect-only bootstrap diagnostics and\n'
     printf '●  the rest of this read-only-safe digest still ran below.\n'
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
     printf '●  otherwise mutate fleet state from this session.\n'
+    if [ "$LOCK_RC" -eq 2 ]; then
+      printf '●  Do not go looking for a competing session: there is none. Report the\n'
+      printf '●  unrecognized launch shape to the captain - the harness this session runs\n'
+      printf '●  under is not one bin/fm-lock.sh can name from its process ancestry.\n'
+    fi
     printf '%s\n' "$BAR"
   }
 fi

@@ -76,6 +76,31 @@ One limit worth knowing: this guard sees only agents herdr knows about.
 A firstmate running outside herdr entirely is invisible to it.
 That is safe at boot, when nothing else is up yet, and firstmate's own session lock remains the backstop in every other case.
 
+### The first unattended boot came up read-only
+
+The first boot this unit actually completed produced a firstmate that was alive but could not supervise anything: it refused its own session lock and dropped into read-only mode, so it could not spawn, steer, merge, or arm a watcher.
+
+`bin/fm-lock.sh` identifies the harness by walking the shell's process ancestry.
+This unit launches through `~/.local/bin/claude`, which on a shim-installed home is `bin/fm-claude-shim.sh`, and the shim `exec`s the real versioned binary under `~/.local/share/claude/versions/<version>` (see [claude-resume-shim.md](claude-resume-shim.md)).
+A process `exec`ed from that path reports the **version number** as its command name, so the ancestry walk saw nothing it could name.
+Observed on the captain's host, 2026-07-20:
+
+```
+7491 comm=bash     args=/bin/bash -c source ~/.claude/shell-snapshots/...
+2026 comm=2.1.215  args=/home/marlon/.local/share/claude/versions/2.1.215 --dangerously-skip-permissions --remote-control --continue
+1775 comm=herdr    args=/var/home/marlon/.local/bin/herdr server
+1741 comm=systemd
+```
+
+It had never been seen before because resuming by hand went through `claude-real`, whose command name matches directly; the shim path is the first launch that reaches the versioned binary, and boot autostart always takes it.
+
+`fm-lock.sh` now also identifies a harness by `argv[0]` when it points into a `<harness>/versions/<version>` install directory, and its header owns that rule.
+The matching is anchored to the executable and never to the arguments, because a tool call's transient shell carries `~/.claude/...` in its command line: matching that would write a subshell pid as the lock holder, dead moments later.
+`tests/fm-lock.test.sh` covers both halves.
+
+Two refusals reach the caller as distinct exit codes, because they demand opposite responses: another live session really holds the lock, versus this session cannot identify itself and nobody holds anything.
+Both stay read-only, and `bin/fm-session-start.sh`'s banner names which one happened rather than sending the captain looking for a competing session that does not exist.
+
 Path spellings are resolved to physical paths before comparison.
 On this ostree Fedora `/home` is a symlink to `/var/home`, so the same home has two spellings and herdr may report the one the unit did not pass; a string compare would miss the live firstmate and duplicate it.
 That is the same aliasing that bit firstmate twice before (see `data/learnings.md`, 2026-07-16).
