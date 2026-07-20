@@ -292,6 +292,26 @@ assert_contains "$out" "herdr agent start firstmate --cwd $HOME_ABS" \
 [ "$(started_count "$server")" = 0 ] || fail "--dry-run must never start an agent"
 pass "dry run: reports the decision and the command without starting anything"
 
+server=$(new_server "$TMP_ROOT/s-argv")
+out=$(run_autostart "$server" "$HOME_DIR" -- echo hello)
+rc=$?
+expect_code 0 "$rc" "an explicit -- argv must be honoured: $out"
+assert_contains "$(cat "$server/start.log")" -- "-- echo hello" \
+  "an explicit -- argv must replace the default command"
+assert_not_contains "$(cat "$server/start.log")" "--continue" \
+  "an explicit -- argv must not also carry the default flags"
+pass "argv: an explicit -- command replaces the default"
+
+# A bare `--` must be refused rather than expanding an empty array, which is an
+# error under `set -u` on stock macOS Bash 3.2.
+server=$(new_server "$TMP_ROOT/s-bareargv")
+out=$(run_autostart "$server" "$HOME_DIR" --)
+rc=$?
+expect_code 1 "$rc" "a bare -- must exit 1"
+assert_contains "$out" "needs a command" "a bare -- must say what is missing"
+[ "$(started_count "$server")" = 0 ] || fail "a bare -- must never start an agent"
+pass "argv: a bare -- is refused with a clear message"
+
 server=$(new_server "$TMP_ROOT/s-nothome")
 mkdir -p "$TMP_ROOT/not-firstmate"
 out=$(run_autostart "$server" "$TMP_ROOT/not-firstmate")

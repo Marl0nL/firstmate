@@ -88,6 +88,7 @@ INTERVAL=1
 CONFIRM_TIMEOUT=20
 DRY_RUN=0
 AGENT_ARGV=()
+ARGV_GIVEN=0
 
 usage() {
   sed -n 's/^# \{0,1\}//p' "$SELF" | sed -n '/^Usage:/,/^   4  /p'
@@ -109,7 +110,13 @@ while [ "$#" -gt 0 ]; do
     --confirm) [ "$#" -ge 2 ] || die "--confirm needs a value"; CONFIRM_TIMEOUT=$2; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h | --help) usage; exit 0 ;;
-    --) shift; AGENT_ARGV=("$@"); break ;;
+    --)
+      shift
+      [ "$#" -gt 0 ] || die "-- needs a command to run in the agent"
+      AGENT_ARGV=("$@")
+      ARGV_GIVEN=1
+      break
+      ;;
     *) die "unknown argument '$1' (try --help)" ;;
   esac
 done
@@ -124,7 +131,11 @@ case "$INTERVAL" in
   '' | *[!0-9.]* | '.') die "--interval must be a non-negative number, got '$INTERVAL'" ;;
 esac
 
-if [ "${#AGENT_ARGV[@]}" -eq 0 ]; then
+# Tracked with a flag rather than by testing the array's length: expanding an
+# empty array under `set -u` is an error on stock macOS Bash 3.2, and `--` with
+# no command is already refused above, so AGENT_ARGV is only ever expanded
+# non-empty.
+if [ "$ARGV_GIVEN" -eq 0 ]; then
   AGENT_ARGV=(claude --dangerously-skip-permissions --remote-control --continue)
 fi
 
