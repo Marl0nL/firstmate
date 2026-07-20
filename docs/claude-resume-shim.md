@@ -32,19 +32,23 @@ The worst thing the shim can do is fail to add a flag, which is exactly today's 
 ## Install
 
 The shim ships in this repo but is never installed automatically: swapping the captain's `claude` launcher is a deliberate manual step.
-Run these as the captain, in order.
-`FM_HOME_DIR` must be the firstmate primary checkout, not a worktree.
+
+Every command below uses absolute literal paths on purpose, including inside step 4.
+A step that depends on a shell variable silently produces a broken path when re-run in a fresh shell - that is exactly how the 2026-07-20 dangling-symlink outage happened (`data/learnings.md`): step 4 ran alone, later, with the variable set here long since unset, and `ln -sfn` created a symlink to a path that does not exist with no error at all.
+Substitute your own firstmate home if it is not `/var/home/marlon/firstmate`, but substitute a **literal path** in every step, never a variable.
+
+Run these as the captain, in order, in one shell, without skipping ahead.
+**Step 4 is the point of no return**: it replaces the captain's only `claude` launcher.
+If it is ever run on its own - a fresh shell, a later day, pasted from history - re-paste it with the literal path below, not with a variable that may no longer be set.
 
 ```sh
-FM_HOME_DIR=/var/home/marlon/firstmate
-
 # 1. Tell the shim where the firstmate home is and where versions live.
 #    Written with printf rather than a heredoc on purpose: a heredoc here
 #    silently breaks if this block is ever pasted inside another heredoc, and
 #    the commands below it would then run unintentionally.
 mkdir -p ~/.config/firstmate
 printf 'home=%s\nreal=%s\nversions_dir=%s\n' \
-  "$FM_HOME_DIR" \
+  "/var/home/marlon/firstmate" \
   "$HOME/.local/bin/claude-real" \
   "$HOME/.local/share/claude/versions" \
   > ~/.config/firstmate/claude-shim.conf
@@ -56,11 +60,14 @@ cp -P ~/.local/bin/claude ~/.local/bin/claude-real
 ~/.local/bin/claude-real --version
 
 # 4. Swap in the shim. `ln -sfn` replaces the symlink in one step.
-ln -sfn "$FM_HOME_DIR/bin/fm-claude-shim.sh" ~/.local/bin/claude
+#    The guard fails loudly on a bad path instead of linking to nothing.
+test -f /var/home/marlon/firstmate/bin/fm-claude-shim.sh && \
+  ln -sfn /var/home/marlon/firstmate/bin/fm-claude-shim.sh ~/.local/bin/claude
 ```
 
 Do not run step 4 until step 3 prints a version.
 If it does not, stop: the rollback below has nothing to restore from.
+If step 4's `test -f` fails, stop: the shim path is wrong or the checkout is missing it, and nothing was linked.
 
 `claude`'s own auto-updater may rewrite `~/.local/bin/claude` and displace the shim.
 That is a silent revert to today's behaviour, not a breakage; re-run step 4 to restore it.
