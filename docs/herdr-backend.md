@@ -425,24 +425,54 @@ This is not a hypothetical: it killed the captain's live default herdr server, t
 
 The fix, verified against the real binary in an isolated session (both a genuinely separate isolated session and the default session's untouched state confirmed before and after):
 
-- The `--session <name>` GLOBAL FLAG reliably routes every herdr subcommand tried (`status`, `workspace *`, `tab *`, `pane *`, `agent *`, `server`, `session stop`/`delete`) to the named session, in either leading (`herdr --session <name> <subcommand>`) or trailing (`herdr <subcommand> ... --session <name>`) position - both verified to work identically.
+- The `--session <name>` GLOBAL FLAG reliably routes every herdr subcommand tried (`status`, `workspace *`, `tab *`, `pane *`, `agent *`, `server`, `session stop`/`delete`) to the named session, in either leading (`herdr --session <name> <subcommand>`) or trailing (`herdr <subcommand> ... --session <name>`) position - both verified to work identically for every subcommand WITHOUT a `-- <argv>` separator.
+Trailing position is not a general mechanism: see "Closed hole (2026-07-20, herdr 0.7.4)" below, where a `--` separator swallows the trailing flag.
+Prefer leading position in any new call site.
 - `bin/backends/herdr.sh`'s `fm_backend_herdr_cli` helper wraps every herdr invocation in the adapter: it sets `HERDR_SESSION` (kept for cosmetic/forward-compat reasons - harmless, and it is what the client's own JSON echoes back) AND appends a trailing `--session <name>`, so every adapter call is correctly scoped regardless of what else is running on the machine.
 - For destructive session cleanup specifically, use `herdr session stop <name>` / `herdr session delete <name>` (the explicit-by-name forms - `<name>` is a REQUIRED positional argument, so herdr cannot resolve it ambiguously; herdr's own help text requires literally typing `default` to affect the default session), never the ambient `herdr server stop`. `bin/fm-herdr-lab.sh` now owns this guard as the single source of truth: `fm_herdr_lab_teardown` does the stop-then-delete, gated by a read-only hard guard (`fm_herdr_lab_refuse_if_default`, re-querying `herdr session list --json` immediately before EVERY stop/delete call, refusing on a literal `default` name, a not-found name, or `default:true`) as a second, independent layer that fails closed on any ambiguity. `tests/herdr-test-safety.sh` now sources that helper, so its `herdr_safe_stop_and_delete`/`herdr_refuse_if_default` names are thin delegating wrappers over the same owner.
 
 The same guard is now a first-class production helper, `bin/fm-herdr-lab.sh`, not just test scaffolding.
-It provisions an isolated never-`default` lab session (names must start with `fm-lab-`), runs every task command through `run <session> ...` with a mandatory trailing `--session` appended, and refuses caller-supplied `--session`, any leading option before the subcommand, and every server or session-lifecycle subcommand.
+It provisions an isolated never-`default` lab session (names must start with `fm-lab-`), runs every task command through `run <session> ...` with a mandatory leading `--session` supplied by the helper, and refuses caller-supplied `--session`, any leading option before the subcommand, and every server or session-lifecycle subcommand.
 Destructive teardown goes only through `teardown <session>` (or a deliberate mid-run `stop <session>`), each re-running the refuse-default check immediately before every stop and delete.
 It also adds a before/after fleet-state tripwire: `provision` records the live `default` session before creating the lab session, and `teardown` verifies that recorded state is byte-identical afterward before clearing it, treating any missing, stopped, or changed default session as a hard failure rather than a warning.
 Crewmate briefs for tasks that drive Herdr lifecycle get this exact contract embedded by scaffolding with `bin/fm-brief.sh --herdr-lab`; every crewmate brief scaffolded without the flag instead carries a loud not-enabled gate, because the scaffold cannot detect from the caller-supplied repo string whether the task will touch Herdr lifecycle.
 
-### Verified hole (2026-07-20, herdr 0.7.4): `agent start ... -- <argv>` defeats the lab helper's trailing `--session`
+### Closed hole (2026-07-20, herdr 0.7.4): `agent start ... -- <argv>` defeated the lab helper's trailing `--session`
 
-The trailing-flag rule above has one command shape it cannot scope: anything with a trailing `-- <argv>`.
-`bin/fm-herdr-lab.sh run` appends `--session <lab>` at the END of the argument list, so for `agent start <name> --cwd <dir> --no-focus -- <argv>` the flag lands INSIDE the agent argv - the started agent's own JSON echoes it back: `"argv":["sleep","600","--session","fm-lab-..."]` - and the herdr call itself carries no session flag at all.
+The trailing-flag rule above had one command shape it could not scope: anything with a trailing `-- <argv>`.
+`bin/fm-herdr-lab.sh run` appended `--session <lab>` at the END of the argument list, so for `agent start <name> --cwd <dir> --no-focus -- <argv>` the flag landed INSIDE the agent argv - the started agent's own JSON echoed it back: `"argv":["sleep","600","--session","fm-lab-..."]` - and the herdr call itself carried no session flag at all.
 The ambient `HERDR_SESSION=<lab>` the helper also sets did NOT scope the call either: three such starts during the boot-network-gate task all materialised their panes in the captain's live `default` session (verified by `pane get` against default for each pane id), in the same tab as the live firstmate, while the lab session's own `agent list` stayed empty.
-The helper's before/after default-session tripwire did not trip on this, so it does not currently detect a leaked pane either.
-Until the helper inserts `--session` BEFORE the `--` separator, treat `run <session> agent start ... -- <argv>` as UNSAFE: it starts the agent in whatever session is ambient, which on the captain's host is the live fleet.
-The corollary: an ambient-only scope is not merely unreliable for destructive cleanup (the 0.7.1 lesson above) but also for `agent start` on 0.7.4.
+The before/after default-session tripwire did not trip on this, because it compares the default session's own record, not its pane inventory.
+
+The fix: `fm_herdr_lab_raw` now composes every call as `herdr --session <lab> <args...>`, with the flag LEADING.
+Herdr's own usage documents that position (`herdr --session <name> [options]`), and it is verified to route identically to the trailing form for every subcommand.
+Leading placement is what makes the scoping provable rather than incidental: the flag is consumed as a global option before the subcommand is dispatched, so no positional operand and nothing after a `--` separator can capture it.
+
+Audit of the herdr 0.7.4 CLI surface for the same argv-boundary hazard, by reading each `herdr <group> --help`:
+
+| Subcommand shape | Affected | Why |
+| --- | --- | --- |
+| `agent start <name> [opts] -- <argv...>` | Was the only affected command | The sole subcommand with a `--` separator; global scanning stops there |
+| `agent send <target> <text>`, `pane send-text`, `pane run`, `pane rename`, `agent rename`, `tab rename`, `notification show <title>` | Safe | Trailing free-form operand, but no `--` separator, so a global flag is still consumed by herdr rather than by the operand |
+| `pane send-keys <pane_id> <key> [key ...]` | Safe | Variadic, but likewise has no `--` separator |
+| everything else (`session *`, `workspace *`, `tab *`, `worktree *`, `wait *`, `api *`, `config *`, `channel *`, `integration *`, `pane` queries) | Safe | Fixed positional arity, no trailing argv |
+
+Leading placement makes the whole table moot going forward: it is correct for every shape, present and future, rather than for every shape that happens to lack a `--`.
+
+`bin/backends/herdr.sh` was audited too and was never affected: `fm_backend_herdr_cli` forwards only `status`, `server`, `session *`, `workspace *`, `tab *`, and `pane *` calls, none of which take a `--` separator, and the adapter never calls `agent start`.
+
+The helper also fails closed on anything it cannot prove is scoped.
+`fm_herdr_lab_raw` re-validates the lab session name on every call and refuses any argument list carrying its own `--session`, anywhere, including after a `--` separator - a refusal is recoverable, an unscoped lifecycle command in `default` may not be.
+
+Regression coverage is at the argument-construction layer, in `tests/fm-herdr-lab.test.sh`, against a fake `herdr` on `PATH` that records argv verbatim and resolves `--session` the way the real client does (stopping its global scan at `--`, falling back to the ambient session otherwise).
+This is deliberate and not merely convenient: the tool under test IS the isolation mechanism, so a real-binary test of a regressed wrapper would create its agents in the live `default` session - precisely the failure being tested for.
+Reverting `fm_herdr_lab_raw` to the trailing composition fails the suite with the live symptom, the flag recorded after the `--` separator:
+
+```
+not ok - agent start argv mismatch: got [agent start probe --cwd /tmp --no-focus -- sleep 600 --session fm-lab-argv-869458] want [--session fm-lab-argv-869458 agent start probe --cwd /tmp --no-focus -- sleep 600]
+```
+
+The general corollary stands: an ambient-only scope is not merely unreliable for destructive cleanup (the 0.7.1 lesson above) but also for `agent start` on 0.7.4.
 
 ## ID stability across a server restart
 

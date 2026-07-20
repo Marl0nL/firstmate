@@ -11,10 +11,16 @@
 #   fm-herdr-lab.sh teardown <session>
 #
 # Session names must begin with "fm-lab-" and can never be "default".
-# Every Herdr call made here carries a trailing --session <session>.
+# Every Herdr call made here is composed as `herdr --session <session> <args>`,
+# with the flag LEADING so it is parsed as a global option before the
+# subcommand.  A trailing flag cannot scope a subcommand that ends in
+# "-- <argv>" (notably `agent start`), because it lands inside that argv; see
+# docs/herdr-backend.md.
 # The run command rejects caller-supplied --session flags, any leading option
 # before the subcommand, all session lifecycle operations, and every server
 # operation.
+# Anything the helper cannot prove is scoped to the lab session is refused
+# rather than forwarded.
 # Session stop is available only through guarded stop or teardown, and session
 # delete is available only through teardown.
 # Both paths perform a fresh refuse-default check immediately before each
@@ -46,10 +52,27 @@ fm_herdr_lab_tripwire_path() { # <session>
   printf '%s/%s.fleet-state.json' "$(fm_herdr_lab_state_dir)" "$1"
 }
 
+# Compose every Herdr call with --session in LEADING position, so it is parsed
+# as a global option before the subcommand.
+# A trailing --session cannot scope `agent start <name> ... -- <argv>`: the flag
+# lands after the `--` separator, inside the agent's own argv, leaving the Herdr
+# call itself unscoped and creating the agent in whatever session is ambient.
+# See docs/herdr-backend.md, "agent start ... -- <argv>".
+# Leading placement is the shape Herdr's own usage documents and cannot be
+# captured by any positional operand or by anything after a `--` separator.
 fm_herdr_lab_raw() { # <session> <herdr arguments...>
-  local name=$1
+  local name=$1 arg
   shift
-  HERDR_SESSION="$name" herdr "$@" --session "$name"
+  fm_herdr_lab_validate_name "$name" || return 1
+  for arg in "$@"; do
+    case "$arg" in
+      --session|--session=*)
+        fm_herdr_lab_error "refusing a Herdr call carrying its own --session; the helper owns lab session scoping"
+        return 1
+        ;;
+    esac
+  done
+  HERDR_SESSION="$name" herdr --session "$name" "$@"
 }
 
 fm_herdr_lab_session_list() { # <session>
@@ -132,7 +155,7 @@ fm_herdr_lab_cli() { # <session> <herdr arguments...>
   for arg in "$@"; do
     case "$arg" in
       --session|--session=*)
-        fm_herdr_lab_error "run forbids caller-supplied --session; the helper appends the lab session"
+        fm_herdr_lab_error "run forbids caller-supplied --session anywhere in the argument list, including after a '--' separator; the helper supplies the lab session itself"
         return 1
         ;;
     esac
