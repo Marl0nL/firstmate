@@ -14,6 +14,15 @@
 # a second firstmate, whether the existing one is matched by name, by working
 # directory, or by an aliased (/home vs /var/home) spelling of that directory,
 # and whether the list is readable at all.
+#
+# The other half of that guard is that a matching entry must be LIVE. herdr
+# persists its session layout, so after a reboot `agent list`, `pane get` and
+# `agent get` all replay GHOST records - complete with agent_status "idle" - for
+# agents that are not running; only `pane process-info` sees that no process is
+# behind them. The fake herdr below therefore models a pane's state, not just
+# the agent list, so the ghost cases can prove the script starts firstmate
+# instead of mistaking a replayed record for a live supervisor and doing nothing
+# at every boot, forever.
 # docs/firstmate-autostart.md owns the install, rollback, and verification steps.
 set -u
 
@@ -44,10 +53,56 @@ export PATH
 #   start_fail    if present, `agent start` exits non-zero
 #   start.log     appended with the argv of every `agent start` call
 #   polls         appended with one line per `status server` call
+#   panes/<id>    this pane's state, one word (default when absent: live):
+#                   live      pane get, agent get and process-info all answer
+#                   ghost     pane get and agent get answer from the persisted
+#                             layout, process-info says pane_not_found - the
+#                             post-reboot shape that made this guard a no-op
+#                   no-agent  pane exists, nothing registered in it
+#                   dead      the pane itself is gone
+#                   garbage   pane get answers something unparseable
 cat > "$FAKEBIN/herdr" <<'SH'
 #!/usr/bin/env bash
 d=${FAKE_HERDR_DIR:?FAKE_HERDR_DIR unset}
+
+pane_state() { cat "$d/panes/$1" 2>/dev/null || printf 'live\n'; }
+# Error bodies go to STDERR, exactly as real herdr writes them.
+err() { printf '{"error":{"code":"%s","message":"fake"},"id":"cli:fake"}\n' "$1" >&2; exit 1; }
+pane_body() {
+  printf '{"id":"cli:fake","result":{"%s":{"agent":"claude","agent_status":"idle","cwd":"/x","pane_id":"%s"},"type":"%s"}}\n' \
+    "$2" "$1" "$3"
+}
+
 case "$1 ${2:-}" in
+  "pane get")
+    case "$(pane_state "$3")" in
+      dead) err pane_not_found ;;
+      garbage) printf 'not json at all\n'; exit 0 ;;
+      *) pane_body "$3" pane pane_info; exit 0 ;;
+    esac
+    ;;
+  "agent get")
+    case "$(pane_state "$3")" in
+      dead) err pane_not_found ;;
+      no-agent) err agent_not_found ;;
+      *) pane_body "$3" agent agent_info; exit 0 ;;
+    esac
+    ;;
+  "pane process-info")
+    # `--pane <id>`, unlike the positional forms above.
+    pane=""
+    while [ "$#" -gt 0 ]; do
+      [ "$1" = "--pane" ] && pane=$2
+      shift
+    done
+    case "$(pane_state "$pane")" in
+      live)
+        printf '{"id":"cli:fake","result":{"process_info":{"foreground_process_group_id":1,"foreground_processes":[{"argv":["claude"]}]},"type":"process_info"}}\n'
+        exit 0
+        ;;
+      *) err pane_not_found ;;
+    esac
+    ;;
   "status server")
     printf 'x\n' >> "$d/polls"
     [ -e "$d/status_fail" ] && { echo 'connect: no such file or directory' >&2; exit 1; }
@@ -76,8 +131,10 @@ case "$1 ${2:-}" in
       [ "$1" = "--cwd" ] && cwd=$2
       shift
     done
+    # A real start produces a real pane with a real process behind it, so the
+    # started agent's pane is left at the default `live` state.
     jq --arg n "$name" --arg c "$cwd" \
-      '.result.agents += [{"name":$n,"cwd":$c,"agent":"claude","agent_status":"idle"}]' \
+      '.result.agents += [{"name":$n,"cwd":$c,"agent":"claude","agent_status":"idle","pane_id":"w9:pS"}]' \
       "$d/agents.json" > "$d/agents.json.new" && mv "$d/agents.json.new" "$d/agents.json"
     exit 0
     ;;
@@ -103,9 +160,18 @@ new_server() {
   local dir=$1 agents=${2:-[]}
   rm -rf "$dir"
   mkdir -p "$dir"
+  mkdir -p "$dir/panes"
   printf '{"id":"cli:agent:list","result":{"agents":%s,"type":"agent_list"}}\n' "$agents" \
     > "$dir/agents.json"
   printf '%s\n' "$dir"
+}
+
+# set_pane <server-dir> <pane-id> <state>: what the pane behind a listed agent
+# really is. Absent means `live`, so cases that are about MATCHING rather than
+# liveness stay readable.
+set_pane() {
+  mkdir -p "$1/panes"
+  printf '%s\n' "$3" > "$1/panes/$2"
 }
 
 # run_autostart <server-dir> <fm-root> [extra args...]
@@ -160,7 +226,7 @@ pass "readiness: a server ready only on a later poll is waited for, then used"
 
 # Matched by name: the shape `herdr agent start firstmate` itself produces.
 server=$(new_server "$TMP_ROOT/s-byname" \
-  '[{"name":"firstmate","cwd":"/somewhere/else","agent":"claude","agent_status":"idle"}]')
+  '[{"name":"firstmate","cwd":"/somewhere/else","agent":"claude","agent_status":"idle","pane_id":"w1:p1"}]')
 out=$(run_autostart "$server" "$HOME_DIR")
 rc=$?
 expect_code 0 "$rc" "an existing named firstmate must be a clean no-op: $out"
@@ -172,7 +238,7 @@ pass "idempotence: an agent named firstmate makes the run a no-op"
 # and every one the captain launched by hand, reports name: null, so this is the
 # case that actually stands between the captain and two supervisors.
 server=$(new_server "$TMP_ROOT/s-bycwd" \
-  "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\"}]")
+  "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w1:p1\"}]")
 out=$(run_autostart "$server" "$HOME_DIR")
 rc=$?
 expect_code 0 "$rc" "an unnamed agent in the firstmate home must be a clean no-op: $out"
@@ -182,7 +248,7 @@ pass "idempotence: an UNNAMED agent in the firstmate home makes the run a no-op"
 
 # Same, via foreground_cwd only.
 server=$(new_server "$TMP_ROOT/s-byfg" \
-  "[{\"name\":null,\"cwd\":null,\"foreground_cwd\":\"$HOME_ABS\",\"agent\":\"claude\"}]")
+  "[{\"name\":null,\"cwd\":null,\"foreground_cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"pane_id\":\"w1:p1\"}]")
 out=$(run_autostart "$server" "$HOME_DIR")
 rc=$?
 expect_code 0 "$rc" "an agent whose foreground_cwd is the home must be a no-op: $out"
@@ -194,7 +260,7 @@ pass "idempotence: foreground_cwd in the firstmate home makes the run a no-op"
 ALIAS_ROOT="$TMP_ROOT/alias"
 ln -s "$TMP_ROOT" "$ALIAS_ROOT"
 server=$(new_server "$TMP_ROOT/s-alias" \
-  "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\"}]")
+  "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w1:p1\"}]")
 out=$(run_autostart "$server" "$ALIAS_ROOT/firstmate")
 rc=$?
 expect_code 0 "$rc" "an aliased path spelling of the home must still be a no-op: $out"
@@ -205,13 +271,99 @@ pass "idempotence: an aliased path spelling of the home still makes the run a no
 # An agent in a DIFFERENT directory with no name must not be mistaken for
 # firstmate - the guard has to stay a guard, not become a blanket refusal.
 server=$(new_server "$TMP_ROOT/s-other" \
-  '[{"name":null,"cwd":"/var/home/marlon/challenges","agent":"claude","agent_status":"idle"}]')
+  '[{"name":null,"cwd":"/var/home/marlon/challenges","agent":"claude","agent_status":"idle","pane_id":"w1:p1"}]')
 out=$(run_autostart "$server" "$HOME_DIR")
 rc=$?
 expect_code 0 "$rc" "an unrelated agent must not block the start: $out"
 [ "$(started_count "$server")" = 1 ] ||
   fail "an agent in an unrelated directory must not be mistaken for firstmate"
 pass "idempotence: an unrelated agent elsewhere does not block the start"
+
+# --- ghosts: a listed entry is not a running agent --------------------------
+
+# The regression this suite exists for. After a reboot herdr replays the
+# persisted session layout, so an agent that is NOT running still appears in
+# `agent list` - right cwd, right pane id, agent_status "idle" - and answers
+# `pane get` and `agent get` too. Only `pane process-info` knows the truth.
+# Reading the list alone made autostart print "firstmate is already up" and
+# start nothing at every boot, forever, silently.
+server=$(new_server "$TMP_ROOT/s-ghost" \
+  "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w1:p1\"}]")
+set_pane "$server" w1:p1 ghost
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 0 "$rc" "a ghost record must not stop the start: $out"
+assert_not_contains "$out" "already up" \
+  "GHOST: a replayed record must never be reported as a running firstmate"
+[ "$(started_count "$server")" = 1 ] ||
+  fail "GHOST: an entry whose pane has no process must not count as a live firstmate"
+pass "ghost: a listed 'idle' agent with no process behind it does not block the start"
+
+# The same ghost in its other two shapes: the pane herdr already reaped, and the
+# agent-less bare shell a layout restore leaves behind.
+for ghost_state in dead no-agent; do
+  server=$(new_server "$TMP_ROOT/s-ghost-$ghost_state" \
+    "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w1:p1\"}]")
+  set_pane "$server" w1:p1 "$ghost_state"
+  out=$(run_autostart "$server" "$HOME_DIR")
+  rc=$?
+  expect_code 0 "$rc" "a $ghost_state pane must not stop the start: $out"
+  [ "$(started_count "$server")" = 1 ] ||
+    fail "GHOST: a $ghost_state pane must not count as a live firstmate"
+done
+pass "ghost: a dead pane and an agent-less pane both fail to block the start"
+
+# The other side of the same coin, and the dangerous one: a genuinely live
+# firstmate must still be a no-op. Liveness verification must not become a
+# licence to duplicate.
+server=$(new_server "$TMP_ROOT/s-reallive" \
+  "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w1:p1\"}]")
+set_pane "$server" w1:p1 live
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 0 "$rc" "a genuinely live firstmate must be a clean no-op: $out"
+assert_contains "$out" "already up" "a live firstmate must be reported as already up"
+[ "$(started_count "$server")" = 0 ] ||
+  fail "IDEMPOTENCE: a pane with a real process behind it must never be duplicated"
+pass "liveness: a confirmed-live firstmate is still a no-op"
+
+# A ghost sitting next to the real thing: the husk must be skipped, and the scan
+# must go on to find the live one rather than starting a second supervisor.
+server=$(new_server "$TMP_ROOT/s-ghost-and-live" \
+  "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w1:p1\"},
+    {\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w1:p2\"}]")
+set_pane "$server" w1:p1 ghost
+set_pane "$server" w1:p2 live
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 0 "$rc" "a live firstmate beside a ghost must be a no-op: $out"
+[ "$(started_count "$server")" = 0 ] ||
+  fail "IDEMPOTENCE: a ghost listed before the live firstmate must not license a start"
+pass "liveness: a ghost listed beside the live firstmate does not license a start"
+
+# Uncertainty is still uncertainty: a matching entry whose pane cannot be
+# classified is neither live nor a confirmed husk, so nothing is started.
+server=$(new_server "$TMP_ROOT/s-paneunknown" \
+  "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w1:p1\"}]")
+set_pane "$server" w1:p1 garbage
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 3 "$rc" "an unclassifiable matching pane must exit 3: $out"
+[ "$(started_count "$server")" = 0 ] ||
+  fail "IDEMPOTENCE: an unclassifiable pane must never lead to a start"
+pass "liveness: a matching entry that cannot be classified fails closed"
+
+# A matching entry that names no pane at all cannot be verified either.
+server=$(new_server "$TMP_ROOT/s-nopane" \
+  "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\"}]")
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 3 "$rc" "a matching entry with no pane id must exit 3: $out"
+[ "$(started_count "$server")" = 0 ] ||
+  fail "IDEMPOTENCE: an unverifiable matching entry must never lead to a start"
+pass "liveness: a matching entry with no pane id fails closed"
+
+# --- the list itself --------------------------------------------------------
 
 # An unreadable or unrecognised list is UNKNOWN, never "absent". Fail closed.
 server=$(new_server "$TMP_ROOT/s-listfail")
