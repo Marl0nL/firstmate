@@ -339,6 +339,49 @@ EOF
   pass "a lock refusal prints a loud read-only banner, skips every mutating step, and still completes the digest"
 }
 
+# fm-lock.sh's second refusal (exit 2): this session cannot identify its own
+# harness process, so NOBODY holds the lock. Reporting that as "another live
+# session holds it" sent firstmate hunting for a competing session that did not
+# exist (2026-07-20 boot incident), so the banner must name the real reason
+# while still failing closed into read-only.
+test_lock_refusal_unidentifiable_harness() {
+  local rec root home fakebin out status
+  rec=$(new_world lock-unidentifiable)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  # Every ancestor is a plain shell whose ARGUMENTS mention a harness path -
+  # the transient per-tool-call shell shape. No harness executable anywhere, so
+  # the ancestry walk correctly finds nothing.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"comm="*) printf '%s\n' '/bin/bash'; exit 0 ;;
+  *"args="*) printf '%s\n' '/bin/bash -c source ~/.claude/shell-snapshots/snapshot.sh'; exit 0 ;;
+  *"ppid="*) printf '%s\n' '1'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "fm-session-start.sh must exit 0 when it cannot identify its own harness"
+  assert_contains "$out" "CANNOT IDENTIFY ITS OWN HARNESS PROCESS" "banner did not name the real refusal reason"
+  assert_contains "$out" "NO OTHER SESSION HOLDS THE LOCK" "banner did not rule out a competing session"
+  assert_contains "$out" "Do not go looking for a competing session" "banner did not stop the hunt for a session that does not exist"
+  assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK" "banner reported a competing session that does not exist"
+  # Still fails closed.
+  assert_contains "$out" "READ-ONLY SESSION" "an unidentifiable session did not fall back to read-only"
+  assert_contains "$out" "Skipping every mutating step" "an unidentifiable session did not skip mutating steps"
+  assert_absent "$home/state/.lock" "an unidentifiable session took the lock anyway"
+
+  pass "an unidentifiable-harness refusal names its real reason and still fails closed into read-only"
+}
+
 # --- output ordering ----------------------------------------------------------
 
 test_output_ordering_diagnostics_lead() {
@@ -742,6 +785,7 @@ EOF
 
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
+test_lock_refusal_unidentifiable_harness
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
 test_status_tail_bounding
