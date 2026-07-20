@@ -289,6 +289,25 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+test_commit_capable_briefs_forbid_agent_coauthor() {
+  local home id brief
+  home="$TMP_ROOT/coauthor-home"
+  mkdir -p "$home/data"
+
+  id="brief-coauthor-ship"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016 # Literal backtick-quoted trailer name must remain unexpanded.
+  assert_grep 'Co-Authored-By' "$brief" "ship brief missing the no-agent-co-author rule"
+
+  id="brief-coauthor-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep 'Co-Authored-By' "$brief" "scout brief missing the no-agent-co-author rule"
+
+  pass "fm-brief.sh: every commit-capable brief forbids an agent commit co-author"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
@@ -301,3 +320,4 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
+test_commit_capable_briefs_forbid_agent_coauthor
