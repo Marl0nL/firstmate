@@ -395,6 +395,20 @@ case "\$cmd \$sub" in
       printf '{"error":{"code":"agent_not_found","message":"gone"}}\n' >&2
     fi
     ;;
+  "pane process-info")
+    # The reality probe (herdr 0.7.4). Uses a --pane flag, so the id is \$4.
+    # Stale endpoint = a GENUINELY DEAD secondmate: its pane record lingers but
+    # NO process is behind it (process-info -> pane_not_found). That is what
+    # makes reality (no-agent + no process) = dead so the sweep respawns it -
+    # metadata alone (agent_not_found) is no longer sufficient on 0.7.4, since
+    # every pane-typed crewmate reads no-agent. Fresh endpoint = a live process.
+    pid=\${4:-}
+    if [ "\$pid" = "${fresh#*:}" ]; then
+      printf '{"result":{"process_info":{"foreground_process_group_id":7,"foreground_processes":[{"name":"2.1.215","pid":7,"cwd":"/tmp"}]}}}\n'
+    else
+      printf '{"error":{"code":"pane_not_found","message":"no process"}}\n' >&2
+    fi
+    ;;
   "pane send-text"|"pane run"|"pane send-keys")
     if [ "\$arg" = "${stale#*:}" ]; then
       exit 1
@@ -456,7 +470,7 @@ SH
   assert_contains "$nudge_line" "fm-sm-instr" "bootstrap nudge lists stable fm-<id>"
   assert_not_contains "$nudge_line" "w9:pY" "bootstrap nudge must not list stale herdr endpoint"
   assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm-instr: respawned" \
-    "liveness respawn rotated the herdr endpoint in the same bootstrap run"
+    "a genuinely dead herdr secondmate (no agent AND no process) is respawned, rotating the endpoint in the same bootstrap run"
 
   window=$(grep '^window=' "$meta" | tail -1 | cut -d= -f2-)
   [ "$window" = "$fresh" ] || fail "respawn stub did not rotate meta window to '$fresh' (got '$window')"
@@ -476,6 +490,99 @@ SH
   [ "$fresh_send" = 0 ] || fail "send through fm-<id>-resolved fresh endpoint should succeed"
 
   pass "T8b nudge selectors stay fm-<id> when liveness respawn rotates herdr endpoint"
+}
+
+# --- T8c: a LIVE herdr secondmate must NOT be respawned (the D2 guarantee) ----
+# The mirror of T8b, and the behaviour the 0.7.4 recalibration exists to
+# protect: a real firstmate crewmate on herdr reads `no-agent` from the agent
+# registry (it was pane-typed, never `agent start`-registered), so the old
+# metadata-only classifier called it dead and the sweep KILLED and respawned a
+# live secondmate mid-task. With process-info composed in, a pane whose process
+# is genuinely alive reads reality=live -> the sweep leaves it untouched.
+make_live_herdr_fake() {  # <dir> <pane> -> a herdr fake where <pane> is a LIVE agent
+  local dir=$1 pane=$2 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/herdr" <<SH
+#!/usr/bin/env bash
+set -u
+cmd=\${1:-}; sub=\${2:-}; arg=\${3:-}
+case "\$cmd \$sub" in
+  "status --json")
+    printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
+  "pane get")
+    # A pane-typed live claude: agent_session present, agent_status "unknown"
+    # (the measured 0.7.4 shape), so metadata classifies it live without an
+    # agent get call.
+    if [ "\$arg" = "${pane#*:}" ]; then
+      printf '{"result":{"pane":{"pane_id":"${pane#*:}","agent_status":"unknown","agent_session":{"agent":"claude","kind":"id","value":"live-sm"}}}}\n'
+    else
+      printf '{"error":{"code":"pane_not_found","message":"missing"}}\n' >&2; exit 0
+    fi ;;
+  "agent get")
+    printf '{"error":{"code":"agent_not_found","message":"pane-typed, unregistered"}}\n' >&2 ;;
+  "pane process-info")
+    pid=\${4:-}
+    if [ "\$pid" = "${pane#*:}" ]; then
+      printf '{"result":{"process_info":{"foreground_process_group_id":9,"foreground_processes":[{"name":"2.1.215","argv":["/x/claude/versions/2.1.215","--continue"],"pid":9,"cwd":"/tmp"}]}}}\n'
+    else
+      printf '{"error":{"code":"pane_not_found","message":"no process"}}\n' >&2
+    fi ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/herdr"
+  printf '%s\n' "$fakebin"
+}
+
+test_bootstrap_sweep_leaves_live_herdr_secondmate_untouched() {
+  local w c1 live meta herdrfb toolchain out window spawn_stub
+  live=default:w9:pL
+  w=$(new_world live-herdr-sm)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-live "$c1"
+  bump_primary "$w" instr
+
+  meta="$w/home/state/sm-live.meta"
+  {
+    printf 'window=%s\n' "$live"
+    printf 'backend=herdr\n'
+    printf 'kind=secondmate\n'
+    printf 'harness=claude\n'
+    printf 'home=%s/sm-live\n' "$w"
+  } > "$meta"
+
+  # A spawn stub that MUST NOT run: if the sweep wrongly respawns, it rewrites
+  # the window and we catch the change below.
+  spawn_stub="$w/spawn-stub.sh"
+  cat > "$spawn_stub" <<'SH'
+#!/usr/bin/env bash
+set -u
+id=${1:-}
+meta="$FM_HOME/state/$id.meta"
+[ -f "$meta" ] || exit 1
+sed -i.bak 's/^window=.*/window=default:wROGUE:p9/' "$meta" 2>/dev/null || \
+  sed -i 's/^window=.*/window=default:wROGUE:p9/' "$meta"
+rm -f "$meta.bak"
+exit 0
+SH
+  chmod +x "$spawn_stub"
+  cp "$spawn_stub" "$w/main/bin/fm-spawn.sh"
+
+  herdrfb=$(make_live_herdr_fake "$w/herdr" "$live")
+  toolchain=$(make_fake_toolchain "$w")
+  if ! add_real_jq "$toolchain"; then
+    pass "T8c live herdr secondmate sweep skipped without jq"
+    return
+  fi
+  out=$(PATH="$herdrfb:$toolchain:$BASE_PATH" HERDR_ENV=1 FM_BACKEND=herdr \
+    FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm-live: respawned" \
+    "a LIVE herdr secondmate (reality=live) must never be respawned - this is the D2 work-destroying bug the PR fixes"
+  window=$(grep '^window=' "$meta" | tail -1 | cut -d= -f2-)
+  [ "$window" = "$live" ] || fail "a live secondmate's endpoint must be left untouched, but the window changed to '$window' (rogue respawn)"
+  pass "T8c a live herdr secondmate (no-agent metadata but a live process) is left untouched, never killed or respawned"
 }
 
 # --- T9: bootstrap surfaces a skipped dirty live secondmate home --------------
@@ -663,6 +770,7 @@ test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
 test_bootstrap_sweep_nudges_only_instruction_change
 test_nudge_selector_stable_after_herdr_respawn
+test_bootstrap_sweep_leaves_live_herdr_secondmate_untouched
 test_bootstrap_sweep_surfaces_skipped_home
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
