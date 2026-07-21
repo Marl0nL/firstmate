@@ -253,7 +253,26 @@ test_agent_confirmed_absent_is_not_negation_of_alive() {
     exit 0
   ' "$ROOT"
   expect_code 0 $? "fm_backend_agent_confirmed_absent must refuse unknown, confirm only dead, and never confirm on an unverified backend"
-  pass "fm_backend_agent_confirmed_absent: confirms only a CONFIRMED-dead pane; unknown and unverified backends refuse (the re-send never fires)"
+
+  # End-to-end through the REAL reality composition (finding 1), in a fresh
+  # shell so the real fm_backend_herdr_pane_agent_reality is intact: a pane with
+  # no agent metadata but a LIVE NON-SHELL foreground process is a running-but-
+  # undetected agent and must NOT read confirmed-absent (else fm-spawn re-types
+  # the brief onto it); the same shape with a bare-shell foreground IS absent.
+  bash -c '
+    set +u
+    . "$0/bin/fm-backend.sh"
+    fm_backend_source herdr
+    fm_backend_herdr_pane_agent_state() { printf "no-agent"; }
+    fm_backend_herdr_pane_process_state() { printf "live"; }
+    fm_backend_herdr_pane_foreground_is_shell() { return 1; }   # a claude/node process
+    fm_backend_agent_confirmed_absent herdr sess:p1 && exit 36
+    fm_backend_herdr_pane_foreground_is_shell() { return 0; }   # a bare shell
+    fm_backend_agent_confirmed_absent herdr sess:p1 || exit 37
+    exit 0
+  ' "$ROOT"
+  expect_code 0 $? "fm_backend_agent_confirmed_absent must refuse a live non-shell process (undetected agent) and confirm only a bare-shell/gone pane"
+  pass "fm_backend_agent_confirmed_absent: confirms a bare-shell/gone pane; refuses unknown, a running-but-undetected agent, and unverified backends (the re-send never fires)"
 }
 
 test_success_when_agent_appears

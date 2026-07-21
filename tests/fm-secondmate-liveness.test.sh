@@ -146,10 +146,16 @@ test_herdr_agent_alive_maps_pane_agent_reality() {
   out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "live"; }; fm_backend_herdr_pane_process_state() { printf "dead"; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
   [ "$out" = dead ] || fail "a replayed ghost (metadata live, no process) must read dead, not alive, got '$out'"
 
-  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "no-agent"; }; fm_backend_herdr_pane_process_state() { printf "live"; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
-  [ "$out" = dead ] || fail "a bare shell (no agent, live process) must read dead, got '$out'"
+  # A bare shell (no agent, live SHELL process) reads dead...
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "no-agent"; }; fm_backend_herdr_pane_process_state() { printf "live"; }; fm_backend_herdr_pane_foreground_is_shell() { return 0; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
+  [ "$out" = dead ] || fail "a bare shell (no agent, live shell process) must read dead, got '$out'"
 
-  pass "fm_backend_herdr_agent_alive: maps the composed reality verdict, ghost->dead and bare-shell->dead"
+  # ...but a no-agent pane running a NON-shell process (an undetected live
+  # agent) must read unknown, so the secondmate sweep never kills it.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "no-agent"; }; fm_backend_herdr_pane_process_state() { printf "live"; }; fm_backend_herdr_pane_foreground_is_shell() { return 1; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
+  [ "$out" = unknown ] || fail "a no-agent pane running a non-shell process (undetected agent) must read unknown, not dead, got '$out'"
+
+  pass "fm_backend_herdr_agent_alive: maps the composed reality verdict, ghost->dead, bare-shell->dead, undetected-agent->unknown"
 }
 
 # --- unit level: the generic fm_backend_agent_alive dispatcher --------------

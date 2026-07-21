@@ -514,8 +514,13 @@ The `dead` (`pane_not_found`) classification remains a conservative, defensively
 `bin/fm-bootstrap.sh`'s session-start secondmate-liveness sweep and `bin/fm-spawn.sh`'s post-launch start confirmation both need one question answered with confidence: is a real agent process running in this pane, or is it a bare shell / gone pane / replayed record pretending to be a live endpoint?
 `fm_backend_herdr_agent_alive` (`bin/backends/herdr.sh`) answers it by mapping the composed reality verdict (`fm_backend_herdr_pane_agent_reality`; see "0.7.4 four-way calibration" below): `live` -> `alive`, `dead` -> `dead`, `unknown` -> `unknown`.
 **Recalibrated for 0.7.4 (2026-07-21):** it previously mapped `fm_backend_herdr_pane_agent_state` alone, which on 0.7.4 read `alive` for a replayed ghost and `dead` for a live pane-typed crewmate - the inversion that made the session-start sweep capable of killing a live secondmate and every spawn's confirmation read a false failure.
-`unknown` stays a refusal for both consumers: the sweep only respawns on a confident `dead`, and the spawn confirmation only re-sends the launch when the pane is CONFIRMED empty (`fm_backend_agent_confirmed_absent`, `bin/fm-backend.sh`) - never merely "not confirmed alive", which would type a second brief into a slowly-starting agent.
-Unlike tmux's probe, herdr's has no "which harness is running under a generic interpreter name" ambiguity, so it resolves every verified harness including `pi` (`fm_backend_agent_probe_verifiable` returns true for herdr with any harness).
+`unknown` stays a refusal for both consumers: the sweep only respawns on a confident `dead`, and the spawn confirmation re-sends the launch only when the pane is CONFIRMED empty (`fm_backend_agent_confirmed_absent`, `bin/fm-backend.sh`) - not merely "not confirmed alive".
+That guard resolves the one shape that could still fool it: a pane with a live process but no agent metadata is `dead` (typeable) only when its foreground process is a bare shell, and `unknown` (refused) when a non-shell process is running - so a slow-starting or herdr-undetected agent is not re-typed over (see "0.7.4 four-way calibration" below).
+
+**Harness scope.** The affirmative detection has been lab-measured only for claude / agent-start-registered agents.
+The 0.7.4 read keys on herdr detecting an agent in the pane (an `agent_session`, or an `agent get` record); that detection is verified for claude and NOT yet measured for a non-claude harness such as `pi`.
+`fm_backend_agent_probe_verifiable` still returns true for herdr with any harness, but that is a fail-safe rather than a harness-agnostic guarantee: if herdr does not detect the launched agent, the composed reality reads `unknown` (a live but non-shell foreground process), so the spawn proceeds unconfirmed with a warning - never a false failure and never a destructive re-send.
+Confirming a non-claude harness's herdr detection is a separate lab-measurement follow-up.
 
 The 0.7.1 failure this path originally fixed still holds: on 2026-07-17 three herdr spawns whose launch send never landed against a freshly restarted `herdr-server.service` left a bare-shell pane, yet fm-spawn printed `spawned` and the tasks ran nothing.
 The recalibrated confirmation still catches that - a genuinely empty pane reads `dead` and fails loudly after one guarded re-send - while no longer failing a healthy 0.7.4 spawn.
@@ -641,6 +646,9 @@ The `agent get` record is the necessary fallback for a fourth shape: a `pane rep
 
 Metadata alone still cannot tell a live pane from a replayed ghost (both carry `agent_session`), and the process probe alone cannot tell an agent from a bare shell (both have a process).
 `fm_backend_herdr_pane_agent_reality` composes them and is the single owner of the cross product; its full table is documented at the function in `bin/backends/herdr.sh` and unit-covered cell-by-cell in `tests/fm-backend-herdr.test.sh`.
+One cell needs a third read: a pane with a live process but no agent metadata (`no-agent`/`live`) is only `dead` when its foreground process is a genuine bare shell.
+If a non-shell process is running there, herdr has simply not registered it as an agent - a slow start, or a harness herdr's detection does not recognize - so the cell reads `unknown` rather than `dead`, and `fm_backend_herdr_pane_foreground_is_shell` (over `pane process-info`'s already-available argv, no new probe) is what tells the two apart.
+This is what stops `create_task` from closing, and fm-spawn's re-send from typing over, a running-but-undetected agent.
 Two accessors read that table with deliberately opposite polarity, and neither is the other's negation - `unknown` satisfies neither:
 
 - `fm_backend_herdr_pane_confirmed_live` - "may I act on this as alive?" - true only for `reality=live`.
@@ -658,9 +666,11 @@ The two live rows are the captain's `default` session; the bare-shell row is a `
 |---|---|---|---|---|---|---|
 | `w1:p2X` | live firstmate (`agent start`-registered) | `live` | `live` | `live` | refuse | `alive` |
 | `w2:p1` | live pane-typed crewmate | `live` | `live` | `live` | refuse | `alive` |
-| lab bare shell | bare shell, real process, no agent | `no-agent` | `live` | `dead` | HUSK | `dead` |
+| lab bare shell | bare shell (`bash`), real process, no agent | `no-agent` | `live` | `dead` | HUSK | `dead` |
 
 The fourth case, a replayed ghost (record present, process gone), reads `pane_agent_state=live`, `pane_process_state=dead`, `pane_agent_reality=dead`, `tab_is_husk=HUSK`, `agent_alive=dead`.
+A fifth case makes the `no-agent`/`live` disambiguation concrete: a pane running a non-shell foreground process (e.g. a claude/`node` agent herdr has not registered) reads `pane_agent_state=no-agent`, `pane_process_state=live`, but `pane_agent_reality=unknown` (not `dead`), so `tab_is_husk` refuses and `agent_alive` is `unknown` - the running process is neither reclaimed nor typed over.
+That case is unit-covered (`test_pane_agent_reality_full_cross_product`, `test_create_task_refuses_undetected_running_agent`, and the re-send guard's polarity test); it distinguishes a genuine bare-shell husk from a live agent herdr's metadata missed.
 A true reboot-replay ghost could not be reproduced in an isolated lab (a stopped lab session errors on every query rather than replaying records, yielding a fail-safe `unknown`), so this row is covered deterministically by `test_pane_agent_reality_full_cross_product` and `test_create_task_reclaims_ghost_pane`, and its metadata/process split matches the live ghosts measured on 2026-07-20 (§ "Verified inversion").
 Every cell above is the opposite of the 2026-07-20 inversion for the two live panes, and preserves PR #15's guarantee that a ghost never counts as live (`agent_alive=dead`, `reality=dead`).
 
@@ -668,7 +678,7 @@ Every cell above is the opposite of the 2026-07-20 inversion for the two live pa
 
 - **Retested live (2026-07-21):** the `agent_session`-present / `agent get -> agent_not_found` split for a pane-typed agent; `agent_status: "unknown"` for bare shell, pane-typed live claude, and `agent start` firstmate; `pane process-info` returning a process for live panes and `pane_not_found` for gone ones; the three live rows of the acceptance table via the real adapter functions; `agent start`'s 0.7.4 usage (`herdr agent start <name> ... -- <argv>`, no `--pane` flag); `pane report-agent`'s 0.7.4 shape (null `agent_session`, present `agent get` record) and that the classifier reads such a pane `live` via the fallback - which is the respawn-idempotency e2e's "registered agent refuses" arm, re-confirmed by cheaper means.
 - **Corrected:** the "Respawn idempotency", "Agent liveness probe", and "Verified inversion / UNFIXED" sections, which described 0.7.1 metadata-only classification as current; they now point here and to the composed table.
-- **Downgraded (could not re-run against 0.7.4):** the reboot-replay ghost row of the acceptance table (a stopped isolated lab session errors rather than replaying records, so it is deterministic-unit-covered rather than lab-reproducible - the metadata/process split still matches the live ghosts measured 2026-07-20); the full `session stop` + server-restart respawn e2e as an end-to-end run (its two arms re-confirmed separately above, but the server-restart itself is outside the isolated-lab safety contract); and any undated / 0.7.1-dated claim elsewhere in this document not listed under "retested".
+- **Downgraded (could not re-run against 0.7.4):** the reboot-replay ghost row of the acceptance table (a stopped isolated lab session errors rather than replaying records, so it is deterministic-unit-covered rather than lab-reproducible - the metadata/process split still matches the live ghosts measured 2026-07-20); the full `session stop` + server-restart respawn e2e as an end-to-end run (its two arms re-confirmed separately above, but the server-restart itself is outside the isolated-lab safety contract); **the harness-agnosticism of the affirmative liveness read** - it was measured only for claude (pane-typed) and `agent start`/`report-agent`-registered agents, so the "resolves any harness including pi" claim is scoped to claude here and a non-claude harness's herdr detection is a separate lab-measurement follow-up; and any undated / 0.7.1-dated claim elsewhere in this document not listed under "retested".
 
 ## End-to-end verification (spawn -> steer -> peek -> done -> merge -> teardown)
 

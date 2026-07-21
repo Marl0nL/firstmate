@@ -740,6 +740,17 @@ fm_backend_agent_alive() {  # <backend> <target>
 # post-launch confirmation block). Only herdr and tmux have an empirically
 # verified classifier able to reach a confident absent verdict; every other
 # backend returns 1 (not confirmed), so the guarded action never fires there.
+#
+# The herdr path routes through fm_backend_herdr_pane_confirmed_dead, whose
+# composed reality table (see bin/backends/herdr.sh) already disambiguates the
+# dangerous case: a pane with a live process but no agent metadata is `dead`
+# (typeable) ONLY when its foreground process is a bare shell, and `unknown`
+# (refused here) when a non-shell process is running - i.e. an agent herdr has
+# not yet registered. That closes the gap where a running-but-undetected agent
+# would have read confirmed-absent and been typed over. tmux's classifier reads
+# the pane's foreground process name directly, so it already distinguishes a
+# bare shell (dead) from a running harness (alive) from an ambiguous
+# interpreter (unknown).
 fm_backend_agent_confirmed_absent() {  # <backend> <target>
   local backend=$1 target=$2 session pane
   fm_backend_source "$backend" || return 1
@@ -801,10 +812,18 @@ fm_backend_process_state() {  # <backend> <target>
 # is worth polling to a failure verdict, so an unverifiable pair keeps the
 # pre-confirmation behaviour (print `spawned` without a liveness check) instead
 # of paying a full poll timeout that can never resolve.
-#   herdr - verifiable for ANY harness: fm_backend_herdr_agent_alive composes
-#           herdr's own agent-presence signal with a process probe, which is
-#           harness-agnostic (docs/herdr-backend.md "Agent liveness probe" /
-#           "0.7.4 four-way calibration").
+#   herdr - treated as verifiable, but the affirmative detection has been
+#           lab-measured only for claude / agent-start-registered agents. On
+#           0.7.4 the liveness read keys on herdr detecting an agent in the
+#           pane (an `agent_session`, or an `agent get` record); that detection
+#           is measured for claude and NOT yet measured for a non-claude
+#           harness. Keeping the gate on is safe rather than harness-agnostic:
+#           if herdr does not detect the launched agent, the composed reality
+#           reads `unknown` (a live but non-shell foreground process), so the
+#           spawn proceeds UNCONFIRMED WITH A WARNING - never a false failure
+#           and never a destructive re-send. So the confidence claim is scoped
+#           to claude here; broadening it is a lab-measurement follow-up, not an
+#           assumption (docs/herdr-backend.md "0.7.4 four-way calibration").
 #   tmux  - verifiable for every harness whose CLI runs as its own attributable
 #           process name (claude, codex, opencode, grok), NOT for pi: pi execs
 #           into a generic `node` process that tmux's classifier can only report

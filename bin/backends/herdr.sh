@@ -542,6 +542,52 @@ fm_backend_herdr_pane_process_cwds() {  # <session> <pane_id>
       select(length > 0) | .[]' 2>/dev/null
 }
 
+# fm_backend_herdr_pane_foreground_is_shell: 0 only when `pane process-info`
+# reports at least one foreground process AND every one of them is a bare
+# interactive shell (bash, zsh, sh, ...). 1 for no process, an unparseable
+# response, or any foreground process that is NOT a shell.
+#
+# This is the DISAMBIGUATOR for the one ambiguous reality cell: a pane whose
+# metadata says `no-agent` but whose process probe says `live`. That shape has
+# two very different real causes -
+#   - a genuine restored/bare shell (a husk, safe to reclaim and safe to type a
+#     launch command into), or
+#   - an agent that is running but that herdr has not (yet) registered - a slow
+#     start, or a harness whose agent herdr's detection does not recognize -
+#     which is NOT safe to reclaim and NOT safe to type into.
+# `pane process-info`'s foreground process name (verified 0.7.4 to be present
+# for every foreground process, alongside argv/cmdline/cwd/pid) is the only
+# read-only signal that tells the two apart: a bare shell reads `bash`, while a
+# running claude reads its versioned binary basename (e.g. `2.1.215`) and a
+# pi/node agent reads `node`. So this consults the argv/name, NOT metadata, and
+# introduces no new probe - process-info is already called for process_state.
+#
+# The basename of `.name` (falling back to argv[0]'s basename) is matched
+# against a small shell allowlist, with a leading `-` stripped so a login shell
+# reported as `-bash` still counts. A single non-shell foreground process makes
+# the whole pane not-a-bare-shell: if anything other than a shell is running in
+# the foreground, typing into the pane is unsafe.
+fm_backend_herdr_pane_foreground_is_shell() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 out names n base
+  out=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>&1)
+  names=$(printf '%s' "$out" |
+    jq -r '.result.process_info.foreground_processes[]?
+      | (.name // (.argv[0] // "")) // ""' 2>/dev/null)
+  [ -n "$names" ] || return 1
+  while IFS= read -r n; do
+    [ -n "$n" ] || return 1
+    base=${n##*/}   # basename, in case name carries a path
+    base=${base#-}  # a login shell can be reported as -bash / -zsh
+    case "$base" in
+      sh|bash|zsh|dash|ash|ksh|fish|tcsh|csh) ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$names
+EOF
+  return 0
+}
+
 # fm_backend_herdr_pane_agent_reality: THE one owner of how this adapter's two
 # independent classifiers compose into a verdict about whether an agent is
 # actually running in <pane_id>. Prints live|dead|unknown.
@@ -564,24 +610,43 @@ fm_backend_herdr_pane_process_cwds() {  # <session> <pane_id>
 #   ------------|---------------|---------|---------------------------------
 #   live        | live          | live    | a real running agent
 #   live        | dead          | dead    | replayed ghost: record, no process
-#   no-agent    | live          | dead    | bare shell: process, no agent
+#   no-agent    | live (shell)  | dead    | bare shell: shell process, no agent
+#   no-agent    | live (other)  | unknown | a NON-shell process herdr did not
+#                                            register: a slow-starting or
+#                                            undetected agent - refuse to guess
 #   no-agent    | dead          | dead    | pane record without either
 #   dead        | dead          | dead    | pane structurally gone
 #   dead        | live          | unknown | contradiction; refuse to guess
 #   unknown     | *             | unknown | inconclusive
 #   *           | unknown       | unknown | inconclusive
 #
-# Note the ghost row is why the metadata signal can never be trusted alone,
-# and the bare-shell row is why the process signal can never be trusted alone.
-# Both defects the 0.7.4 recalibration fixed live in this table, not in the
-# callers.
+# Note the ghost row is why the metadata signal can never be trusted alone, and
+# the bare-shell row is why the process signal can never be trusted alone.
+# The `no-agent`/`live` split is the third leg: a live process with no agent
+# metadata is only safe to call `dead` (reclaimable, typeable) when it is a
+# BARE SHELL. If a non-shell process is running there, herdr simply has not
+# registered it as an agent - which on 0.7.4 can be a slow start, or a harness
+# whose agent herdr's detection does not recognize - and treating that as
+# `dead` would let a caller close its tab (fm_backend_herdr_create_task) or
+# type a launch command on top of it (fm-spawn's re-send). So it is `unknown`,
+# which every consumer refuses. See fm_backend_herdr_pane_foreground_is_shell.
 fm_backend_herdr_pane_agent_reality() {  # <session> <pane_id>
   local session=$1 pane_id=$2 agent_state process_state
   agent_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
   process_state=$(fm_backend_herdr_pane_process_state "$session" "$pane_id")
   case "$agent_state/$process_state" in
     live/live) printf 'live' ;;
-    live/dead | no-agent/live | no-agent/dead | dead/dead) printf 'dead' ;;
+    live/dead | no-agent/dead | dead/dead) printf 'dead' ;;
+    no-agent/live)
+      # A process is running but herdr sees no agent. Only a bare shell is
+      # safe to call dead; anything else is an unregistered/undetected running
+      # process and must fail closed to unknown.
+      if fm_backend_herdr_pane_foreground_is_shell "$session" "$pane_id"; then
+        printf 'dead'
+      else
+        printf 'unknown'
+      fi
+      ;;
     *) printf 'unknown' ;;
   esac
 }
