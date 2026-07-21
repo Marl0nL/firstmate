@@ -25,6 +25,16 @@ export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 # of calls precisely. A missing response file means "succeed with empty
 # stdout" (mirrors send-text/send-keys/pane close/tab close, which are silent
 # on success in the real CLI - verified in herdr-verification-p2.md).
+#
+# `pane process-info` is answered OUT OF BAND, from $FM_HERDR_PROCESS_INFO,
+# and never consumes a numbered slot. It is the adapter's reality probe: it
+# composes with the metadata calls (see fm_backend_herdr_pane_agent_reality)
+# rather than sitting at a fixed point in their sequence, so binding it to a
+# call number would make every husk test's scripted sequence depend on how
+# many metadata calls the classifier happened to need. $FM_HERDR_PROCESS_INFO
+# is a comma-separated `<pane_id>=live|dead` map; a pane not named in it, or
+# an unset variable, answers pane_not_found (dead), which keeps every
+# pre-existing test's implicit "no process" reality unchanged.
 make_herdr_fakebin() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -42,6 +52,30 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
 } >> "$LOG"
 if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS:-0}" != 1 ]; then
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
+  exit 0
+fi
+if [ "${1:-}" = pane ] && [ "${2:-}" = process-info ]; then
+  fake_pane=""
+  fake_args=("$@")
+  for ((fi=0; fi<${#fake_args[@]}; fi++)); do
+    [ "${fake_args[$fi]}" = --pane ] && fake_pane=${fake_args[$((fi+1))]:-}
+  done
+  # `live` -> a bare shell foreground process (name bash); `live-agent` -> a
+  # NON-shell foreground process (a claude/node agent herdr has not registered)
+  # so a test can exercise the no-agent/live disambiguation; `unknown` -> an
+  # unparseable probe; default -> pane_not_found (no process).
+  fake_verdict=dead
+  case ",${FM_HERDR_PROCESS_INFO:-}," in
+    *",$fake_pane=live-agent,"*) fake_verdict=live-agent ;;
+    *",$fake_pane=live,"*) fake_verdict=live ;;
+    *",$fake_pane=unknown,"*) fake_verdict=unknown ;;
+  esac
+  case "$fake_verdict" in
+    live) printf '{"result":{"process_info":{"foreground_process_group_id":4242,"foreground_processes":[{"name":"bash","pid":4242,"cwd":"/tmp"}]}}}\n' ;;
+    live-agent) printf '{"result":{"process_info":{"foreground_process_group_id":5292,"foreground_processes":[{"name":"2.1.215","argv":["/home/u/.local/share/claude/versions/2.1.215","--continue"],"pid":5292,"cwd":"/tmp"}]}}}\n' ;;
+    unknown) printf '{"error":{"code":"internal_error","message":"probe failed"}}\n' ;;
+    *) printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}\n' "$fake_pane" ;;
+  esac
   exit 0
 fi
 n=$next
@@ -148,6 +182,38 @@ case "$cmd $sub" in
       printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status"
     else
       printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$pane"
+    fi
+    ;;
+  # A pane exists exactly while its tab does (this fake's one-pane-per-tab
+  # shape). A pane with a preset agent_status also carries an agent_session,
+  # mirroring real 0.7.4: herdr reports agent_session for a detected agent
+  # whether or not it was registered via `agent start`, and omits it for a
+  # bare shell (docs/herdr-backend.md "0.7.4 four-way calibration").
+  "pane get")
+    pane=${3:-}
+    if jq_state -e --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length > 0' >/dev/null; then
+      status=$(jq_state -r --arg p "$pane" '.agent_status[$p] // empty')
+      if [ -n "$status" ]; then
+        printf '{"result":{"pane":{"pane_id":"%s","agent_status":"%s","agent_session":{"agent":"claude","kind":"id","value":"fake-%s"}}}}\n' "$pane" "$status" "$pane"
+      else
+        printf '{"result":{"pane":{"pane_id":"%s","agent_status":"unknown"}}}\n' "$pane"
+      fi
+    else
+      printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}\n' "$pane"
+    fi
+    ;;
+  # The reality probe: a pane this fake still lists has a real process behind
+  # it (the fake never models a replayed ghost - that shape is covered by the
+  # canned-response fake, which can script the record/process contradiction).
+  "pane process-info")
+    pane=""
+    for ((i=0; i<${#args[@]}; i++)); do
+      [ "${args[$i]}" = --pane ] && pane=${args[$((i+1))]:-}
+    done
+    if jq_state -e --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length > 0' >/dev/null; then
+      printf '{"result":{"process_info":{"foreground_process_group_id":4242,"foreground_processes":[{"name":"bash","pid":4242,"cwd":"/tmp"}]}}}\n'
+    else
+      printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}\n' "$pane"
     fi
     ;;
   *) : ;;
@@ -361,8 +427,11 @@ test_create_task_refuses_duplicate_label_when_agent_live() {
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
   # 4: agent get -> a genuinely registered, live agent (idle, not just working)
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  # ...and the reality probe agrees a process is there. Both halves are needed
+  # now: the same metadata with NO process is a replayed ghost, which IS
+  # reclaimable - see test_create_task_reclaims_ghost_pane below.
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PROCESS_INFO="w1:p2=live" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-dup1 /tmp/proj' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "create_task should still refuse when the duplicate's pane hosts a live (even idle) registered agent"
@@ -383,7 +452,7 @@ test_create_task_refuses_when_any_duplicate_label_is_live() {
   printf '{"result":{"pane":{"pane_id":"w1:p3"}}}\n' > "$resp/6.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PROCESS_INFO="w1:p3=live" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-mixed1 /tmp/proj' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "create_task must refuse when any same-labeled tab hosts a live registered agent"
@@ -445,6 +514,285 @@ EOF
     "create_task did not create the replacement tab"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the no-agent husk's tab"
   pass "fm_backend_herdr_create_task: closes and replaces a same-labeled tab whose pane is alive but hosts no registered agent (a restored plain shell)"
+}
+
+# --- herdr 0.7.4 / protocol 16 calibration ----------------------------------
+# The metadata classifier was calibrated against 0.7.1 / protocol 14, where
+# `agent get` success was the registration test and agent_status carried a
+# real value. Both broke on 0.7.4 (docs/herdr-backend.md "0.7.4 four-way
+# calibration"): firstmate types its crewmates' launch command into a pane
+# rather than running `herdr agent start`, and such a pane gets an
+# `agent_session` but no registry entry. These tests pin the recalibrated
+# discriminator so a future herdr bump that moves it again fails loudly here
+# instead of in a work-destroying tab close.
+
+# pane_agent_state must answer `live` for each of the two real shapes an agent
+# can take on 0.7.4, and `no-agent` ONLY for a genuine bare shell.
+test_pane_agent_state_0_7_4_shapes() {
+  local dir log resp fb out
+  # A pane-typed agent: `pane get` carries agent_session, `agent get` would
+  # answer agent_not_found. Measured shape, 2026-07-21, pane w2:p1.
+  dir="$TMP_ROOT/cal-pane-typed"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","agent_status":"unknown","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"98b623e4"}}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT" )
+  [ "$out" = live ] || fail "a pane-TYPED live agent (agent_session present, agent get would 404) must classify live, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''get' \
+    "agent_session is sufficient; pane_agent_state should not need an agent get call for a pane-typed agent"
+
+  # A `pane report-agent`-registered pane: measured live 2026-07-21, herdr
+  # 0.7.4 leaves `pane get`'s agent_session NULL for such a pane yet answers
+  # `agent get` with a full record. The agent-registry record is therefore the
+  # necessary fallback evidence, keyed on the record EXISTING, never on its
+  # agent_status value (the record's status was "idle"/"unknown" - neither
+  # carries liveness). This is the respawn-idempotency e2e's protected-agent
+  # arm at the unit level.
+  dir="$TMP_ROOT/cal-registered"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","agent_status":"idle","agent_session":null}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"pane_id":"w1:p2","name":"fm-lab-agent","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT" )
+  [ "$out" = live ] || fail "an agent-registry record with agent_status 'unknown' must still classify live on 0.7.4, got '$out'"
+
+  # A bare shell: no agent_session, and no registry record either. Measured
+  # shape, 2026-07-21, a plain `tab create` pane in an isolated lab session.
+  dir="$TMP_ROOT/cal-bare"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","agent_status":"unknown","terminal_title":"marlon@bazzite:/var/home/marlon/.tmp"}}}\n' > "$resp/1.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT" )
+  [ "$out" = no-agent ] || fail "a bare shell (no agent_session, no registry record) must classify no-agent, got '$out'"
+
+  # An agent_session present but naming nothing is not evidence of an agent.
+  dir="$TMP_ROOT/cal-empty-session"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","agent_session":null}}}\n' > "$resp/1.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT" )
+  [ "$out" = no-agent ] || fail "a null agent_session must not be read as an agent, got '$out'"
+
+  pass "fm_backend_herdr_pane_agent_state: 0.7.4 calibration - agent_session OR an agent record means live; agent_status's value is never read"
+}
+
+# The composed table is the one owner of how the two signals combine. Drive it
+# with both inputs stubbed so every cell of the cross product is asserted,
+# including the two contradictions that must stay unknown.
+test_pane_agent_reality_full_cross_product() {
+  local as ps sh expected out
+  while read -r as ps sh expected; do
+    [ -n "$as" ] || continue
+    # sh column: the foreground_is_shell verdict, consulted ONLY on the
+    # no-agent/live cell. `shell` -> a bare shell (0), `other` -> a non-shell
+    # process (1), `na` -> not reached (stubbed to fail loudly if it ever is).
+    out=$(FM_AS="$as" FM_PS="$ps" FM_SH="$sh" bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_pane_agent_state() { printf "%s" "$FM_AS"; }
+      fm_backend_herdr_pane_process_state() { printf "%s" "$FM_PS"; }
+      fm_backend_herdr_pane_foreground_is_shell() {
+        case "$FM_SH" in
+          shell) return 0 ;;
+          other) return 1 ;;
+          *) echo "foreground_is_shell called unexpectedly (na)" >&2; return 2 ;;
+        esac
+      }
+      fm_backend_herdr_pane_agent_reality sess w1:p1' "$ROOT")
+    [ "$out" = "$expected" ] || fail "reality table: agent_state=$as process_state=$ps sh=$sh should be '$expected', got '$out'"
+  done <<'TABLE'
+live      live     na     live
+live      dead     na     dead
+live      unknown  na     unknown
+no-agent  live     shell  dead
+no-agent  live     other  unknown
+no-agent  dead     na     dead
+no-agent  unknown  na     unknown
+dead      dead     na     dead
+dead      live     na     unknown
+dead      unknown  na     unknown
+unknown   live     na     unknown
+unknown   dead     na     unknown
+unknown   unknown  na     unknown
+TABLE
+  pass "fm_backend_herdr_pane_agent_reality: every cell of the metadata x process cross product, incl. the no-agent/live shell-vs-nonshell split"
+}
+
+# THE POLARITY ASYMMETRY. confirmed_dead is not !confirmed_live, and the gap
+# between them is exactly `unknown`. A regression that collapses the two
+# helpers into one would pass a test that only checked the live and dead rows,
+# so this asserts the middle explicitly, in both directions.
+test_confirmed_live_and_confirmed_dead_are_not_negations() {
+  local as ps live_rc dead_rc nonshell_live_rc nonshell_dead_rc
+  while read -r as ps; do
+    [ -n "$as" ] || continue
+    live_rc=0; dead_rc=0
+    FM_AS="$as" FM_PS="$ps" bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_pane_agent_state() { printf "%s" "$FM_AS"; }
+      fm_backend_herdr_pane_process_state() { printf "%s" "$FM_PS"; }
+      fm_backend_herdr_pane_confirmed_live sess w1:p1' "$ROOT" || live_rc=$?
+    FM_AS="$as" FM_PS="$ps" bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_pane_agent_state() { printf "%s" "$FM_AS"; }
+      fm_backend_herdr_pane_process_state() { printf "%s" "$FM_PS"; }
+      fm_backend_herdr_pane_confirmed_dead sess w1:p1' "$ROOT" || dead_rc=$?
+    [ "$live_rc" -ne 0 ] || fail "confirmed_live must REFUSE the inconclusive state agent_state=$as process_state=$ps - 'may I act on this as alive?' fails toward not-alive"
+    [ "$dead_rc" -ne 0 ] || fail "confirmed_dead must REFUSE the inconclusive state agent_state=$as process_state=$ps - 'may I destroy this?' fails toward not-destroying; this is the work-destroying bug if it regresses"
+  done <<'TABLE'
+live      unknown
+no-agent  unknown
+dead      unknown
+dead      live
+unknown   live
+unknown   dead
+unknown   unknown
+TABLE
+
+  # And each helper DOES fire on its own positive verdict, so the assertions
+  # above are not passing merely because both helpers refuse everything.
+  FM_AS=live FM_PS=live bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_agent_state() { printf "%s" "$FM_AS"; }
+    fm_backend_herdr_pane_process_state() { printf "%s" "$FM_PS"; }
+    fm_backend_herdr_pane_confirmed_live sess w1:p1' "$ROOT" \
+    || fail "confirmed_live must accept a real running agent (live/live)"
+  # no-agent/live where the foreground IS a bare shell: a genuine husk.
+  FM_AS=no-agent FM_PS=live bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_agent_state() { printf "%s" "$FM_AS"; }
+    fm_backend_herdr_pane_process_state() { printf "%s" "$FM_PS"; }
+    fm_backend_herdr_pane_foreground_is_shell() { return 0; }
+    fm_backend_herdr_pane_confirmed_dead sess w1:p1' "$ROOT" \
+    || fail "confirmed_dead must accept a bare-shell husk (no-agent/live, foreground is a shell) - otherwise husk recovery is inert"
+  # no-agent/live where the foreground is a NON-shell process: a running agent
+  # herdr has not registered. BOTH helpers must refuse - it is neither safe to
+  # act on as alive nor safe to destroy/type over.
+  nonshell_live_rc=0
+  FM_AS=no-agent FM_PS=live bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_agent_state() { printf "%s" "$FM_AS"; }
+    fm_backend_herdr_pane_process_state() { printf "%s" "$FM_PS"; }
+    fm_backend_herdr_pane_foreground_is_shell() { return 1; }
+    fm_backend_herdr_pane_confirmed_live sess w1:p1' "$ROOT" || nonshell_live_rc=$?
+  nonshell_dead_rc=0
+  FM_AS=no-agent FM_PS=live bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_agent_state() { printf "%s" "$FM_AS"; }
+    fm_backend_herdr_pane_process_state() { printf "%s" "$FM_PS"; }
+    fm_backend_herdr_pane_foreground_is_shell() { return 1; }
+    fm_backend_herdr_pane_confirmed_dead sess w1:p1' "$ROOT" || nonshell_dead_rc=$?
+  [ "$nonshell_live_rc" -ne 0 ] || fail "confirmed_live must refuse a running-but-undetected agent (no-agent/live, non-shell foreground)"
+  [ "$nonshell_dead_rc" -ne 0 ] || fail "confirmed_dead must refuse a running-but-undetected agent (no-agent/live, non-shell foreground) - typing/closing here destroys live work"
+  FM_AS=live FM_PS=dead bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_agent_state() { printf "%s" "$FM_AS"; }
+    fm_backend_herdr_pane_process_state() { printf "%s" "$FM_PS"; }
+    fm_backend_herdr_pane_confirmed_dead sess w1:p1' "$ROOT" \
+    || fail "confirmed_dead must accept a replayed ghost (live/dead)"
+  pass "confirmed_live / confirmed_dead: neither is the other's negation; the no-agent/live cell splits shell (dead) vs non-shell (unknown)"
+}
+
+# fm_backend_herdr_pane_foreground_is_shell: the disambiguator for the
+# no-agent/live cell. A bare shell foreground is a shell; a claude/node
+# foreground is not; no process / unparseable is not.
+test_foreground_is_shell_classifies_process_info() {
+  local dir log resp fb rc
+  run_shell() {  # <process-info-verdict> -> exit code of foreground_is_shell
+    local verdict=$1 d
+    d="$TMP_ROOT/fgsh-$verdict"; mkdir -p "$d/responses"; : > "$d/log"
+    fb=$(make_herdr_fakebin "$d")
+    PATH="$fb:$PATH" FM_HERDR_LOG="$d/log" FM_HERDR_RESPONSES="$d/responses" FM_HERDR_PROCESS_INFO="w1:p2=$verdict" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_foreground_is_shell fmtest w1:p2' "$ROOT"
+  }
+  run_shell live; rc=$?; [ $rc -eq 0 ] || fail "a bash foreground process must classify as a shell"
+  run_shell live-agent; rc=$?; [ $rc -ne 0 ] || fail "a claude/node foreground process must NOT classify as a shell"
+  run_shell gone; rc=$?; [ $rc -ne 0 ] || fail "a pane with no process must not classify as a shell (nothing to type into safely)"
+  run_shell unknown; rc=$?; [ $rc -ne 0 ] || fail "an unparseable process-info must not classify as a shell"
+  pass "fm_backend_herdr_pane_foreground_is_shell: bash->shell, claude/node->not, gone/unknown->not"
+}
+
+# create_task must NOT close a same-labeled tab whose pane shows no agent
+# metadata but is running a NON-shell foreground process - that is a live agent
+# herdr has not registered (a slow start, or a harness it does not detect), and
+# closing it destroys live work. This is the tab_is_husk half of finding 1.
+test_create_task_refuses_undetected_running_agent() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/husk-undetected"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-und1","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
+  # pane get: no agent_session; agent get: agent_not_found -> metadata no-agent
+  printf '{"result":{"pane":{"pane_id":"w1:p2","agent_status":"unknown"}}}\n' > "$resp/3.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  # ...but a real claude/node process is running in the foreground.
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PROCESS_INFO="w1:p2=live-agent" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-und1 /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must refuse to reclaim a pane running an unregistered agent process"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close' "create_task must not close a tab whose pane runs a non-shell process herdr did not register"
+  pass "fm_backend_herdr_create_task: refuses a no-agent pane running a NON-shell process (undetected live agent), never closes it"
+}
+
+# A replayed ghost holds no process, so reclaiming its tab destroys nothing.
+# A metadata-only classifier refuses this (the ghost reads `live`), which is
+# what made automatic husk recovery inert for the post-restart shape.
+test_create_task_reclaims_ghost_pane() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/husk-ghost"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-ghost1","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
+  # 3: pane get -> a full replayed record, agent_session and all
+  printf '{"result":{"pane":{"pane_id":"w1:p2","agent_status":"idle","agent_session":{"agent":"claude","kind":"id","value":"replayed"}}}}\n' > "$resp/3.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/4.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-ghost1","workspace_id":"w1"}]}}\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  # No FM_HERDR_PROCESS_INFO entry for w1:p2 -> process-info answers
+  # pane_not_found, the measured ghost reality.
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-ghost1 /tmp/proj' "$ROOT" ) \
+    || fail "create_task should reclaim a ghost tab (full metadata record, no process) instead of refusing forever"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the ghost's tab"
+  pass "fm_backend_herdr_create_task: reclaims a replayed ghost tab, which a metadata-only husk check refuses forever"
+}
+
+# The bare-shell husk in its REAL shape: a restored pane runs a fresh shell, so
+# the process probe says live. The old composed-helper attempt parked on
+# fm/herdr-liveness-inversion-fix-h8 required BOTH signals to read dead, which
+# this shape never satisfies - that is why it made husk recovery inert.
+test_create_task_replaces_bare_shell_husk_with_live_process() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/husk-bare-live-proc"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-bare1","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","agent_status":"unknown"}}}\n' > "$resp/3.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-bare1","workspace_id":"w1"}]}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PROCESS_INFO="w1:p2=live" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-bare1 /tmp/proj' "$ROOT" ) \
+    || fail "create_task should close-and-replace a bare-shell husk whose shell process is live - the real restored-pane shape"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the bare-shell husk's tab"
+  pass "fm_backend_herdr_create_task: replaces a bare-shell husk whose shell process is live (the shape that made the parked h8 helper inert)"
+}
+
+# An unreadable process probe over live metadata must refuse: it is exactly the
+# case where closing could kill a working crewmate.
+test_create_task_refuses_when_process_probe_inconclusive() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/husk-proc-unknown"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-pu1","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","agent_session":{"agent":"claude","kind":"id","value":"x"}}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_PROCESS_INFO="w1:p2=unknown" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-pu1 /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must refuse when the process probe cannot decide - closing here could kill a live crewmate"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close' "create_task must not close a tab whose process reality is unknown"
+  pass "fm_backend_herdr_create_task: refuses when the reality probe is inconclusive, even over live-looking metadata"
 }
 
 test_create_task_closes_all_duplicate_husks_after_replacement() {
@@ -2357,8 +2705,16 @@ test_no_jq_reserved_keyword_arg_names
 test_create_task_refuses_duplicate_label
 test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live
+test_pane_agent_state_0_7_4_shapes
+test_pane_agent_reality_full_cross_product
+test_confirmed_live_and_confirmed_dead_are_not_negations
+test_foreground_is_shell_classifies_process_info
 test_create_task_closes_and_replaces_dead_pane_husk
 test_create_task_closes_and_replaces_no_agent_husk
+test_create_task_reclaims_ghost_pane
+test_create_task_replaces_bare_shell_husk_with_live_process
+test_create_task_refuses_undetected_running_agent
+test_create_task_refuses_when_process_probe_inconclusive
 test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
