@@ -352,40 +352,73 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
 }
 
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
-# dead|no-agent|live|unknown, purely from the JSON body of two read-only
+# dead|no-agent|live|unknown, purely from the JSON body of up to two read-only
 # calls - never from process exit status, since a business-logic "not found"
 # response is a normal, expected outcome here, not a call failure (real herdr
 # 0.7.1 exits 1 for it; the canned-response test fakes exit 0; parsing only
 # the JSON keeps this function correct against either).
+#
+# This function answers ONE question: is a pane structurally present, and is
+# an AGENT (rather than a bare shell) attached to it, according to herdr's
+# metadata? It makes no claim about whether that agent is running - the
+# metadata surface replays persisted records across a server restart, so a
+# `live` answer here is satisfied by a ghost. Pair it with
+# fm_backend_herdr_pane_process_state, or better, use the composed
+# fm_backend_herdr_pane_agent_reality table below, which is the one owner of
+# how the two signals combine.
 #
 #   dead     - `pane get` responds with error code pane_not_found: the pane
 #              itself is gone (closed, or its process died and herdr already
 #              reaped it - verified empirically: killing a pane's shell pid
 #              on a live server makes herdr immediately drop both the pane
 #              and its tab from `pane get`/`tab list`).
-#   no-agent - `pane get` succeeds (the pane structurally exists) but `agent
-#              get` responds with error code agent_not_found: nothing is
-#              registered in it - exactly what a herdr session-layout restore
-#              produces (verified empirically: `session stop` + fresh `herdr
-#              server` restart leaves the pane alive, agent_status "unknown",
-#              agent get -> agent_not_found - docs/herdr-backend.md "ID
-#              stability across a server restart"), and what a future
-#              `resume_agents_on_restore = false` restore would produce too
-#              (a plain shell, never an agent).
-#   live     - `agent get` succeeds and reports a real agent_status (working,
-#              idle, done, or blocked - any registered value). An idle or
-#              blocked agent is still a genuine, still-registered agent, not
-#              a restored husk, so it is never a close-and-replace candidate.
+#   live     - the pane exists and carries an agent, established by EITHER of
+#              two independent shapes (see the 0.7.4 calibration note below):
+#              `pane get`'s own `.result.pane.agent_session` names an agent,
+#              or `agent get` returns an agent record.
+#   no-agent - the pane exists, carries no `agent_session`, and `agent get`
+#              responds with error code agent_not_found: a bare shell. This is
+#              what a herdr session-layout restore leaves behind (verified:
+#              `session stop` + fresh `herdr server` restart - see
+#              docs/herdr-backend.md "ID stability across a server restart"),
+#              and what a plain `tab create` produces (verified 2026-07-21,
+#              0.7.4 - see "0.7.4 four-way calibration" in that doc).
 #   unknown  - anything else: an unparseable/unexpected response from either
 #              call, or a `pane get` success whose own echoed pane_id does not
 #              round-trip (guards against misreading a herdr response shape
 #              change as "the pane exists"). The caller must fail safe toward
 #              refusal here, never toward closing - this is the conservative
 #              backstop the husk check depends on.
+#
+# CALIBRATION, herdr 0.7.4 / protocol 16 (measured 2026-07-21 on the captain's
+# host; supersedes the 0.7.1 / protocol 14 calibration this function shipped
+# with). Two 0.7.1 assumptions both broke:
+#
+#  1. `agent get` success is NOT the registration test. firstmate never runs
+#     `herdr agent start` for a crewmate - bin/fm-spawn.sh creates a pane and
+#     TYPES the launch command into it - and on 0.7.4 such a pane gets a
+#     detected `agent_session` but no agent-registry entry, so `agent get`
+#     answers agent_not_found. Keying `no-agent` off that alone classified
+#     EVERY real firstmate crewmate as a bare shell, which is what made
+#     fm_backend_herdr_tab_is_husk return true for a live, working crewmate
+#     (work-destroying) and every herdr spawn's start-confirmation read `dead`.
+#  2. `agent_status`'s VALUE carries no liveness signal at all. Measured live:
+#     a bare shell, a pane-typed live claude, and the `agent start`-registered
+#     firstmate itself ALL report `agent_status: "unknown"`. The only panes
+#     observed reporting `idle` were replayed ghosts carrying a persisted
+#     value. So the old `working|idle|done|blocked -> live` mapping could
+#     never fire for a live pane on 0.7.4 and fired only for ghosts - exactly
+#     inverted. The value is not read here any more; the agent record's
+#     EXISTENCE is.
+#
+# `agent_session` is the discriminator that survives both, verified across
+# three distinct real shapes (docs/herdr-backend.md, "0.7.4 four-way
+# calibration"): absent for a bare shell, present for a pane-typed live
+# claude, present for an `agent start`-registered agent.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code pid status
-  # 2>&1, not 2>/dev/null: verified empirically that real herdr 0.7.1 writes
-  # an error response's JSON body to STDERR (success bodies go to stdout), so
+  local session=$1 pane_id=$2 out code pid agent_session
+  # 2>&1, not 2>/dev/null: verified empirically that real herdr writes an
+  # error response's JSON body to STDERR (success bodies go to stdout), so
   # discarding stderr here would blind this function to exactly the
   # error.code values (pane_not_found, agent_not_found) it exists to read -
   # every OTHER call site in this file discards stderr safely only because
@@ -403,17 +436,30 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
     printf 'unknown'
     return 0
   fi
+  # An agent_session is only evidence when it actually names something: herdr
+  # emits the key with a populated `.agent`/`.value` for a detected agent, and
+  # omits it entirely for a bare shell. An explicit null or an empty object is
+  # neither, so it must not be read as agent-present.
+  agent_session=$(printf '%s' "$out" |
+    jq -r '.result.pane.agent_session // {} | (.value // .agent // empty)' 2>/dev/null)
+  if [ -n "$agent_session" ]; then
+    printf 'live'
+    return 0
+  fi
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
   code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
   if [ -n "$code" ]; then
     [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
     return 0
   fi
-  status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
-  case "$status" in
-    working|idle|done|blocked) printf 'live' ;;
-    *) printf 'unknown' ;;
-  esac
+  # Presence of the agent record, never its agent_status VALUE - see
+  # calibration note 2 above.
+  if printf '%s' "$out" | jq -e 'has("result") and (.result | has("agent"))' \
+    >/dev/null 2>&1; then
+    printf 'live'
+  else
+    printf 'unknown'
+  fi
 }
 
 # fm_backend_herdr_pane_process_state: classify <pane_id> in <session> as one
@@ -496,36 +542,103 @@ fm_backend_herdr_pane_process_cwds() {  # <session> <pane_id>
       select(length > 0) | .[]' 2>/dev/null
 }
 
-# fm_backend_herdr_tab_is_husk: true (0) only for the two conservative husk
-# states (dead, no-agent) fm_backend_herdr_pane_agent_state can positively
-# confirm; live and unknown both refuse (1), so an inconclusive read never
+# fm_backend_herdr_pane_agent_reality: THE one owner of how this adapter's two
+# independent classifiers compose into a verdict about whether an agent is
+# actually running in <pane_id>. Prints live|dead|unknown.
+#
+# The two inputs answer genuinely different questions and neither is
+# sufficient alone:
+#   - fm_backend_herdr_pane_agent_state (metadata): is an AGENT attached here,
+#     as opposed to a bare shell? Ghost-visible: herdr replays persisted
+#     records across a server restart, so it answers `live` for a pane whose
+#     process died.
+#   - fm_backend_herdr_pane_process_state (reality): is a real OS process
+#     attached here? Cannot tell an agent from a bare shell - a shell left
+#     behind by an exited agent reads `live` too.
+#
+# The full cross product, with the real-world shape each cell describes
+# (verified 2026-07-21 against herdr 0.7.4 / protocol 16 except where noted -
+# see docs/herdr-backend.md "0.7.4 four-way calibration"):
+#
+#   agent_state | process_state | verdict | shape
+#   ------------|---------------|---------|---------------------------------
+#   live        | live          | live    | a real running agent
+#   live        | dead          | dead    | replayed ghost: record, no process
+#   no-agent    | live          | dead    | bare shell: process, no agent
+#   no-agent    | dead          | dead    | pane record without either
+#   dead        | dead          | dead    | pane structurally gone
+#   dead        | live          | unknown | contradiction; refuse to guess
+#   unknown     | *             | unknown | inconclusive
+#   *           | unknown       | unknown | inconclusive
+#
+# Note the ghost row is why the metadata signal can never be trusted alone,
+# and the bare-shell row is why the process signal can never be trusted alone.
+# Both defects the 0.7.4 recalibration fixed live in this table, not in the
+# callers.
+fm_backend_herdr_pane_agent_reality() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 agent_state process_state
+  agent_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
+  process_state=$(fm_backend_herdr_pane_process_state "$session" "$pane_id")
+  case "$agent_state/$process_state" in
+    live/live) printf 'live' ;;
+    live/dead | no-agent/live | no-agent/dead | dead/dead) printf 'dead' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# THE POLARITY ASYMMETRY, and why these are two functions over one table.
+#
+# Callers ask two questions that are NOT negations of each other:
+#   "May I act on this as alive?"  must fail toward NOT alive.
+#   "May I destroy this?"          must fail toward NOT destroying.
+# A single helper plus a `!` collapses them and re-creates the work-destroying
+# bug: `! confirmed_live` is true for `unknown`, which would license closing a
+# pane nobody could classify. `unknown` must satisfy NEITHER question.
+#
+# Both accessors therefore read the same table above and each demands its own
+# positive verdict, so the asymmetry is structural rather than a rule a caller
+# has to remember. Neither can be expressed as the negation of the other.
+fm_backend_herdr_pane_confirmed_live() {  # <session> <pane_id>
+  [ "$(fm_backend_herdr_pane_agent_reality "$1" "$2")" = live ]
+}
+
+fm_backend_herdr_pane_confirmed_dead() {  # <session> <pane_id>
+  [ "$(fm_backend_herdr_pane_agent_reality "$1" "$2")" = dead ]
+}
+
+# fm_backend_herdr_tab_is_husk: true (0) only when the pane is CONFIRMED to
+# hold no running agent; `unknown` refuses (1), so an inconclusive read never
 # licenses closing anything. Restored-layout recovery depends on this
 # fail-safe-toward-refusal behavior.
+#
+# Routed through confirmed_dead rather than fm_backend_herdr_pane_agent_state
+# alone because fm_backend_herdr_create_task CLOSES what this calls a husk. On
+# 0.7.4 the metadata classifier answered `no-agent` for every pane-typed
+# crewmate, so the old direct read returned true for a live, working agent and
+# the close destroyed its uncommitted work. The composed table also RESTORES
+# husk recovery for the ghost shape (metadata `live`, no process), which a
+# metadata-only read refuses to reclaim.
 fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
-  case "$(fm_backend_herdr_pane_agent_state "$1" "$2")" in
-    dead|no-agent) return 0 ;;
-    *) return 1 ;;
-  esac
+  fm_backend_herdr_pane_confirmed_dead "$1" "$2"
 }
 
 # fm_backend_herdr_agent_alive: CONFIDENT liveness of a live harness-agent
 # PROCESS under <target> ("<session>:<pane_id>"), for the same
 # session-start secondmate-liveness sweep fm_backend_tmux_agent_alive serves
-# (bin/fm-bootstrap.sh; docs/herdr-backend.md "Agent liveness probe reuses the
-# husk classifier"). Reuses fm_backend_herdr_pane_agent_state, the
-# already-verified husk classifier ("Respawn idempotency" above): `dead`
-# (structurally gone pane) and `no-agent` (a restored, agent-less bare shell
-# - EXACTLY the shape a dead secondmate leaves behind) both collapse to
-# `dead`; `live` (a real registered agent_status, including idle/blocked)
-# maps to `alive`; `unknown` stays `unknown` - fail-safe toward refusal,
-# exactly like the husk check itself. Callers must never treat `unknown` as a
-# confirmed-dead signal.
+# (bin/fm-bootstrap.sh; docs/herdr-backend.md "Agent liveness probe"), and for
+# bin/fm-spawn.sh's post-launch start confirmation.
+#
+# Both consumers act destructively on a wrong answer in opposite directions -
+# the sweep KILLS and respawns on `dead`, and a false `alive` leaves a home
+# unsupervised for the session - so this reads the composed reality table and
+# maps its own two positive verdicts, keeping `unknown` a refusal for both.
+# Callers must never treat `unknown` as a confirmed-dead signal.
 fm_backend_herdr_agent_alive() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-  case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
-    dead|no-agent) printf 'dead' ;;
+  case "$(fm_backend_herdr_pane_agent_reality "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
     live) printf 'alive' ;;
+    dead) printf 'dead' ;;
     *) printf 'unknown' ;;
   esac
 }

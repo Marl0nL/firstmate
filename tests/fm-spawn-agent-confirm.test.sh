@@ -222,10 +222,45 @@ test_probe_verifiable_predicate() {
   pass "fm_backend_agent_probe_verifiable: herdr(any) and tmux(non-pi) verifiable; tmux(pi), zellij, orca, cmux are not"
 }
 
+# fm_backend_agent_confirmed_absent gates the re-send that TYPES the whole
+# launch command into the pane. It must NOT be the negation of the `alive`
+# verdict: an `unknown` read licenses neither acting-as-alive nor writing into
+# the pane. If it ever collapsed to `[ verdict != alive ]`, an inconclusive
+# probe over a slowly-starting agent would let fm-spawn type a second brief on
+# top of a running agent - the D3 destructive half. This pins the asymmetry at
+# the generic layer the re-send actually calls.
+test_agent_confirmed_absent_is_not_negation_of_alive() {
+  # Run in a fresh `bash -c` (the idiom the herdr suite uses) so the classifier
+  # override and the assertions are fully isolated from this file's env.
+  bash -c '
+    set +u
+    . "$0/bin/fm-backend.sh"
+    fm_backend_source herdr
+    # herdr: reality unknown -> confirmed_absent must REFUSE, even though it is
+    # also not `alive`. This is the exact middle state the polarity trap hides.
+    fm_backend_herdr_pane_agent_reality() { printf "unknown"; }
+    fm_backend_agent_confirmed_absent herdr sess:p1 && exit 31
+    # reality dead -> confirmed absent.
+    fm_backend_herdr_pane_agent_reality() { printf "dead"; }
+    fm_backend_agent_confirmed_absent herdr sess:p1 || exit 32
+    # reality live -> not absent.
+    fm_backend_herdr_pane_agent_reality() { printf "live"; }
+    fm_backend_agent_confirmed_absent herdr sess:p1 && exit 33
+    # A backend with no verified classifier can never CONFIRM absence, so the
+    # guarded re-send never fires there.
+    fm_backend_agent_confirmed_absent zellij sess:win && exit 34
+    fm_backend_agent_confirmed_absent orca sess:win && exit 35
+    exit 0
+  ' "$ROOT"
+  expect_code 0 $? "fm_backend_agent_confirmed_absent must refuse unknown, confirm only dead, and never confirm on an unverified backend"
+  pass "fm_backend_agent_confirmed_absent: confirms only a CONFIRMED-dead pane; unknown and unverified backends refuse (the re-send never fires)"
+}
+
 test_success_when_agent_appears
 test_fail_loud_when_agent_never_starts
 test_retry_recovers_a_race
 test_unknown_proceeds_with_warning
 test_unverifiable_harness_skips_confirmation
 test_probe_verifiable_predicate
+test_agent_confirmed_absent_is_not_negation_of_alive
 printf '# all fm-spawn-agent-confirm tests passed\n'

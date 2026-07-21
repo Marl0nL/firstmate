@@ -115,32 +115,41 @@ test_tmux_agent_alive_classifies() {
 }
 
 # --- unit level: fm_backend_herdr_agent_alive -------------------------------
-# Reuses the already-verified fm_backend_herdr_pane_agent_state husk
-# classifier (docs/herdr-backend.md "Respawn idempotency" /
-# "Agent liveness probe reuses the husk classifier"); this wrapper's own
-# mapping logic is tested in isolation by overriding that classifier, exactly
-# as tests/fm-backend-herdr.test.sh already overrides `sleep` in a bash -c
-# string for the same kind of isolated-unit assertion.
+# On herdr 0.7.4 this maps the COMPOSED reality verdict
+# (fm_backend_herdr_pane_agent_reality, which folds the metadata classifier
+# together with the process probe - docs/herdr-backend.md "0.7.4 four-way
+# calibration"), not the metadata classifier alone. The old mapping over
+# fm_backend_herdr_pane_agent_state read `live` for a replayed ghost and `dead`
+# for a pane-typed live crewmate; both were wrong. This tests the wrapper's own
+# mapping in isolation by overriding the reality accessor.
 
-test_herdr_agent_alive_maps_pane_agent_state() {
+test_herdr_agent_alive_maps_pane_agent_reality() {
   local out
 
-  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "dead"; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
-  [ "$out" = dead ] || fail "herdr pane_agent_state=dead should map to dead, got '$out'"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_reality() { printf "live"; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
+  [ "$out" = alive ] || fail "herdr reality=live should map to alive, got '$out'"
 
-  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "no-agent"; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
-  [ "$out" = dead ] || fail "herdr pane_agent_state=no-agent (restored bare shell) should map to dead, got '$out'"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_reality() { printf "dead"; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
+  [ "$out" = dead ] || fail "herdr reality=dead should map to dead, got '$out'"
 
-  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "live"; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
-  [ "$out" = alive ] || fail "herdr pane_agent_state=live should map to alive, got '$out'"
-
-  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "unknown"; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
-  [ "$out" = unknown ] || fail "herdr pane_agent_state=unknown should stay unknown, got '$out'"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_reality() { printf "unknown"; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
+  [ "$out" = unknown ] || fail "herdr reality=unknown should stay unknown, got '$out'"
 
   out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_alive "no-colon-target"' "$ROOT")
   [ "$out" = unknown ] || fail "an unparseable target should classify as unknown, got '$out'"
 
-  pass "fm_backend_herdr_agent_alive: dead/no-agent->dead, live->alive, unknown->unknown"
+  # End-to-end through the underlying classifiers: the two live-metadata shapes
+  # that mattered on 0.7.4. A ghost (metadata live, process dead) must read
+  # dead; a real crewmate (metadata live, process live) must read alive. This
+  # is the inversion the recalibration exists to correct, exercised without
+  # stubbing the composition itself.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "live"; }; fm_backend_herdr_pane_process_state() { printf "dead"; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
+  [ "$out" = dead ] || fail "a replayed ghost (metadata live, no process) must read dead, not alive, got '$out'"
+
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "no-agent"; }; fm_backend_herdr_pane_process_state() { printf "live"; }; fm_backend_herdr_agent_alive "sess:p1"' "$ROOT")
+  [ "$out" = dead ] || fail "a bare shell (no agent, live process) must read dead, got '$out'"
+
+  pass "fm_backend_herdr_agent_alive: maps the composed reality verdict, ghost->dead and bare-shell->dead"
 }
 
 # --- unit level: the generic fm_backend_agent_alive dispatcher --------------
@@ -152,7 +161,7 @@ test_agent_alive_dispatcher_routes_and_falls_back() {
   out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive tmux sess:win' "$ROOT")
   [ "$out" = alive ] || fail "dispatcher should route tmux to fm_backend_tmux_agent_alive, got '$out'"
 
-  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_pane_agent_state() { printf "live"; }; fm_backend_agent_alive herdr sess:p1' "$ROOT")
+  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_pane_agent_reality() { printf "live"; }; fm_backend_agent_alive herdr sess:p1' "$ROOT")
   [ "$out" = alive ] || fail "dispatcher should route herdr to fm_backend_herdr_agent_alive, got '$out'"
 
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive zellij sess:win' "$ROOT")
@@ -387,7 +396,7 @@ test_sweep_noop_with_no_secondmate_meta() {
 }
 
 test_tmux_agent_alive_classifies
-test_herdr_agent_alive_maps_pane_agent_state
+test_herdr_agent_alive_maps_pane_agent_reality
 test_agent_alive_dispatcher_routes_and_falls_back
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched

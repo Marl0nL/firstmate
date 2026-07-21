@@ -1127,10 +1127,27 @@ if [ "$CONFIRM" != 0 ] && fm_backend_agent_probe_verifiable "$BACKEND" "$HARNESS
     # freshly-restarted backend server, so re-send the launch once and re-poll.
     # A retry that ALSO cannot confirm still fails loudly - never a silent
     # retry-until-the-print-looks-right (AGENTS.md "Report outcomes faithfully").
-    echo "warning: $ID: no agent detected in pane $META_WINDOW after ${CONFIRM_TIMEOUT}s; re-sending launch once" >&2
-    send_launch_command
-    confirm_rc=0
-    confirm_agent_started "$CONFIRM_TIMEOUT" "$CONFIRM_INTERVAL" || confirm_rc=$?
+    #
+    # SEPARATE, FRESH GATE ON THE RE-SEND. The re-send types the whole launch
+    # command - the entire brief - into the pane. If an agent IS running there,
+    # that lands as a chat message in its transcript instead of a shell
+    # command. So the re-send asks its own question, in its own polarity, at
+    # the moment of acting: not "did confirmation fail?" but "is this pane
+    # CONFIRMED to hold no agent?". `unknown` licenses neither, so an
+    # inconclusive read skips the re-send rather than risking the injection,
+    # and falls through to the unconfirmed-proceed warning below.
+    # This is a real second reading, not a re-use of the verdict above: the
+    # poll's last read is up to CONFIRM_TIMEOUT seconds old by now, and an
+    # agent that started slowly inside that window must not be typed over.
+    if fm_backend_agent_confirmed_absent "$BACKEND" "$T"; then
+      echo "warning: $ID: no agent detected in pane $META_WINDOW after ${CONFIRM_TIMEOUT}s; re-sending launch once" >&2
+      send_launch_command
+      confirm_rc=0
+      confirm_agent_started "$CONFIRM_TIMEOUT" "$CONFIRM_INTERVAL" || confirm_rc=$?
+    else
+      echo "warning: $ID: start confirmation for pane $META_WINDOW read 'no agent', but the pane could not be CONFIRMED empty; not re-sending the launch (it would be typed into a possibly-running agent). Proceeding unconfirmed." >&2
+      confirm_rc=2
+    fi
   fi
   if [ "$confirm_rc" -eq 1 ]; then
     echo "error: $ID: agent did not start - pane $META_WINDOW is a bare shell with no agent after two launch attempts (${CONFIRM_TIMEOUT}s each). The launch never produced a running agent; refusing to report success. Inspect/clean the pane before retrying." >&2

@@ -707,8 +707,8 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   unknown - anything ambiguous, unreadable, or unverified for this backend.
 # Scoped to today's --secondmate-spawn-capable backends with an empirically
 # verified classifier: tmux (docs/tmux-backend.md "Agent liveness probe") and
-# herdr (docs/herdr-backend.md "Agent liveness probe reuses the husk
-# classifier"). zellij, orca, and cmux report unknown until independently
+# herdr (docs/herdr-backend.md "Agent liveness probe" / "0.7.4 four-way
+# calibration"). zellij, orca, and cmux report unknown until independently
 # verified - future work, not a functional gap for the two backends
 # --secondmate spawns actually support today plus tmux's reference path.
 # Callers must treat unknown exactly like an unreadable target: NEVER license
@@ -722,6 +722,38 @@ fm_backend_agent_alive() {  # <backend> <target>
     tmux) fm_backend_tmux_agent_alive "$target" ;;
     herdr) fm_backend_herdr_agent_alive "$target" ;;
     *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_agent_confirmed_absent: 0 only when <target> is CONFIRMED to hold
+# no running agent. This is deliberately NOT the negation of
+# fm_backend_agent_alive's `alive` - the two answer different questions and
+# must fail in opposite directions:
+#
+#   "May I act on this as alive?"     -> fm_backend_agent_alive = alive.
+#   "May I write into this pane?"     -> fm_backend_agent_confirmed_absent.
+#
+# `unknown` must satisfy NEITHER. A caller that used `[ "$verdict" != alive ]`
+# to license writing into a pane would treat every inconclusive read as
+# permission, which is exactly how a still-running agent gets a second launch
+# command typed on top of it (bin/fm-spawn.sh's re-send; see its
+# post-launch confirmation block). Only herdr and tmux have an empirically
+# verified classifier able to reach a confident absent verdict; every other
+# backend returns 1 (not confirmed), so the guarded action never fires there.
+fm_backend_agent_confirmed_absent() {  # <backend> <target>
+  local backend=$1 target=$2 session pane
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr)
+      session=${target%%:*}
+      pane=${target#*:}
+      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
+      fm_backend_herdr_pane_confirmed_dead "$session" "$pane"
+      ;;
+    tmux)
+      [ "$(fm_backend_tmux_agent_alive "$target")" = dead ]
+      ;;
+    *) return 1 ;;
   esac
 }
 
@@ -769,10 +801,10 @@ fm_backend_process_state() {  # <backend> <target>
 # is worth polling to a failure verdict, so an unverifiable pair keeps the
 # pre-confirmation behaviour (print `spawned` without a liveness check) instead
 # of paying a full poll timeout that can never resolve.
-#   herdr - verifiable for ANY harness: fm_backend_herdr_agent_alive reads
-#           herdr's own agent registry (dead/no-agent/live), which is
-#           harness-agnostic (docs/herdr-backend.md "Agent liveness probe reuses
-#           the husk classifier").
+#   herdr - verifiable for ANY harness: fm_backend_herdr_agent_alive composes
+#           herdr's own agent-presence signal with a process probe, which is
+#           harness-agnostic (docs/herdr-backend.md "Agent liveness probe" /
+#           "0.7.4 four-way calibration").
 #   tmux  - verifiable for every harness whose CLI runs as its own attributable
 #           process name (claude, codex, opencode, grok), NOT for pi: pi execs
 #           into a generic `node` process that tmux's classifier can only report
