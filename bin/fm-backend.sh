@@ -812,18 +812,21 @@ fm_backend_process_state() {  # <backend> <target>
 # is worth polling to a failure verdict, so an unverifiable pair keeps the
 # pre-confirmation behaviour (print `spawned` without a liveness check) instead
 # of paying a full poll timeout that can never resolve.
-#   herdr - treated as verifiable, but the affirmative detection has been
-#           lab-measured only for claude / agent-start-registered agents. On
-#           0.7.4 the liveness read keys on herdr detecting an agent in the
-#           pane (an `agent_session`, or an `agent get` record); that detection
-#           is measured for claude and NOT yet measured for a non-claude
-#           harness. Keeping the gate on is safe rather than harness-agnostic:
-#           if herdr does not detect the launched agent, the composed reality
-#           reads `unknown` (a live but non-shell foreground process), so the
-#           spawn proceeds UNCONFIRMED WITH A WARNING - never a false failure
-#           and never a destructive re-send. So the confidence claim is scoped
-#           to claude here; broadening it is a lab-measurement follow-up, not an
-#           assumption (docs/herdr-backend.md "0.7.4 four-way calibration").
+#   herdr - verifiable, and measured to be so for a non-claude harness as well
+#           (2026-07-24, docs/herdr-backend.md "Measured 2026-07-24:
+#           registration paths and agent-exit lifecycle"). On 0.7.4 the
+#           liveness read keys on herdr detecting an agent in the pane, and
+#           herdr has two independent detection paths: the harness's own herdr
+#           integration reporting an `agent_session` (measured for claude,
+#           populated 0.7-1.1s after the launch command lands), and herdr's
+#           agent-detection manifests recognising the launch command's agent
+#           name, which yields an `agent get` record (measured for the `pi` and
+#           `codex` launch commands, populated within 0.7s). Both land far
+#           inside FM_SPAWN_CONFIRM_TIMEOUT. The gate stays fail-safe either
+#           way: if herdr detects nothing, the composed reality reads `unknown`
+#           (a live but non-shell foreground process), so the spawn proceeds
+#           UNCONFIRMED WITH A WARNING - never a false failure and never a
+#           destructive re-send.
 #   tmux  - verifiable for every harness whose CLI runs as its own attributable
 #           process name (claude, codex, opencode, grok), NOT for pi: pi execs
 #           into a generic `node` process that tmux's classifier can only report
