@@ -415,6 +415,32 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
 # three distinct real shapes (docs/herdr-backend.md, "0.7.4 four-way
 # calibration"): absent for a bare shell, present for a pane-typed live
 # claude, present for an `agent start`-registered agent.
+#
+# HARNESS SCOPE, measured 2026-07-24 in an isolated lab (docs/herdr-backend.md,
+# "Measured 2026-07-24: registration paths and agent-exit lifecycle"). The two
+# arms of the OR above are not belt-and-suspenders; they are herdr 0.7.4's two
+# INDEPENDENT registration paths, and which one fires depends on the harness:
+#
+#  - `agent_session` comes from the harness's own herdr integration reporting
+#    itself (`source: "herdr:<agent>"`), installed per harness by
+#    `herdr integration install <agent>`. Such a pane has NO detected agent
+#    label, so `pane get`'s `.agent` stays null and `agent get` answers
+#    agent_not_found. Measured for claude.
+#  - the `agent get` record comes from herdr's own agent-detection manifests
+#    (`~/.local/state/herdr/agent-detection/remote/*.toml`), which recognise
+#    the launch command's agent name on screen. Such a pane has `.agent` set
+#    (e.g. "pi", "codex") and NO `agent_session`. Measured for the `pi` and
+#    `codex` launch commands.
+#
+# So for a non-claude harness the `agent_session` arm never fires and the
+# `agent get` record is the load-bearing one. Keying on the record's EXISTENCE
+# is what makes this classifier harness-agnostic; keying on `agent_status`
+# would not be, because a manifest-detected pane whose screen matches no rule
+# falls back to a bare `idle` (`default_known_agent_idle_fallback`).
+#
+# Neither arm is evidence that the agent is still RUNNING - see
+# fm_backend_herdr_pane_agent_reality, which composes this with the process
+# probe, and which is the only thing any liveness caller may use.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code pid agent_session
   # 2>&1, not 2>/dev/null: verified empirically that real herdr writes an
@@ -603,12 +629,15 @@ EOF
 #     behind by an exited agent reads `live` too.
 #
 # The full cross product, with the real-world shape each cell describes
-# (verified 2026-07-21 against herdr 0.7.4 / protocol 16 except where noted -
-# see docs/herdr-backend.md "0.7.4 four-way calibration"):
+# (verified 2026-07-21 and 2026-07-24 against herdr 0.7.4 / protocol 16 except
+# where noted - see docs/herdr-backend.md "0.7.4 four-way calibration" and
+# "Measured 2026-07-24: registration paths and agent-exit lifecycle"):
 #
 #   agent_state | process_state | verdict | shape
 #   ------------|---------------|---------|---------------------------------
-#   live        | live          | live    | a real running agent
+#   live        | live (other)  | live    | a real running agent
+#   live        | live (shell)  | dead    | STALE record over the shell an
+#                                           exited agent left behind
 #   live        | dead          | dead    | replayed ghost: record, no process
 #   no-agent    | live (shell)  | dead    | bare shell: shell process, no agent
 #   no-agent    | live (other)  | unknown | a NON-shell process herdr did not
@@ -622,20 +651,51 @@ EOF
 #
 # Note the ghost row is why the metadata signal can never be trusted alone, and
 # the bare-shell row is why the process signal can never be trusted alone.
-# The `no-agent`/`live` split is the third leg: a live process with no agent
-# metadata is only safe to call `dead` (reclaimable, typeable) when it is a
-# BARE SHELL. If a non-shell process is running there, herdr simply has not
-# registered it as an agent - which on 0.7.4 can be a slow start, or a harness
-# whose agent herdr's detection does not recognize - and treating that as
-# `dead` would let a caller close its tab (fm_backend_herdr_create_task) or
-# type a launch command on top of it (fm-spawn's re-send). So it is `unknown`,
-# which every consumer refuses. See fm_backend_herdr_pane_foreground_is_shell.
+#
+# BOTH `live` process rows are decided by the same single principle, measured
+# 2026-07-24 in an isolated lab on 0.7.4: A BARE-SHELL FOREGROUND MEANS NO
+# AGENT IS RUNNING HERE, WHATEVER THE METADATA SAYS. The two rows differ only
+# in what the non-shell case means.
+#
+#  - `live`/`live`: herdr's `agent_session` is REPORTED by the harness's herdr
+#    integration (claude's is `~/.claude/hooks/herdr-agent-state.sh`, fired at
+#    SessionStart), and nothing releases it when the agent exits. Measured: a
+#    pane-typed claude that exits with `/exit`, and one killed with SIGKILL,
+#    BOTH leave `agent_session` populated for at least 300s while the pane's
+#    shell keeps running. Before this row existed, that shape composed to
+#    `live` and made `fm_backend_herdr_agent_alive` answer `alive` for an agent
+#    that is not running - so the session-start secondmate sweep would never
+#    respawn a crashed secondmate, and `tab_is_husk` could never reclaim the
+#    tab. A live agent does NOT present this shape: `pane process-info`
+#    reported the claude binary as the sole foreground process for 70s
+#    straight, including while claude had shell commands of its own running
+#    (its tool children never take the pane's foreground process group).
+#  - `no-agent`/`live`: a live process with no agent metadata is only safe to
+#    call `dead` (reclaimable, typeable) when it is a BARE SHELL. If a
+#    non-shell process is running there, herdr simply has not registered it as
+#    an agent - a slow start, or a harness whose agent herdr's detection does
+#    not recognize - and treating that as `dead` would let a caller close its
+#    tab (fm_backend_herdr_create_task) or type a launch command on top of it
+#    (fm-spawn's re-send). So it is `unknown`, which every consumer refuses.
+#
+# See fm_backend_herdr_pane_foreground_is_shell, the one accessor both rows
+# consult; it adds no probe, reading the `pane process-info` body already
+# fetched for process_state.
 fm_backend_herdr_pane_agent_reality() {  # <session> <pane_id>
   local session=$1 pane_id=$2 agent_state process_state
   agent_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
   process_state=$(fm_backend_herdr_pane_process_state "$session" "$pane_id")
   case "$agent_state/$process_state" in
-    live/live) printf 'live' ;;
+    live/live)
+      # Metadata claims an agent AND a process is running. A bare-shell
+      # foreground means the agent exited and left its shell (and, on 0.7.4, a
+      # never-released `agent_session`) behind; anything else is the agent.
+      if fm_backend_herdr_pane_foreground_is_shell "$session" "$pane_id"; then
+        printf 'dead'
+      else
+        printf 'live'
+      fi
+      ;;
     live/dead | no-agent/dead | dead/dead) printf 'dead' ;;
     no-agent/live)
       # A process is running but herdr sees no agent. Only a bare shell is
