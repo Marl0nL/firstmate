@@ -10,7 +10,7 @@ Originally verified against herdr 0.7.1, protocol 14, on macOS aarch64; the late
 On **0.7.4 / protocol 16** the `pane_agent_state` classification was measured to be inverted: replayed ghost panes read `live` and live crewmates read `no-agent`.
 That inversion has since been fixed by the 0.7.4 recalibration - see "0.7.4 four-way calibration (2026-07-21)" for the current, authoritative classifier behavior and its live four-way acceptance table, which supersedes the "Verified inversion (2026-07-20)" section below.
 Undated or 0.7.1-dated claims elsewhere below that were NOT re-run against 0.7.4 in that pass are marked inline where they matter; treat any unmarked, undated claim as 0.7.1-era and not re-confirmed against 0.7.4.
-Current real-herdr verification uses isolated `HERDR_SESSION` names plus the guarded teardown helper in `tests/herdr-test-safety.sh`.
+Current real-herdr verification uses isolated named sessions plus the guarded `bin/fm-herdr-lab.sh` lifecycle helper, either directly or through the compatibility wrappers in `tests/herdr-test-safety.sh`.
 A 2026-07-02 cleanup bug proved that `HERDR_SESSION` alone is not a safe way to target destructive session cleanup; see "Session targeting: the `--session` flag, not `HERDR_SESSION` alone" below.
 All real-herdr verification in this document uses isolated sessions and guarded cleanup; the captain's default herdr session and live tmux fleet were never intended targets.
 
