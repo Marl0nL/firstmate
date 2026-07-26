@@ -22,24 +22,18 @@ PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 
 fm_test_tmproot TMP_ROOT fm-check-trust
 
-# A state dir holding one check script that echoes a recognizable line and
-# records the fact that it ran, so "was it refused?" is observable, not inferred.
+# A state dir holding one unregistered check script, the starting point for the
+# library cases below. The watcher cases define their own bodies inline, because
+# there "did it execute?" has to be observable rather than inferred.
 make_state() {  # <name> [<id>]
   local name=$1 id=${2:-task} state
   state="$TMP_ROOT/$name/state"
   mkdir -p "$state"
-  cat > "$state/$id.check.sh" <<SH
+  cat > "$state/$id.check.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'ran\n' >> "$TMP_ROOT/$name/executed"
 printf 'merged: https://example.test/pr/1\n'
 SH
   printf '%s\n' "$state"
-}
-
-executed_count() {  # <name>
-  local f="$TMP_ROOT/$1/executed"
-  [ -f "$f" ] || { printf '0\n'; return 0; }
-  wc -l < "$f" | tr -d ' '
 }
 
 file_mode() { fm_check_file_mode "$1"; }
