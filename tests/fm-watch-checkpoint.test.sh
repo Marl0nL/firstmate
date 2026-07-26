@@ -55,7 +55,9 @@ test_check_uses_preserved_watcher_environment() {
 #!/usr/bin/env bash
 printf 'env check fired with FM_CHECK_INTERVAL=%s\n' "${FM_CHECK_INTERVAL:-missing}"
 SH
-  chmod +x "$home/state/env-check.check.sh"
+  # An unregistered check is refused by the watcher, so bind it first.
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" env-check >/dev/null \
+    || fail "could not register the check fixture"
   status=0
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
   expect_code 0 "$status" "check checkpoint exit"

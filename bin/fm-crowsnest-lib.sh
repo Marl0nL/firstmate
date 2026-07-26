@@ -18,10 +18,21 @@
 #   fmc_inbox_dir / fmc_outbox_dir - print the inbox / dry-run outbox dir paths
 #   fmc_wire_shim / fmc_unwire_shim - write / remove the watcher check shim
 # Callers must have FM_HOME (and FM_ROOT for the shim helpers) set first.
+# The shim helpers need bin/fm-check-lib.sh sourced too: an armed shim is only
+# useful once it is registered through the check trust path, and an unregistered
+# one is refused by the watcher rather than run.
 #
 # Opt-in is presence-gated exactly like X mode: inert unless config/crowsnest.env
 # sets a truthy CROWSNEST_ENABLED, so a home with no Crowsnest config behaves
 # exactly as before.
+
+# The shim helpers register through the check trust path, so pull in its owner
+# relative to this file. Guarded, so a caller that already sourced it (and a
+# standalone `. bin/fm-crowsnest-lib.sh` in a test) both work.
+if ! declare -F fm_custom_check_register >/dev/null 2>&1; then
+  # shellcheck source=bin/fm-check-lib.sh disable=SC1091
+  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-check-lib.sh"
+fi
 
 # Read the value of KEY from a .env-style file: last assignment wins; tolerates a
 # leading "export ", surrounding whitespace, and one layer of matching quotes.
@@ -160,11 +171,12 @@ fmc_outbox_dir() {
   printf '%s' "${FM_STATE_OVERRIDE:-$FM_HOME/state}/chat-outbox"
 }
 
-# Write the watcher check shim state/chat-watch.check.sh. The watcher runs it
-# each check cycle; its stdout becomes a check: wake. Idempotent - only rewrites
-# when the body changes. Needs FM_ROOT (for the poll script) and FM_HOME (baked
-# into the shim so it resolves the right home's inbox). Returns non-zero on a
-# write failure.
+# Write AND register the watcher check shim state/chat-watch.check.sh. The
+# watcher runs it each check cycle; its stdout becomes a check: wake. Idempotent
+# - only rewrites when the body changes, but always re-asserts registration so an
+# older home's shim is bound to the trust path on the next bootstrap. Needs
+# FM_ROOT (for the poll script) and FM_HOME (baked into the shim so it resolves
+# the right home's inbox). Returns non-zero on a write or registration failure.
 fmc_wire_shim() {
   local state shim body
   state="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -178,19 +190,19 @@ export FM_HOME=$(printf '%q' "$FM_HOME")
 exec $(printf '%q' "$FM_ROOT/bin/fm-crowsnest-poll.sh")
 EOF
 )
-  if [ -f "$shim" ] && [ "$(cat "$shim" 2>/dev/null)" = "$body" ]; then
-    chmod +x "$shim" 2>/dev/null || true
-    return 0
+  if [ ! -f "$shim" ] || [ "$(cat "$shim" 2>/dev/null)" != "$body" ]; then
+    ( umask 077; printf '%s\n' "$body" > "$shim" ) || return 1
   fi
-  printf '%s\n' "$body" > "$shim" || return 1
-  chmod +x "$shim" 2>/dev/null || true
+  fm_custom_check_register "$state" chat-watch
 }
 
-# Remove the watcher check shim. Returns 0 when it is gone afterwards.
+# Remove the watcher check shim and its trust record. Returns 0 when both are
+# gone afterwards; a surviving record must never outlive its check.
 fmc_unwire_shim() {
   local state shim
   state="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
   shim="$state/chat-watch.check.sh"
   rm -f "$shim" 2>/dev/null || true
-  [ ! -e "$shim" ]
+  fm_custom_check_trust_remove "$state" chat-watch || true
+  [ ! -e "$shim" ] && [ ! -e "$state/chat-watch.check-trust" ]
 }

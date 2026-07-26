@@ -419,6 +419,9 @@ test_bootstrap_activates_on_env_token() {
   assert_present "$home/state/x-watch.check.sh" "bootstrap must drop the check shim"
   [ -x "$home/state/x-watch.check.sh" ] || fail "the check shim must be executable"
   assert_grep "fm-x-poll.sh" "$home/state/x-watch.check.sh" "the shim must exec the poll script"
+  # The watcher refuses an unregistered check, so arming must also register it.
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" --verify x-watch >/dev/null \
+    || fail "bootstrap must register the check shim it arms"
   assert_present "$home/config/x-mode.env" "bootstrap must drop the cadence config"
   assert_grep "export FM_CHECK_INTERVAL=30" "$home/config/x-mode.env" "cadence must be 30s"
   # Cadence inheritance: sourcing the config exports the 30s interval to a child,
@@ -433,7 +436,7 @@ test_bootstrap_activates_on_env_token() {
   FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
   sum2=$(cat "$home/state/x-watch.check.sh" "$home/config/x-mode.env" | shasum)
   [ "$sum1" = "$sum2" ] || fail "bootstrap X-mode setup must be idempotent"
-  n=$(find "$home/state" -maxdepth 1 -name 'x-watch*' | wc -l | tr -d ' ')
+  n=$(find "$home/state" -maxdepth 1 -name 'x-watch.check.sh' | wc -l | tr -d ' ')
   [ "$n" = "1" ] || fail "bootstrap must not duplicate the shim (found $n)"
   pass "bootstrap activates X mode from an .env token, idempotently"
 }

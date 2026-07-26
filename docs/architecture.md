@@ -43,7 +43,7 @@ Cross-home reads validate the seeded identity and operational-directory boundari
 A bounded direct-report terminal tail can help diagnose a mismatch by showing that historical parent wording is still visible, but it is untrusted supplemental evidence because scrollback, prompts, copied output, idle shells, and agent prose are not durable state.
 The snapshot strips control sequences, retains only capture metadata and literal event-corroboration flags, and never lets terminal evidence override a valid structured classification.
 The default path remains local-only; live GitHub enrichment exists only behind the bearings `--include-prs` opt-in.
-Optional X mode rides the same check path: the locked session-start bootstrap step drops a local `state/x-watch.check.sh` shim only after the user opts in with `FMX_PAIRING_TOKEN`, and non-X homes keep the default watcher behavior.
+Optional X mode rides the same check path: the locked session-start bootstrap step drops a local `state/x-watch.check.sh` shim - registered through the check trust path in the same operation - only after the user opts in with `FMX_PAIRING_TOKEN`, and non-X homes keep the default watcher behavior.
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude and Grok use background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
@@ -68,6 +68,23 @@ Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
 `fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
+
+## Watcher checks are authenticated
+
+The watcher's slow-poll mechanism EXECUTES `state/<id>.check.sh` on every check cycle, which makes an unregistered or group-writable check file a code-execution path into the supervisor itself.
+A check therefore runs only when it is registered: the home holds a trust record `state/<id>.check-trust` binding the check to its exact sha256, and both files must be private single-link regular files on the state directory's own device, at mode 700 for the check and 600 for the record.
+What actually executes is a private mode-600 snapshot taken after the hash matched and re-verified against it, so a rewrite racing the verification cannot substitute the bytes that run.
+`bin/fm-check-lib.sh` owns the record format and the verification rules.
+
+A check that fails any of those tests is refused without execution, and the refusal is loud: the watcher surfaces `check: rejected unauthenticated state checks: <paths>` as an actionable wake naming the files and the remedy.
+A new or changed set of refusals wakes immediately and an unchanged set re-surfaces on a bounded cadence, so a refusal can neither rot unnoticed nor starve the checks that are still authenticated.
+This is deliberately noisy: a check that quietly stops running is worse than the risk it closes.
+
+Every producer registers in the same operation that arms a shim, so arming and registering are never separable steps: `bin/fm-pr-check.sh` for a task's merge poll, and the locked session-start bootstrap step for the X-mode, Crowsnest, and usage-monitor shims.
+Registration is re-asserted on each bootstrap, so a shim written by an older firstmate is adopted rather than starting to fail.
+A check registered by hand - or one refused after an interrupted write - is bound with `bin/fm-check-register.sh <id>`, whose `--list` reports every check in the home and its trust state.
+Registration asserts that the file's current bytes are intended, so read the file before running it.
+Anything that removes a check removes its trust record too, so a later check reusing the id can never inherit a registration nobody made for it.
 
 ## Runtime session backends
 
@@ -209,7 +226,7 @@ The Crowsnest is the Google Chat analogue of X mode: an opt-in, committed two-wa
 It is inert unless the home's gitignored `config/crowsnest.env` sets a truthy `CROWSNEST_ENABLED`.
 A Chat message routed to the `firstmate` agent runs the thin relay `bin/fm-crowsnest-relay.sh`, which stashes it to `state/chat-inbox/<id>.json`, enqueues a durable `chat-mention <id>` check wake, and returns an immediate async ack, never launching a parallel fleet-aware agent.
 The one live session drains that inbox on its own turn through the `fmc-respond` agent-only skill and posts the real answer back with `bin/fm-crowsnest-post.sh`, which reuses the backend's own `ChatClient` rather than reinventing OAuth.
-Like X mode, it rides the existing watcher check mechanism with no change to the watcher, wake queue, arm wrapper, or afk daemon: the locked session-start bootstrap step only wires or unwires the local check shim `state/chat-watch.check.sh`, while registering the agent and autostarting the `local-agents-chat` backend reach outside the home and stay explicit operator actions via `bin/fm-crowsnest.sh`.
+Like X mode, it rides the existing watcher check mechanism with no change to the watcher, wake queue, arm wrapper, or afk daemon: the locked session-start bootstrap step only wires or unwires the local check shim `state/chat-watch.check.sh` - binding it to the check trust path in the same operation - while registering the agent and autostarting the `local-agents-chat` backend reach outside the home and stay explicit operator actions via `bin/fm-crowsnest.sh`.
 The single-threaded supervision guarantee is the whole point; full detail is in [docs/crowsnest.md](crowsnest.md).
 
 ## Project memory belongs to projects
