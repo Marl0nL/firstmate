@@ -969,6 +969,35 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   pass "a trailing resolved: event does not corrupt state render (idle stays idle; done stays done)"
 }
 
+# The durable captain-held transfer (bin/fm-decision-hold.sh) is bookkeeping like
+# resolved:, but it REHOMES a decision instead of CLOSING it, so the revealed real
+# state verb still describes the crew - whatever that verb is. A crew parked on a
+# needs-decision is still parked once the decision gains a durable backlog owner, and
+# a finished scout is still done. Rendering `unknown` in either case would hand a
+# healthy crew to the stale path as a possible wedge, which is exactly the failure
+# our resolved-after-done fix closed for the sibling verb.
+test_captain_held_transfer_preserves_revealed_state() {
+  reset_fakes
+  local d out; d=$(new_case captain-held-state)
+  mkdir -p "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/mate.meta" "window=fm:fm-mate" "worktree=$d/wt" "kind=secondmate" "home=$d/wt"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  printf 'needs-decision [key=race]: pick subscribe order\ncaptain-held [key=race]: tracked by mate-decision-race\n' \
+    > "$d/state/mate.status"
+  out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "state: parked" "a transferred decision must leave the crew parked, not unknown"
+  assert_contains "$out" "source: status-log" "the revealed needs-decision: is a real status-log state source"
+  assert_not_contains "$out" "tracked by" "the transfer bookkeeping prose must not leak into the detail"
+  printf 'done: report at data/mate/report.md\ncaptain-held [key=race]: tracked by mate-decision-race\n' \
+    > "$d/state/mate.status"
+  out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "state: done" "a finished scout must stay done after its decision is transferred"
+  assert_contains "$out" "report.md" "the revealed done: line carries its own detail"
+  pass "a captain-held transfer preserves the revealed state verb instead of reading unknown"
+}
+
 test_dead_window_ignores_stale_status_log() {
   reset_fakes
   local d; d=$(new_case dead-window)
@@ -1179,6 +1208,7 @@ test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
+test_captain_held_transfer_preserves_revealed_state
 test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step

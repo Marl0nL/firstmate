@@ -738,6 +738,31 @@ test_local_only_truly_unpushed_refuses() {
   pass "local-only worktree with truly unpushed work is refused (safety preserved)"
 }
 
+# A durable captain decision must never become a way around the unlanded-work
+# refusal. The decision gate (bin/fm-decision-hold.sh verify) is an ADDITIONAL scout
+# gate layered after the report check; it can only ever refuse more, never allow
+# more. A ship task with unpushed work stays refused whether or not its decision
+# inventory is satisfied, and a satisfied inventory is not consulted on the ship path.
+test_decision_inventory_never_bypasses_unlanded_refusal() {
+  local case_dir rc
+  case_dir=$(make_case decision-inventory-ship)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+  # A fully satisfied, empty decision inventory - the most permissive shape there is.
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "decision-inventory-ship: unlanded ship work must still refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "decision-inventory-ship: no REFUSED line in stderr"
+  grep -q "unresolved-decision completion gate" "$case_dir/stderr" \
+    && fail "decision-inventory-ship: the scout decision gate ran on a ship task"
+  pass "a satisfied decision inventory never bypasses the unlanded-work refusal"
+}
+
 test_local_only_merged_to_local_main_allows() {
   local case_dir rc
   case_dir=$(make_case merged-main)
@@ -1441,6 +1466,7 @@ test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
+test_decision_inventory_never_bypasses_unlanded_refusal
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses

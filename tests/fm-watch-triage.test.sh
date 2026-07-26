@@ -191,6 +191,45 @@ EOF
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 
+# The durable captain-held transfer verb (bin/fm-decision-hold.sh) is DECISION
+# BOOKKEEPING, exactly like resolved:. It closes the duplicate status copy in the
+# keyed fold, and - the regression this guards - must be SKIPPED by the terminal-state
+# input. Without that skip, appending the transfer to a finished scout's log makes its
+# last real state verb read as non-terminal, and the stale seam false-wedges an
+# idle-but-done pane: the same defect our resolved-after-done fix closed.
+test_captain_held_bookkeeping_classifier() {
+  local dir state open
+  dir=$(make_case classify-captain-held); state="$dir/state"
+  status_line_is_captain_held "captain-held [key=route]: tracked by scout-x-decision-route" \
+    || fail "status_line_is_captain_held missed a transfer line"
+  status_line_is_captain_held "done: b" && fail "status_line_is_captain_held matched a state line"
+  status_line_is_bookkeeping "resolved: closed [key=q1]" || fail "resolved: is bookkeeping"
+  status_line_is_bookkeeping "captain-held [key=q1]: tracked by x-decision-q1" \
+    || fail "captain-held: is bookkeeping"
+  status_line_is_bookkeeping "needs-decision [key=q1]: choose" && fail "a real decision event is not bookkeeping"
+
+  printf 'needs-decision [key=route]: choose north or south\ndone: report at data/scout-x/report.md\ncaptain-held [key=route]: tracked by scout-x-decision-route\n' \
+    > "$state/held.status"
+  open=$(status_open_decisions "$state/held.status")
+  [ -z "$open" ] || fail "a verified captain-held transfer did not close the status copy: $open"
+  [ "$(last_state_status_line "$state/held.status")" = "done: report at data/scout-x/report.md" ] \
+    || fail "last_state_status_line did not skip the captain-held transfer to reach done:"
+  stale_is_terminal "sess:fm-held" "$state" \
+    || fail "a finished scout whose decision was transferred no longer reads terminal"
+  printf 'needs-decision [key=route]: choose north or south\ncaptain-held [key=route]: tracked by live-decision-route\n' \
+    > "$state/live.status"
+  [ "$(last_state_status_line "$state/live.status")" = "needs-decision [key=route]: choose north or south" ] \
+    || fail "last_state_status_line did not reveal a still-parked crew's real state verb"
+
+  # A transfer for a DIFFERENT key must not close an unrelated open decision.
+  printf 'needs-decision [key=a]: choose a\nneeds-decision [key=b]: choose b\ncaptain-held [key=a]: tracked by x-decision-a\n' \
+    > "$state/two.status"
+  open=$(status_open_decisions "$state/two.status")
+  printf '%s' "$open" | grep -F $'b\t' >/dev/null || fail "a keyed transfer closed the wrong decision"
+  printf '%s' "$open" | grep -F $'a\t' >/dev/null && fail "the transferred key stayed open"
+  pass "the captain-held transfer verb closes only its own status copy and never masks the real state verb"
+}
+
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
@@ -1326,6 +1365,7 @@ test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
+test_captain_held_bookkeeping_classifier
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier

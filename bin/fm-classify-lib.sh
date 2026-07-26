@@ -59,10 +59,13 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
-# The resolution verb that CLOSES a keyed decision opened by needs-decision or
-# blocked. See status_open_decisions below for the full durable-decision contract;
-# this is the one owner of the verb literal, overridable via FM_CLASSIFY_RESOLVE_VERB.
+# The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
+# status decision opened by needs-decision or blocked. See status_open_decisions
+# below for the status-fold contract. The transfer verb is written only after
+# fm-decision-hold.sh has verified the corresponding captain-held backlog item.
+# Both are DECISION BOOKKEEPING, never state (status_line_is_bookkeeping below).
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
+FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
 # Return the last non-blank line of a status file (empty if missing/blank).
 last_status_line() {
@@ -81,9 +84,31 @@ status_line_is_resolved() {  # <status-line>
   [ "$(status_line_verb "$line")" = "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" ]
 }
 
+# 0 if a status line's leading verb is the durable-backlog-transfer verb
+# (captain-held [key=...]: tracked by <hold-id>), appended by
+# bin/fm-decision-hold.sh once a status decision has a verified captain-held
+# backlog owner. FM_CLASSIFY_CAPTAIN_HELD_VERB overrides the literal.
+status_line_is_captain_held() {  # <status-line>
+  local line=$1
+  [ -n "$line" ] || return 1
+  [ "$(status_line_verb "$line")" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
+}
+
+# 0 if a status line is DECISION BOOKKEEPING rather than a state event: it records
+# that a keyed decision CLOSED (resolved:) or MOVED to its durable backlog owner
+# (captain-held:), never that the task itself changed state. This is the one owner
+# of that distinction, so every consumer that must look past bookkeeping to the
+# real state verb - last_state_status_line here, bin/fm-crew-state.sh's revealed
+# terminal branch - stays in step as the bookkeeping vocabulary grows.
+status_line_is_bookkeeping() {  # <status-line>
+  local line=$1
+  status_line_is_resolved "$line" || status_line_is_captain_held "$line"
+}
+
 # Return the last non-blank status line that carries a REAL STATE verb, scanning
-# backward past trailing `resolved:` bookkeeping lines (empty if the file is
-# missing/blank or holds only resolved: lines). This is the terminal-state input:
+# backward past trailing DECISION BOOKKEEPING lines - `resolved:` and the durable
+# `captain-held:` transfer (status_line_is_bookkeeping) - and returning empty if
+# the file is missing/blank or holds only bookkeeping. This is the terminal-state input:
 # AGENTS.md section 11 tells a crew that OPENED a keyed decision or blocker to
 # durably CLOSE it with a `resolved:` line, so a crew that finished correctly ends
 # its log
@@ -91,19 +116,23 @@ status_line_is_resolved() {  # <status-line>
 #     resolved: <how the blocker cleared> [key=...]
 # A `resolved:` line records that a KEY closed, NOT that the TASK changed state, so
 # reading the raw last line (last_status_line) misreads that finished log as
-# non-terminal and false-wedges an idle-but-done pane. Skipping only resolved:
-# lines recovers the real state verb: `done:` then `resolved:` -> `done:` (terminal);
-# `working:` then `resolved:` -> `working:` (NOT terminal), because a crew can close a
-# blocker MID-TASK and keep working. This is deliberately verb-only, not the keyed
-# fold: it answers "what is the last real state verb", which is exactly the
-# terminal/stale question. Current-crew-state readers that must honor which key a
-# resolve CLOSED use the keyed fold (status_open_decisions) instead.
+# non-terminal and false-wedges an idle-but-done pane. The durable `captain-held:`
+# transfer is the same shape: firstmate appends it to a FINISHED scout's log when the
+# decision moves to its captain-held backlog owner, so it must be skipped for exactly
+# the same reason or adopting durable holds would re-open that false-wedge.
+# Skipping only bookkeeping lines recovers the real state verb: `done:` then
+# `resolved:`/`captain-held:` -> `done:` (terminal); `working:` then `resolved:` ->
+# `working:` (NOT terminal), because a crew can close a blocker MID-TASK and keep
+# working. This is deliberately verb-only, not the keyed fold: it answers "what is
+# the last real state verb", which is exactly the terminal/stale question. Current-
+# crew-state readers that must honor which key a resolve CLOSED use the keyed fold
+# (status_open_decisions) instead.
 last_state_status_line() {  # <status-file>
   local f=$1 line keep=''
   [ -e "$f" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
-    status_line_is_resolved "$line" && continue
+    status_line_is_bookkeeping "$line" && continue
     keep=$line
   done < "$f"
   printf '%s' "$keep"
@@ -140,9 +169,10 @@ status_is_paused() {  # <status-line>
 # (last_status_line above) cannot represent "an earlier decision is still open
 # after a later, unrelated event": a subsequent done/paused/working line silently
 # masks a still-open needs-decision. status_open_decisions is the ONE authoritative
-# statement of the contract that fixes this - a needs-decision/blocked line OPENS a
-# keyed decision, and ONLY an explicit resolution referencing that key CLOSES it; a
-# later unrelated terminal line never clears an open captain decision.
+# statement of the status-fold contract that fixes this - a needs-decision/blocked
+# line OPENS a keyed decision, and only an explicit resolution or a verified
+# captain-held backlog transfer referencing that key CLOSES it; a later unrelated
+# terminal line never clears an open captain decision.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
 # format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
@@ -201,9 +231,10 @@ EOF
 # is the durable open-set the fleet snapshot and any point-in-time consumer must use
 # instead of trusting the last status line.
 status_open_decisions() {  # <status-file>
-  local f=$1 line verb key note resolve open='' stripped
+  local f=$1 line verb key note resolve held open='' stripped
   [ -f "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
@@ -216,7 +247,7 @@ status_open_decisions() {  # <status-file>
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
         ;;
-      "$resolve")
+      "$resolve"|"$held")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         ;;
@@ -235,8 +266,9 @@ status_open_decisions() {  # <status-file>
 # It is never authoritative current crew state, and consumers must not let an open
 # phase outrank a structured home snapshot or fm-crew-state result.
 _fm_status_open_activities_stream() {
-  local line verb key note resolve open='' stripped pause
+  local line verb key note resolve held open='' stripped pause
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     stripped=${line//[[:space:]]/}
@@ -250,7 +282,7 @@ _fm_status_open_activities_stream() {
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
         ;;
-      done|failed|needs-decision|blocked|"$resolve")
+      done|failed|needs-decision|blocked|"$resolve"|"$held")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         ;;
