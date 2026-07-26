@@ -557,11 +557,11 @@ if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
 fi
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real
-# run-state. A decision-closing event - resolved: (fm-classify-lib.sh's
-# FM_CLASSIFY_RESOLVE_VERB), and any future decision-only sibling - is NOT a state:
-# it exists solely to CLOSE a keyed decision in the durable fold, so a trailing
-# resolved: must never become the current state or leak its resolution prose as the
-# detail. Skipping it lets a just-resolved idle crew (typically a secondmate, which
+# run-state. A decision BOOKKEEPING event - resolved: and the durable captain-held:
+# transfer, both owned by fm-classify-lib.sh's status_line_is_bookkeeping - is NOT a
+# state: it exists solely to CLOSE or REHOME a keyed decision in the durable fold, so
+# a trailing bookkeeping line must never become the current state or leak its prose as
+# the detail. Skipping it lets a just-resolved idle crew (typically a secondmate, which
 # has no busy check above) fall through to the idle default instead of rendering
 # `unknown` with the resolution note as `doing`. map_log_state is the single owner of
 # the verb->state mapping (including the configurable paused verb), so reusing its
@@ -571,11 +571,12 @@ if [ -n "$LOG_VERB" ]; then
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi
-  # LOG_STATE is unknown here. When the raw last line is a resolved: bookkeeping
-  # entry, look PAST it (last_state_status_line) to the real state verb. A crew that
-  # FINISHED and then durably closed a blocker key ends its log
-  #   done: PR ...
-  #   resolved: <blocker cleared> [key=...]
+  # LOG_STATE is unknown here. When the raw last line is a BOOKKEEPING entry, look
+  # PAST it (last_state_status_line) to the real state verb. A crew that FINISHED and
+  # then durably closed a blocker key, or whose finished report's open decision was
+  # transferred to its captain-held backlog owner, ends its log
+  #   done: PR ... | done: report at data/<id>/report.md
+  #   resolved: <blocker cleared> [key=...] | captain-held [key=...]: tracked by <hold>
   # and must still read as its terminal state, not `unknown - no source`, which the
   # stale path would then false-wedge. Only a TERMINAL revealed verb (done/failed) is
   # promoted: a resolved: that CLOSED the preceding blocked:/needs-decision:/working:
@@ -583,7 +584,20 @@ if [ -n "$LOG_VERB" ]; then
   # wrong - it falls through to the idle default below exactly as before. This is the
   # verb-only complement to the keyed fold: which key a resolve closes stays owned by
   # fm-classify-lib.sh's status_open_decisions, consulted in the run-step path above.
-  if status_line_is_resolved "$LOG_LINE"; then
+  # The two bookkeeping verbs reveal the same line but mean different things about it.
+  # `resolved:` CLOSED the key, so the state it was attached to is genuinely over and
+  # only a TERMINAL revealed verb may be promoted (see above). `captain-held:` REHOMES
+  # the key to its durable backlog owner and changes nothing about what the crew is
+  # doing: a crew parked on a needs-decision is still parked once that decision gains a
+  # durable owner, so its revealed real state verb stands as-is. Reporting `unknown`
+  # there would hand a legitimately parked crew to the stale path as a possible wedge.
+  if status_line_is_captain_held "$LOG_LINE"; then
+    REVEALED=$(last_state_status_line "$LOG")
+    REVEALED_STATE=$(map_log_state "$REVEALED")
+    if [ "$REVEALED_STATE" != unknown ]; then
+      emit "$REVEALED_STATE" status-log "$(status_line_note "$REVEALED")"
+    fi
+  elif status_line_is_resolved "$LOG_LINE"; then
     REVEALED=$(last_state_status_line "$LOG")
     case "$(map_log_state "$REVEALED")" in
       done|failed)
