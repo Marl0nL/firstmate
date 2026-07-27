@@ -236,6 +236,19 @@ SH
   printf '%s\n' "$dir"
 }
 
+# Arm a merge monitor the way bin/fm-pr-check.sh leaves one: the check file plus its
+# trust record. REGISTRATION is what makes it armed - crew_is_parked_awaiting_merge
+# requires it, and the watcher refuses to execute an unregistered, tampered, or
+# non-private check at all (bin/fm-check-lib.sh) - so a bare `: > <id>.check.sh`
+# fixture models a REFUSED monitor, not a parked crew. Shared by the watcher and
+# away-mode daemon suites so both consumers of the shared classifier arm it alike.
+arm_registered_check() {  # <state> <id>
+  local state=$1 id=$2
+  : > "$state/$id.check.sh"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+    || fail "could not register the check fixture for $id"
+}
+
 wait_for_exit() {
   local pid=$1 limit=${2:-50} i=0
   while [ "$i" -lt "$limit" ]; do
