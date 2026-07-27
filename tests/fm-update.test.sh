@@ -55,6 +55,12 @@ new_world() {
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
 
+  # Record the instruction baseline the way session start does: the commit the
+  # running session loaded is the local main HEAD at this moment (before any
+  # origin bump). fm-update.sh's reread decision compares the current on-disk
+  # surface against this, not against what it finds when it runs.
+  printf '%s\n' "$(git -C "$w/main" rev-parse HEAD)" > "$w/home/state/.instr-base"
+
   printf '%s\n' "$w"
 }
 
@@ -291,6 +297,59 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+# --- T12: a home fleet-sync already fast-forwarded still reports a reread -----
+# The defect. A teardown fleet-sync can fast-forward this home (the shared default
+# branch of a linked worktree) AFTER the session loaded its instructions but
+# BEFORE the updater runs. ff_target's own before/after then sees no movement, so
+# the OLD logic reported reread-firstmate: no while the session kept running the
+# stale surface it loaded. The reread must be decided against the loaded baseline.
+test_reread_detected_when_fleet_sync_already_advanced() {
+  local w out
+  w=$(new_world t12)
+  bump_origin "$w" instr
+  # Simulate the teardown fleet-sync landing the merged commit on this home's
+  # shared default branch before /updatefirstmate runs: fetch, then fast-forward
+  # local main to the new tip. The recorded baseline still points at the old
+  # commit the running session loaded.
+  git -C "$w/main" fetch -q origin
+  git -C "$w/main" merge --ff-only origin/main >/dev/null 2>&1
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: already current" \
+    "the updater's own fast-forward is a no-op (fleet-sync already advanced this home)"
+  assert_contains "$out" "reread-firstmate: yes" \
+    "reread is still required: the loaded surface moved under the running session"
+  pass "T12 reread is detected even when a fleet-sync advanced the home before the updater ran"
+}
+
+# --- T13: a missing baseline is conservative (reread yes) --------------------
+test_missing_baseline_is_conservative() {
+  local w out
+  w=$(new_world t13)
+  rm -f "$w/home/state/.instr-base"   # e.g. a session that predates the baseline record
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: already current" "nothing to fast-forward"
+  assert_contains "$out" "reread-firstmate: yes" \
+    "a missing baseline errs toward a (cheap) reread rather than a silent, dangerous no"
+  pass "T13 a missing loaded baseline conservatively reports a reread"
+}
+
+# --- T14: no surface movement since load reports no reread -------------------
+test_no_movement_no_reread() {
+  local w out
+  w=$(new_world t14)
+  # No origin bump: local main, origin, and the recorded baseline are all c1.
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: already current" "nothing to fast-forward"
+  assert_contains "$out" "reread-firstmate: no" "an unchanged instruction surface needs no reread"
+  pass "T14 an unchanged instruction surface reports no reread"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -300,5 +359,8 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_reread_detected_when_fleet_sync_already_advanced
+test_missing_baseline_is_conservative
+test_no_movement_no_reread
 
 echo "# all fm-update tests passed"

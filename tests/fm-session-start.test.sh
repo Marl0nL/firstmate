@@ -329,6 +329,54 @@ EOF
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }
 
+# --- instruction baseline: recorded on the locked path ----------------------
+
+test_records_instruction_baseline_on_locked_start() {
+  local rec root home fakebin
+  rec=$(new_world instr-base-locked)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  [ ! -e "$home/state/.instr-base" ] || fail "precondition: no baseline before session start"
+  run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+
+  [ -f "$home/state/.instr-base" ] || fail "session start did not record the instruction baseline"
+  [ "$(cat "$home/state/.instr-base")" = "$(git -C "$root" rev-parse HEAD)" ] \
+    || fail "recorded baseline is not the loaded (root HEAD) commit"
+  pass "session start records the loaded instruction baseline on the locked path"
+}
+
+# --- instruction baseline: NOT recorded on the read-only path ----------------
+# A read-only second session must not clobber the lock holder's baseline (and it
+# never runs the updater), so it must leave the baseline untouched.
+test_read_only_start_does_not_record_baseline() {
+  local rec root home fakebin holder_pid out status
+  rec=$(new_world instr-base-readonly)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  expect_code 0 "$status" "fm-session-start.sh must exit 0 even on a lock refusal"
+  assert_contains "$out" "READ-ONLY SESSION" "precondition: this must be the read-only path"
+  [ ! -e "$home/state/.instr-base" ] \
+    || fail "a read-only second session must not write the baseline (would clobber the lock holder's)"
+  pass "the read-only path does not record an instruction baseline"
+}
+
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
@@ -865,6 +913,8 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_records_instruction_baseline_on_locked_start
+test_read_only_start_does_not_record_baseline
 test_lock_refusal_read_only_path
 test_lock_refusal_unidentifiable_harness
 test_output_ordering_diagnostics_lead

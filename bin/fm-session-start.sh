@@ -83,6 +83,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-usage-lib.sh
 . "$SCRIPT_DIR/fm-usage-lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -177,6 +179,17 @@ if [ "$LOCK_RC" -ne 0 ]; then
     fi
     printf '%s\n' "$BAR"
   }
+fi
+
+# --- 1b. instruction baseline ------------------------------------------
+# Record the commit whose AGENTS.md / bin/ / .agents/skills this session just
+# loaded, BEFORE bootstrap's fleet sync can fast-forward this home underneath the
+# running session. fm-update.sh and the secondmate nudge sweep compare against
+# this baseline, so a home later advanced by a teardown fleet-sync is still told
+# to re-read (see bin/fm-ff-lib.sh). Locked path only: a read-only second session
+# must not clobber the lock holder's baseline, and it never runs the updater.
+if [ "$READ_ONLY" -eq 0 ]; then
+  record_instr_base "$FM_ROOT" "$STATE" || true
 fi
 
 # --- 2. bootstrap --------------------------------------------------------

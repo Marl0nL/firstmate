@@ -285,6 +285,57 @@ test_sweep_nudge_requires_instruction_change() {
   pass "T7 sweep nudges on a real instruction change only, but still fast-forwards"
 }
 
+# --- T7a: the one-level-down defect - an already-current home whose running -----
+# secondmate loaded an older surface is still nudged. A launch sync or an earlier
+# sweep can leave a home AT the primary HEAD (this sweep's ff is a no-op) while the
+# secondmate process is still executing the instructions it loaded at an older
+# commit. Keying the nudge on this sweep's ff movement misses that drift; keying it
+# on the secondmate's recorded loaded baseline catches it.
+test_sweep_nudges_current_home_when_loaded_surface_drifted() {
+  local w c1 c2 base
+  w=$(new_world sweep-drift)
+  c1=$(head_of "$w/main")
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  base=$(primary_head_commit "$w/main")     # = c2
+  add_sm_worktree "$w" sm-drift "$c2"       # home already AT the primary HEAD
+  mkdir -p "$w/sm-drift/state"
+  printf '%s\n' "$c1" > "$w/sm-drift/state/.instr-base"   # but it LOADED the c1 surface
+
+  FM_ROOT="$w/main" FM_HOME="$w/home"
+  FF_NUDGE_WINDOWS=""
+  FF_SEEN_HOMES=""
+  sweep_live_secondmate_metas "$w/home/state" "$base" yes >/dev/null
+
+  assert_contains "$FF_NUDGE_WINDOWS" "fm-sm-drift" \
+    "an already-current home whose running secondmate loaded an older surface is still nudged"
+  pass "T7a sweep nudges an already-current home when the loaded surface drifted"
+}
+
+# --- T7b: a home whose loaded baseline matches the on-disk surface is NOT nudged -
+# The complement of T7a and the guard against re-nudge storms: once the loaded
+# baseline equals the current instruction surface, no nudge fires even though a
+# stale baseline commit differs by non-instruction files.
+test_sweep_skips_current_home_when_loaded_surface_matches() {
+  local w c1 base
+  w=$(new_world sweep-nodrift)
+  c1=$(head_of "$w/main")
+  bump_primary "$w" readme               # only README moved since c1
+  base=$(primary_head_commit "$w/main")  # = c2 (readme-only)
+  add_sm_worktree "$w" sm-ok "$base"
+  mkdir -p "$w/sm-ok/state"
+  printf '%s\n' "$c1" > "$w/sm-ok/state/.instr-base"   # loaded c1; watched surface unchanged since
+
+  FM_ROOT="$w/main" FM_HOME="$w/home"
+  FF_NUDGE_WINDOWS=""
+  FF_SEEN_HOMES=""
+  sweep_live_secondmate_metas "$w/home/state" "$base" yes >/dev/null
+
+  [ -z "$FF_NUDGE_WINDOWS" ] \
+    || fail "an unchanged watched surface must not nudge, got: '$FF_NUDGE_WINDOWS'"
+  pass "T7b sweep does not nudge when the loaded watched surface still matches disk"
+}
+
 # --- T8: bootstrap sweeps live homes, nudges only the real instruction change -
 make_fake_toolchain() {
   local dir=$1 fakebin
@@ -772,6 +823,36 @@ SH
   pass "T8c a live herdr secondmate (no-agent metadata but a live process) is left untouched, never killed or respawned"
 }
 
+# --- T8g: bootstrap nudges a drifted already-current home, then de-dupes -------
+# End-to-end mirror of T7a through fm-bootstrap.sh, plus the de-dupe: a successful
+# nudge advances the secondmate's loaded baseline to the surface it was told to
+# read, so the NEXT session-start sweep does not re-nudge an already-caught-up
+# secondmate. Without that, this automatic sweep would re-nudge on every start.
+test_bootstrap_nudges_drifted_current_home_then_dedupes() {
+  local w c1 c2 fakebin out out2
+  w=$(new_world nudge-dedupe)
+  c1=$(head_of "$w/main")
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c2"                    # already AT the primary HEAD
+  mkdir -p "$w/sm-instr/state"
+  printf '%s\n' "$c1" > "$w/sm-instr/state/.instr-base"  # loaded the older c1 surface
+  fakebin=$(make_fake_toolchain "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
+    "an already-current home with a drifted loaded surface is nudged"
+  [ "$(cat "$w/sm-instr/state/.instr-base")" = "$c2" ] \
+    || fail "a successful nudge should advance the loaded baseline to the primary HEAD"
+
+  out2=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_not_contains "$out2" "nudged fm-sm-instr" \
+    "a second sweep must not re-nudge once the loaded baseline matches disk"
+  pass "T8g bootstrap nudges a drifted already-current secondmate once, then de-dupes"
+}
+
 # --- T9: bootstrap surfaces a skipped dirty live secondmate home --------------
 test_bootstrap_sweep_surfaces_skipped_home() {
   local w c1 base before fakebin out skip_line
@@ -955,7 +1036,10 @@ test_ff_diverged
 test_ff_inflight_feature_branch
 test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
+test_sweep_nudges_current_home_when_loaded_surface_drifted
+test_sweep_skips_current_home_when_loaded_surface_matches
 test_bootstrap_sweep_nudges_only_instruction_change
+test_bootstrap_nudges_drifted_current_home_then_dedupes
 test_bootstrap_nudge_send_uses_state_override
 test_bootstrap_nudge_retry_rejects_malformed_marker_id
 test_bootstrap_nudge_failure_records_retry_marker

@@ -222,6 +222,66 @@ changed_instr() {
   printf '%s' "$out"
 }
 
+# --- loaded-instruction baseline -------------------------------------------
+# A running firstmate (primary or secondmate) loads AGENTS.md / bin/ /
+# .agents/skills once, at process start, and executes against that surface until
+# it re-reads or restarts. The commit that surface came from is the ONLY correct
+# thing to test a "do I need to re-read?" question against - NOT the commit a
+# later /updatefirstmate happens to find on disk, because a teardown fleet-sync
+# can fast-forward this home (the shared default branch of a linked worktree)
+# AFTER the session loaded its instructions but BEFORE the updater runs. Comparing
+# on-disk-before vs on-disk-after would then see no movement and wrongly report
+# "no re-read needed" while the session silently runs stale instructions.
+#
+# So session start records the loaded commit in <state>/.instr-base, and the
+# updater/nudge sweeps compare against it. The record is advanced only where a
+# (re-)read actually happens or is imminent - session start (a fresh load) and a
+# successful /updatefirstmate re-read or secondmate nudge - never by a silent
+# fast-forward, which is exactly what keeps the drift detectable.
+INSTR_BASE_FILE="${INSTR_BASE_FILE:-.instr-base}"
+
+# instr_base_commit <state-dir>: echo the recorded loaded commit, or nothing when
+# no baseline has been recorded (or the file is empty).
+instr_base_commit() {
+  local state=$1 f
+  f="$state/$INSTR_BASE_FILE"
+  [ -f "$f" ] || return 0
+  tr -d '[:space:]' < "$f" 2>/dev/null || true
+}
+
+# record_instr_base <dir> <state-dir>: durably record <dir>'s current HEAD as the
+# instruction baseline for the session loading it. Written atomically. A callable
+# no-op (returns non-zero) when HEAD or the state dir cannot be resolved, so a
+# caller can `|| true` it without aborting.
+record_instr_base() {
+  local dir=$1 state=$2 commit tmp
+  commit=$(git -C "$dir" rev-parse --verify --quiet HEAD 2>/dev/null) || return 1
+  [ -n "$commit" ] || return 1
+  mkdir -p "$state" 2>/dev/null || return 1
+  tmp=$(mktemp "$state/.instr-base.XXXXXX" 2>/dev/null) || return 1
+  printf '%s\n' "$commit" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$state/$INSTR_BASE_FILE" || { rm -f "$tmp"; return 1; }
+}
+
+# instr_surface_drifted <dir> <state-dir>: echo "yes" when the watched instruction
+# surface of <dir>'s current HEAD differs from the recorded loaded baseline, else
+# "no". A MISSING or unreadable baseline is conservatively "yes": we cannot prove
+# the loaded surface matches disk, and a spurious re-read is cheap while a false
+# "no" leaves a firstmate silently drifted from its instructions.
+instr_surface_drifted() {
+  local dir=$1 state=$2 base
+  base=$(instr_base_commit "$state")
+  if [ -z "$base" ] || ! git -C "$dir" rev-parse --verify --quiet "$base^{commit}" >/dev/null 2>&1; then
+    echo yes
+    return 0
+  fi
+  if [ -n "$(changed_instr "$dir" "$base")" ]; then
+    echo yes
+  else
+    echo no
+  fi
+}
+
 dirty_status() {
   local dir=$1 ignore_seed_marker=${2:-no}
   if [ "$ignore_seed_marker" = yes ]; then
@@ -405,15 +465,44 @@ process_secondmate() {
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
   ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
-  if [ "$FF_STATUS" = "updated" ] && [ -n "$window" ]; then
-    if [ "$nudge_requires_instr" = yes ] && [ -z "$FF_INSTR" ]; then
-      return 0
+  # Only a home with a live window is a running secondmate that can be nudged.
+  [ -n "$window" ] || return 0
+
+  if [ "$nudge_requires_instr" = yes ]; then
+    # The instruction-aware sweep (startup local-HEAD sync). Decide the nudge on
+    # whether the running secondmate's LOADED surface (its own recorded baseline)
+    # differs from what is now on disk - NOT merely on whether THIS sweep's
+    # fast-forward moved the home. A home already advanced by a launch sync or an
+    # earlier sweep shows FF_STATUS=current yet may still be running an older
+    # loaded surface: that is the same false-negative fm-update.sh carried one
+    # level up. When the secondmate has no baseline yet (it predates this record,
+    # or has not restarted since), fall back to the historical "advanced with an
+    # instruction change" trigger - no worse than before for such a home, and
+    # precise the moment it restarts and records a baseline. A missing baseline is
+    # deliberately NOT treated as conservative-yes here: this sweep runs on every
+    # session start, so a blanket yes would re-nudge every already-current legacy
+    # home on every start.
+    local sm_base drifted drift_paths
+    sm_base=$(instr_base_commit "$home_real/state")
+    if [ -n "$sm_base" ]; then
+      drifted=$(instr_surface_drifted "$home_real" "$home_real/state")
+    elif [ "$FF_STATUS" = updated ] && [ -n "$FF_INSTR" ]; then
+      drifted=yes
+    else
+      drifted=no
     fi
+    [ "$drifted" = yes ] || return 0
     FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
-    if [ "$nudge_requires_instr" = yes ] && [ -n "$FF_INSTR" ] \
-      && type fm_ff_after_instruction_update >/dev/null 2>&1; then
-      fm_ff_after_instruction_update "$id" "$home_real" "$window" "$FF_INSTR"
+    if type fm_ff_after_instruction_update >/dev/null 2>&1; then
+      drift_paths=$(changed_instr "$home_real" "${sm_base:-HEAD}")
+      [ -n "$drift_paths" ] || drift_paths="$FF_INSTR"
+      fm_ff_after_instruction_update "$id" "$home_real" "$window" "$drift_paths"
     fi
+  else
+    # The /updatefirstmate origin path keeps its long-standing gentle-steer
+    # condition: nudge whenever the home actually advanced (any change).
+    [ "$FF_STATUS" = updated ] || return 0
+    FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
   fi
 }
 
