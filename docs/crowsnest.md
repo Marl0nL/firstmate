@@ -117,6 +117,7 @@ service account or fall back to ADC.
 - `state/chat-inbox/<id>.json` - a pending message: `{id, space, thread, sender, mode, text, received_epoch}`. Present = pending; the live session removes it after answering. Thread and reply context (above) may add the optional `sender_display_name`, `quoted`, `reply_to`, and `thread_context` fields; treat them as absent-by-default.
 - `state/chat-outbox/<id>.json` - a dry-run record of a would-be post (only when `CROWSNEST_DRY_RUN` is set).
 - `state/chat-watch.check.sh` - the generated watcher check shim that execs `bin/fm-crowsnest-poll.sh`. Written when enabled, removed when disabled.
+- `state/chat-watch.check-trust` - the trust record binding that shim to its exact bytes. Written and removed with the shim; the watcher refuses an unregistered check instead of running it, so a hand-edited shim must be re-bound with `bin/fm-check-register.sh chat-watch`. See [Watcher checks are authenticated](architecture.md#watcher-checks-are-authenticated).
 - `state/chat-poll.error` - a one-line relay diagnostic (missing `jq`, an inbox write failure); cleared on the next healthy relay.
 - `state/chat-backend.log` - the backend's own log when started via `autostart`.
 

@@ -31,7 +31,12 @@
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
 #                          resume. Unless afk is active.
-#   check: <script>: <out> per-task check output, always actionable
+#   check: <script>: <out> per-task check output, always actionable. Only an
+#                          AUTHENTICATED check can produce this (bin/fm-check-lib.sh)
+#   check: rejected unauthenticated state checks: <paths>
+#                          check files that are unregistered, tampered, or not
+#                          private were REFUSED WITHOUT EXECUTION; register or
+#                          remove them. Always actionable
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -68,6 +73,12 @@ mkdir -p "$STATE"
 # the herdr subscriber writes them (bin/fm-transition-lib.sh).
 # shellcheck source=bin/fm-transition-lib.sh
 . "$SCRIPT_DIR/fm-transition-lib.sh"
+# Check-script authentication. This watcher EXECUTES state/*.check.sh, so every
+# check is verified against its trust record and run from a private snapshot;
+# anything unregistered or tampered is refused without execution and surfaced.
+# bin/fm-check-lib.sh owns the record format and the verification rules.
+# shellcheck source=bin/fm-check-lib.sh
+. "$SCRIPT_DIR/fm-check-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -99,6 +110,11 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+# Seconds before an UNCHANGED set of refused checks is surfaced again. A refusal
+# is a security event, so a new or changed refusal wakes immediately; this only
+# bounds the repeat, so a refusal nobody has fixed yet can neither rot silently
+# nor starve the checks that are still authenticated.
+CHECK_REJECT_RESURFACE=${FM_CHECK_REJECT_RESURFACE:-3600}
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -463,6 +479,25 @@ run_check() {
   fi
 }
 
+# Should this cycle surface the current set of refused checks? A set that is new
+# or has changed always surfaces immediately; an unchanged set surfaces again
+# every CHECK_REJECT_RESURFACE. The marker records the set itself, not just a
+# timestamp, so removing one refused check and adding another is a change, not a
+# suppressed repeat.
+check_rejection_due() {  # <space-separated refused paths>
+  local sig=$1 marker
+  marker="$STATE/.check-rejected"
+  if [ "$sig" != "$(cat "$marker" 2>/dev/null || true)" ]; then
+    printf '%s\n' "$sig" > "$marker"
+    return 0
+  fi
+  if [ "$(age_of "$marker")" -ge "$CHECK_REJECT_RESURFACE" ]; then
+    printf '%s\n' "$sig" > "$marker"
+    return 0
+  fi
+  return 1
+}
+
 # Surfaced-marker bookkeeping for the heartbeat backstop. The watcher records the
 # captain-relevant status line it SURFACED (woke firstmate for) in
 # .hb-surfaced-<task>, the watcher's analogue of the daemon's
@@ -645,7 +680,10 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   fi
   exit 0
 fi
-trap 'fm_lock_release "$WATCH_LOCK"' EXIT
+trap 'fm_custom_check_snapshot_cleanup; fm_lock_release "$WATCH_LOCK"' EXIT
+# Now that the singleton lock is held, no other watcher can be mid-verification,
+# so any check temporary still on disk was orphaned by a killed process.
+fm_custom_check_sweep_temporaries "$STATE"
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
@@ -678,10 +716,40 @@ while :; do
   # keeps producing signals - the slow poll (e.g. merge detection) would then
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
+  # Every check is AUTHENTICATED before it can run (bin/fm-check-lib.sh): the
+  # file must match its trust record and pass the private-artifact test, and what
+  # executes is the verified snapshot, never the path on disk. Classification is
+  # a separate first pass that executes nothing, so a refusal is decided - and
+  # surfaced - before any check runs and can never be starved by a chatty
+  # authenticated check that wakes and ends the cycle first.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+    runnable=()
+    rejected=()
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
-      out=$(run_check "$c")
+      if fm_custom_check_registered "$STATE" "$(basename "$c" .check.sh)"; then
+        runnable+=("$c")
+      else
+        rejected+=("$c")
+      fi
+    done
+    [ "${#rejected[@]}" -gt 0 ] || rm -f "$STATE/.check-rejected"
+    if [ "${#rejected[@]}" -gt 0 ] && check_rejection_due "${rejected[*]}"; then
+      reason="check: rejected unauthenticated state checks: ${rejected[*]} (refused without running; inspect each file, then register it with bin/fm-check-register.sh <id>, or remove it)"
+      fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+      touch "$STATE/.last-check"
+      wake "$reason"
+    fi
+    for c in ${runnable[@]+"${runnable[@]}"}; do
+      [ -e "$c" ] || continue
+      if ! fm_custom_check_snapshot_prepare "$STATE" "$(basename "$c" .check.sh)"; then
+        # Lost the race with a rewrite between classification and execution.
+        # Refusing is the whole point; the next sweep surfaces it.
+        fm_custom_check_snapshot_cleanup
+        continue
+      fi
+      out=$(run_check "$FM_CUSTOM_CHECK_SNAPSHOT")
+      fm_custom_check_snapshot_cleanup
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1

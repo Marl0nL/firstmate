@@ -156,7 +156,10 @@ test_check_output_is_queued() {
 #!/usr/bin/env bash
 printf 'merged: https://example.test/pr/1\n'
 SH
-  chmod +x "$check_file"
+  # The watcher refuses any check that is not bound to its bytes; register it the
+  # same way a producer does (tests/fm-check-trust.test.sh owns that contract).
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register the check fixture"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for check output"
   grep -F "check: $check_file: merged: https://example.test/pr/1" "$out" >/dev/null || fail "watcher did not print check wake"

@@ -591,10 +591,14 @@ test_wire_unwire_shim() {
   [ -x "$shim" ] || fail "the check shim must be executable"
   assert_grep "fm-crowsnest-poll.sh" "$shim" "the shim must exec the poll script"
   assert_grep "$home" "$shim" "the shim must bake in the home"
+  # The watcher refuses an unregistered check, so wiring must also register it.
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" --verify chat-watch >/dev/null \
+    || fail "fmc_wire_shim must register the shim it writes"
   # shellcheck disable=SC2016  # $FM_ROOT is expanded by the inner bash, not here.
   env FM_HOME="$home" FM_ROOT="$ROOT" bash -c '. "$FM_ROOT/bin/fm-crowsnest-lib.sh"; fmc_unwire_shim' \
     || fail "fmc_unwire_shim must succeed"
   assert_absent "$shim" "unwire must remove the check shim"
+  assert_absent "$home/state/chat-watch.check-trust" "unwire must remove the trust record too"
   pass "fmc_wire_shim / fmc_unwire_shim manage the watcher check shim"
 }
 
@@ -652,11 +656,13 @@ test_bootstrap_arms_when_enabled() {
   assert_present "$home/state/chat-watch.check.sh" "bootstrap must drop the check shim"
   [ -x "$home/state/chat-watch.check.sh" ] || fail "the check shim must be executable"
   assert_grep "fm-crowsnest-poll.sh" "$home/state/chat-watch.check.sh" "the shim must exec the poll script"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" --verify chat-watch >/dev/null \
+    || fail "bootstrap must register the check shim it arms"
   sum1=$(shasum < "$home/state/chat-watch.check.sh")
   FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
   sum2=$(shasum < "$home/state/chat-watch.check.sh")
   [ "$sum1" = "$sum2" ] || fail "bootstrap Crowsnest setup must be idempotent"
-  n=$(find "$home/state" -maxdepth 1 -name 'chat-watch*' | wc -l | tr -d ' ')
+  n=$(find "$home/state" -maxdepth 1 -name 'chat-watch.check.sh' | wc -l | tr -d ' ')
   [ "$n" = "1" ] || fail "bootstrap must not duplicate the shim (found $n)"
   pass "bootstrap arms the Crowsnest from config, idempotently"
 }

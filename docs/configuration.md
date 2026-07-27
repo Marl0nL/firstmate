@@ -11,11 +11,12 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, learnings, backlog, briefs, and scout reports.
-`state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, and generated X-mode artifacts.
+`state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, and the watcher check shims with their `<id>.check-trust` registrations.
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the guarded exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and X helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
+`bin/fm-check-lib.sh` owns the check trust-record format and the rules the watcher enforces before executing any check; [docs/architecture.md](architecture.md#watcher-checks-are-authenticated) carries the narrative.
 Wake, watcher, away-mode, and X-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and startup mechanism.
@@ -270,6 +271,8 @@ For direct client invocations, environment values override `.env`; bootstrap act
 
 The locked session-start bootstrap step turns the token into local generated state.
 It writes `state/x-watch.check.sh`, a check shim that runs `bin/fm-x-poll.sh`, and `config/x-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher processes in that home.
+The shim is bound to the watcher's check trust path in the same operation and written alongside `state/x-watch.check-trust`, because the watcher refuses an unregistered check instead of running it; a hand-edited shim must be re-bound with `bin/fm-check-register.sh x-watch`.
+See [Watcher checks are authenticated](architecture.md#watcher-checks-are-authenticated).
 This section is the single owner of the X-mode cadence contract: an X instance polls every 30 seconds instead of the default 300, only an X instance speeds up because a non-X home has no `config/x-mode.env`, and the session-start supervision operating block includes the cadence instruction when that file exists.
 The active primary-harness supervision protocol owns how that sourced cadence reaches the watcher process.
 Because `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start, a cadence transition - opt-in while a watcher is already running, or opt-out - is applied by restarting the home-scoped watcher through the emitted harness protocol; bootstrap deliberately never restarts the watcher itself.
@@ -331,7 +334,7 @@ These paths need `jq` to build the JSON payload, but they run before token and n
 
 The Crowsnest is the Google Chat analogue of X mode: an opt-in, committed two-way bridge that lets the captain reach the one live firstmate session from a Chat thread and lets firstmate post back, without spawning a second fleet-aware agent.
 It is off unless the firstmate home's gitignored `config/crowsnest.env` sets a truthy `CROWSNEST_ENABLED`.
-Like X mode, the locked session-start bootstrap step only wires or unwires the local watcher check shim (`state/chat-watch.check.sh`, the `CROWSNEST:` digest line); registering the `firstmate` agent with the `local-agents-chat` backend and autostarting that backend reach outside the home and stay explicit operator actions via `bin/fm-crowsnest.sh`.
+Like X mode, the locked session-start bootstrap step only wires or unwires the local watcher check shim (`state/chat-watch.check.sh` plus its `state/chat-watch.check-trust` registration, the `CROWSNEST:` digest line); registering the `firstmate` agent with the `local-agents-chat` backend and autostarting that backend reach outside the home and stay explicit operator actions via `bin/fm-crowsnest.sh`.
 Copy `docs/examples/crowsnest.env` to `config/crowsnest.env`, then run `bin/fm-crowsnest.sh enable` (add `--autostart` to also start the backend).
 The config keys (`CROWSNEST_ENABLED`, `CROWSNEST_AGENT_NAME`, `CROWSNEST_ACK`, `CROWSNEST_LA_CLI`, `CROWSNEST_LA_CONFIG`, `CROWSNEST_PYTHON`, `CROWSNEST_DRY_RUN`), the full mechanism, wire shapes, and verification live in [docs/crowsnest.md](crowsnest.md).
 
@@ -369,6 +372,7 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (merge polls or the X-mode poll shim)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_CHECK_REJECT_RESURFACE=3600   # seconds before an UNCHANGED set of refused (unauthenticated) checks is surfaced again; a new or changed refusal always wakes immediately
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes runs rows scanned when cross-branch attribution falls back from axi status

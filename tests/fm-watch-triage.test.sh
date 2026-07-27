@@ -25,6 +25,18 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
+# An armed merge-monitor, exactly as bin/fm-pr-check.sh now leaves one: the check
+# file is present AND registered through the check trust path. Registration is
+# what makes it genuinely armed - the watcher REFUSES an unregistered check
+# instead of running it (bin/fm-check-lib.sh), and a refusal is an actionable
+# wake, so an unregistered fixture would not model a parked crew at all.
+arm_merge_monitor() {  # <state> <id>
+  local state=$1 id=$2
+  : > "$state/$id.check.sh"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+    || fail "could not arm the merge-monitor fixture for $id"
+}
+
 fm_test_tmproot TMP_ROOT fm-watch-triage-tests
 
 # Common watcher knobs: tight poll/grace, no check or heartbeat cadence unless a
@@ -322,7 +334,7 @@ test_crew_is_parked_awaiting_merge_classifier() {
 
   # Positive: reconciled done + armed merge-monitor + idle -> parked (absorb).
   FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR https://x/pr/1'
-  : > "$state/a.check.sh"
+  arm_merge_monitor "$state" a
   crew_is_parked_awaiting_merge a "$state" \
     || fail "done crew with an armed merge-monitor not classed parked"
   # Done + resolved: is still reconciled done by fm-crew-state, so it stays parked.
@@ -352,7 +364,7 @@ test_crew_is_parked_awaiting_merge_classifier() {
     || fail "a done crew with no armed merge-monitor was classed parked"
   # A non-done terminal (needs-decision/blocked/failed) even with an armed check must
   # surface - firstmate action is needed, so it is not parked.
-  : > "$state/a.check.sh"
+  arm_merge_monitor "$state" a
   FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
   ! crew_is_parked_awaiting_merge a "$state" \
     || fail "a crew parked at a gate was classed parked-awaiting-merge"
@@ -586,7 +598,7 @@ test_parked_awaiting_merge_stale_absorbed() {
   printf 'awaiting merge, PR open' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/parked.meta"
   printf 'done: PR https://example.test/pr/7\n' > "$state/parked.status"
-  : > "$state/parked.check.sh"   # armed merge-monitor
+  arm_merge_monitor "$state" parked   # armed merge-monitor
   sig=$(seen_sig "$state/parked.status"); printf '%s' "$sig" > "$state/.seen-parked_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "awaiting merge, PR open")
@@ -624,7 +636,7 @@ test_parked_reactivated_verb_off_done_surfaces() {
   printf 'stuck mid-edit' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/reactverb.meta"
   printf 'done: PR https://example.test/pr/11\nworking: enhancing the PR per steer\n' > "$state/reactverb.status"
-  : > "$state/reactverb.check.sh"   # STILL armed
+  arm_merge_monitor "$state" reactverb   # STILL armed
   # Quiet the signal path (status pre-seen) so this exercises the STALE seam: the
   # crew must surface HERE despite the still-armed merge-monitor.
   sig=$(seen_sig "$state/reactverb.status"); printf '%s' "$sig" > "$state/.seen-reactverb_status"
@@ -661,7 +673,7 @@ test_parked_reactivated_working_crew_still_wedge_escalates() {
   printf 'enhancing the PR...' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/reactbusy.meta"
   printf 'done: PR https://example.test/pr/9\n' > "$state/reactbusy.status"
-  : > "$state/reactbusy.check.sh"
+  arm_merge_monitor "$state" reactbusy
   sig=$(seen_sig "$state/reactbusy.status"); printf '%s' "$sig" > "$state/.seen-reactbusy_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "enhancing the PR...")

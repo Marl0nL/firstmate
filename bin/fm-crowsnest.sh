@@ -168,7 +168,13 @@ do_status() {
     ident=$("$FMC_PY" "$FM_ROOT/bin/fm_crowsnest_chat.py" identity "${idargs[@]}" 2>/dev/null)
     echo "  posting id     : ${ident:-<unknown>}"
   fi
-  echo "  check shim     : $([ -f "$STATE/chat-watch.check.sh" ] && echo present || echo absent)"
+  if [ ! -f "$STATE/chat-watch.check.sh" ]; then
+    echo "  check shim     : absent"
+  elif fm_custom_check_registered "$STATE" chat-watch; then
+    echo "  check shim     : present, registered"
+  else
+    echo "  check shim     : present but UNREGISTERED - the watcher refuses it; run bin/fm-check-register.sh chat-watch"
+  fi
   local n=0
   [ -d "$(fmc_inbox_dir)" ] && n=$(find "$(fmc_inbox_dir)" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
   echo "  pending inbox  : $n"
