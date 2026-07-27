@@ -113,3 +113,30 @@ jobs:
             printf '%s\n' "$tracked"
             exit 1
           fi
+      - name: Test suites must be committed executable
+        run: |
+          set -eu
+          # The tests job below invokes tests/*.test.sh directly (not via `bash
+          # <script>`), so CI relies on the committed file mode, not the working-tree
+          # bit: a suite committed 100644 fails with exit 126 ("permission denied"),
+          # a confusing shell error that looks nothing like a test failure. Check the
+          # staged mode via `git ls-files -s` rather than `test -x` on disk, because a
+          # file can be executable locally and still be committed non-executable.
+          offenders=""
+          listing=$(git ls-files -s -- 'tests/*.test.sh')
+          if [ -n "$listing" ]; then
+            while read -r mode path; do
+              if [ "$mode" != "100755" ]; then
+                offenders="$offenders$path
+          "
+              fi
+            done <<EOF
+          $(printf '%s\n' "$listing" | awk '{print $1, $4}')
+          EOF
+          fi
+          if [ -n "$offenders" ]; then
+            echo "::error::These test suites are committed non-executable and CI will fail to run them with exit 126:"
+            printf '%s' "$offenders"
+            echo "Fix with: git update-index --chmod=+x <path> (chmod +x alone does not stage the mode change)"
+            exit 1
+          fi
