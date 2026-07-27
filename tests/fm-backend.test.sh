@@ -99,34 +99,84 @@ BASE_REF=$(resolve_base_ref) \
 #
 # build_old_bin echoes a directory whose bin/ subdir holds the PRE-REFACTOR
 # fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh
-# (extracted from BASE_REF), plus symlinks to every OTHER sibling script those
-# five source - all unchanged by this task, so the real files are exactly
-# what BASE_REF would have used too. FM_ROOT_OVERRIDE pointed at this dir's
-# root makes "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve correctly.
+# (extracted from BASE_REF), plus a symlink to EVERY other entry of the real
+# bin/ - so the only old-vs-new variable is those five scripts and every
+# sibling they reach is today's real, unchanged file. FM_ROOT_OVERRIDE pointed
+# at this dir's root makes "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve
+# correctly.
+#
+# Mirroring the WHOLE remainder is deliberate. This shim used to carry a
+# hand-maintained allowlist of "the siblings those five happen to source", and
+# that allowlist rotted the moment any script in the graph gained a new
+# dependency: bin/fm-guard.sh started sourcing fm-supervision-lib.sh (silently
+# neutered, since fm-teardown.sh runs the guard with `|| true`), and then
+# fm-teardown.sh's scout completion gate started calling fm-decision-hold.sh,
+# which turned a missing symlink into a REFUSED teardown and a red main. A
+# mirror cannot rot, so new dependencies never need to be re-declared here.
+#
 # fm-backend.sh (and its bin/backends/ adapters) is the dispatcher every one
 # of the five REFACTORED scripts sources; it must be a real, reachable file in
-# the old bin/ too or `. "$SCRIPT_DIR/fm-backend.sh"` aborts under set -eu -
-# hence it is a symlinked sibling, not an extracted-from-BASE_REF file: for a
-# tmux-only conformance run the tmux adapter's behavior is what is under test,
-# and that is unchanged by any later (e.g. non-tmux backend) addition to
-# fm-backend.sh's own dispatch surface.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-tasks-axi-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-backend.sh"
+# the old bin/ too or `. "$SCRIPT_DIR/fm-backend.sh"` aborts under set -eu.
+# It is a mirrored sibling rather than an extracted-from-BASE_REF file for the
+# same reason as everything else: for a tmux-only conformance run the tmux
+# adapter's behavior is what is under test, and that is unchanged by any later
+# (e.g. non-tmux backend) addition to fm-backend.sh's own dispatch surface.
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh"
 
+old_bin_is_refactored() {  # <basename>
+  case " $OLD_BIN_REFACTORED " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
-  local name=$1 root bin f
+  local name=$1 root bin path f
   root="$TMP_ROOT/$name"
   bin="$root/bin"
   mkdir -p "$bin"
-  for f in $OLD_BIN_UNCHANGED_SIBLINGS; do
-    ln -s "$ROOT/bin/$f" "$bin/$f"
+  for path in "$ROOT"/bin/*; do
+    f=${path##*/}
+    if old_bin_is_refactored "$f"; then continue; fi
+    ln -s "$path" "$bin/$f"
   done
-  ln -s "$ROOT/bin/backends" "$bin/backends"
   for f in $OLD_BIN_REFACTORED; do
     git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"
     chmod +x "$bin/$f"
   done
   printf '%s\n' "$root"
+}
+
+# The shim's own contract, pinned so an allowlist can never creep back in: for
+# every entry of the real bin/, the old bin/ holds either an extracted copy of
+# one of the five refactored scripts or a symlink to the real file. A sibling
+# that exists in bin/ but not in the shim is exactly the drift that made a
+# scout teardown REFUSE (missing fm-decision-hold.sh) on an otherwise green
+# main.
+test_old_bin_shim_mirrors_every_sibling() {
+  local old_bin path f target missing='' extracted=0
+  old_bin=$(build_old_bin shim-completeness)
+  for path in "$ROOT"/bin/*; do
+    f=${path##*/}
+    if old_bin_is_refactored "$f"; then
+      [ -f "$old_bin/bin/$f" ] && [ ! -L "$old_bin/bin/$f" ] \
+        || fail "old bin/ must hold an EXTRACTED (non-symlink) $f"
+      extracted=$((extracted + 1))
+      continue
+    fi
+    if [ ! -L "$old_bin/bin/$f" ]; then
+      missing="$missing $f"
+      continue
+    fi
+    target=$(readlink "$old_bin/bin/$f")
+    [ "$target" = "$path" ] || fail "old bin/ symlink $f points at $target, expected $path"
+  done
+  [ -z "$missing" ] \
+    || fail "old bin/ shim is missing a symlink for real bin/ entries:$missing"$'\n'"build_old_bin must mirror every sibling, never an allowlist"
+  [ "$extracted" = 5 ] \
+    || fail "expected 5 extracted pre-refactor scripts in the old bin/, found $extracted"
+
+  pass "build_old_bin: old bin/ mirrors every real bin/ sibling and extracts exactly the five refactored scripts"
 }
 
 # --- fm-backend.sh unit tests ------------------------------------------------
@@ -940,6 +990,14 @@ test_teardown_conformance_old_vs_new() {
 
   expect_code 0 "$rc_old" "old fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_old"
   expect_code 0 "$rc_new" "new fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_new"
+  # A sibling the shim failed to provide shows up here first, and can be
+  # invisible in the exit code: fm-teardown.sh runs fm-guard.sh with `|| true`,
+  # so a library missing under the guard degrades silently instead of failing.
+  # Both runs must resolve every script they reach.
+  assert_not_contains "$out_old" "No such file or directory" \
+    "old fm-teardown.sh could not resolve a sibling in the old bin/ shim"
+  assert_not_contains "$out_new" "No such file or directory" \
+    "new fm-teardown.sh could not resolve a sibling in the old bin/ shim"
   # This conformance contract is that the BACKEND refactor did not change the
   # tmux/treehouse commands teardown ISSUES. Read-only probes are outside it:
   # treehouse_recorded_path added a `treehouse status` read so the return is handed
@@ -1071,6 +1129,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
+test_old_bin_shim_mirrors_every_sibling
 test_backend_name_precedence
 test_backend_detect_precedence
 test_backend_detect_cmux_fallback_bundle_id
