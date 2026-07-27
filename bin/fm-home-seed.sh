@@ -25,7 +25,12 @@
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
-#       and scope are derived from the filled charter brief.
+#       and scope are derived from the filled charter brief. The registry
+#       summary field is always short (deterministically truncated to
+#       REGISTRY_SUMMARY_CAP characters, no model call): set
+#       FM_SECONDMATE_SUMMARY='<short summary>' to supply it directly, or let it
+#       derive from the charter text/brief. The scope field is never truncated,
+#       since it is the routing input the main firstmate matches work against.
 #   fm-home-seed.sh validate
 #       Refuse duplicate ids, duplicate homes, and nested or overlapping homes in
 #       data/secondmates.md.
@@ -40,14 +45,24 @@ REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 
 usage() {
-  echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
-  echo "       fm-home-seed.sh validate" >&2
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0" >&2
 }
 
 registry_home_for_line() {
   sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p'
 }
 
+# A registry line's tail is "(home: ...; scope: ...; projects: ...; added ...)",
+# and fm-ff-lib.sh's secondmate_registry_field (and registry_home_for_line above)
+# split that tail on ";" and "()". Every field written into the tail - summary,
+# scope, and the home-path check in validate_registry_home_text - must therefore
+# never contain those characters, or the split misreads field boundaries. This
+# stays required even though the summary is now short (below): a short phrase can
+# still contain a stray "(" or ";" as ordinary punctuation.
 normalize_registry_text() {
   awk '
     {
@@ -72,13 +87,36 @@ brief_section_text() {
   ' "$brief"
 }
 
+# The registry line is printed in full at every session start in every home that
+# has a secondmate, so the summary field must stay a scannable one-liner even
+# when the charter behind it runs to thousands of words. 200 characters is about
+# two short sentences: enough to identify the domain at a glance, small enough
+# that it can never dominate the digest. The full charter is never lost; it is
+# copied verbatim to <home>/data/charter.md by seed_home.
+REGISTRY_SUMMARY_CAP=200
+
+truncate_registry_summary() {
+  local text=$1 cap=$2 truncated
+  [ "${#text}" -le "$cap" ] && { printf '%s\n' "$text"; return; }
+  truncated=${text:0:$cap}
+  # Prefer breaking on the last full word inside the cap; if the cap lands
+  # mid-word with no earlier space, fall back to the hard cut.
+  case "$truncated" in
+    *' '*) truncated=${truncated% *} ;;
+  esac
+  printf '%s...\n' "$truncated"
+}
+
 registry_summary_for_brief() {
-  local brief=$1
-  if [ -n "${FM_SECONDMATE_CHARTER:-}" ]; then
-    printf '%s\n' "$FM_SECONDMATE_CHARTER" | normalize_registry_text
+  local brief=$1 raw
+  if [ -n "${FM_SECONDMATE_SUMMARY:-}" ]; then
+    raw=$(printf '%s\n' "$FM_SECONDMATE_SUMMARY" | normalize_registry_text)
+  elif [ -n "${FM_SECONDMATE_CHARTER:-}" ]; then
+    raw=$(printf '%s\n' "$FM_SECONDMATE_CHARTER" | normalize_registry_text)
   else
-    brief_section_text "$brief" "Charter" | normalize_registry_text
+    raw=$(brief_section_text "$brief" "Charter" | normalize_registry_text)
   fi
+  truncate_registry_summary "$raw" "$REGISTRY_SUMMARY_CAP"
 }
 
 registry_scope_for_brief() {
