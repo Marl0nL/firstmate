@@ -36,7 +36,12 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+# Disarm the EXIT trap BEFORE cleaning up: cleanup_all tears the lab session
+# down and consumes its fleet-state tripwire, so letting the trap run it a
+# second time printed a bogus "missing fleet-state tripwire ... refusing
+# destructive calls" after every real failure. That is the guard protecting
+# the captain's live default session; it must never cry wolf.
+fail() { printf 'not ok - %s\n' "$1" >&2; trap - EXIT; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
@@ -154,11 +159,24 @@ WS_COUNT=$(printf '%s' "$WS_TABS" | jq -r '.result.tabs? // [] | length')
 pass "fixed: the workspace holds exactly the 2 replacement tabs after both respawns - no leaked husk tabs, no destroyed workspace"
 
 # --- 4. a GENUINELY live duplicate still refuses, unchanged -----------------
-# Register a real agent (herdr's own native registration primitive) on one of
-# the freshly-respawned panes, then confirm a further same-labeled spawn
-# attempt refuses exactly as before - the husk fix must never touch a pane
-# that actually has something registered in it.
+# Build the REAL live shape on one of the freshly-respawned panes - a running
+# non-shell foreground process holding its terminal, plus herdr's own native
+# agent registration - then confirm a further same-labeled spawn attempt refuses
+# exactly as before. The husk fix must never touch a pane that actually has
+# something running in it.
+#
+# The record alone is deliberately NOT enough, and has not been since
+# 2026-07-24: fm_backend_herdr_pane_agent_reality reads a bare-shell foreground
+# as `dead` whatever the metadata says, so that a crashed agent's never-released
+# record cannot keep a husk unreclaimable forever (docs/herdr-backend.md
+# "Measured 2026-07-24"). `pane report-agent` only writes that record; it does
+# not put an agent in the pane.
 
+fm_backend_herdr_send_text_line "$SESSION:$NEW_CREW_PANE_ID" "sleep 300" \
+  || fail "could not start a live foreground process on the respawned crewmate-shaped pane"
+sleep 1.5
+fm_backend_herdr_pane_foreground_is_shell "$SESSION" "$NEW_CREW_PANE_ID" \
+  && fail "live-duplicate setup is wrong: a running foreground process should own this pane's terminal, not its shell"
 herdr pane report-agent "$NEW_CREW_PANE_ID" --source fm-respawn-e2e --agent fm-respawn-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the respawned crewmate-shaped pane"
 

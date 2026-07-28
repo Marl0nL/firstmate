@@ -568,10 +568,21 @@ fm_backend_herdr_pane_process_cwds() {  # <session> <pane_id>
       select(length > 0) | .[]' 2>/dev/null
 }
 
-# fm_backend_herdr_pane_foreground_is_shell: 0 only when `pane process-info`
-# reports at least one foreground process AND every one of them is a bare
-# interactive shell (bash, zsh, sh, ...). 1 for no process, an unparseable
-# response, or any foreground process that is NOT a shell.
+# fm_backend_herdr_is_shell_name: 0 when a `pane process-info` process name (or
+# argv[0]) names a bare interactive shell. The single owner of that allowlist,
+# so the process-group check and its fallback scan below cannot drift apart.
+fm_backend_herdr_is_shell_name() {  # <process name or argv[0]>
+  local base=${1##*/}   # basename, in case name carries a path
+  base=${base#-}        # a login shell can be reported as -bash / -zsh
+  case "$base" in
+    sh|bash|zsh|dash|ash|ksh|fish|tcsh|csh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_herdr_pane_foreground_is_shell: 0 only when the pane's TERMINAL is
+# currently owned by the pane's own shell rather than by a foreground job. 1 for
+# no process, an unparseable response, or a foreground job that is NOT a shell.
 #
 # This is the DISAMBIGUATOR for the one ambiguous reality cell: a pane whose
 # metadata says `no-agent` but whose process probe says `live`. That shape has
@@ -581,33 +592,57 @@ fm_backend_herdr_pane_process_cwds() {  # <session> <pane_id>
 #   - an agent that is running but that herdr has not (yet) registered - a slow
 #     start, or a harness whose agent herdr's detection does not recognize -
 #     which is NOT safe to reclaim and NOT safe to type into.
-# `pane process-info`'s foreground process name (verified 0.7.4 to be present
-# for every foreground process, alongside argv/cmdline/cwd/pid) is the only
-# read-only signal that tells the two apart: a bare shell reads `bash`, while a
-# running claude reads its versioned binary basename (e.g. `2.1.215`) and a
-# pi/node agent reads `node`. So this consults the argv/name, NOT metadata, and
-# introduces no new probe - process-info is already called for process_state.
+# `pane process-info` is the only read-only call that tells the two apart, and
+# this consults it, NOT metadata. It introduces no new probe - process-info is
+# already called for process_state.
 #
-# The basename of `.name` (falling back to argv[0]'s basename) is matched
-# against a small shell allowlist, with a leading `-` stripped so a login shell
-# reported as `-bash` still counts. A single non-shell foreground process makes
-# the whole pane not-a-bare-shell: if anything other than a shell is running in
-# the foreground, typing into the pane is unsafe.
+# THE SIGNAL IS THE FOREGROUND PROCESS GROUP, NOT THE PROCESS LIST.
+# `pane process-info` reports `shell_pid`, `foreground_process_group_id`, and a
+# `foreground_processes` enumeration of every process herdr finds in that group.
+# Only the first two answer the question this function asks. The enumeration
+# also carries whatever the shell has transiently forked, and an interactive
+# shell forks constantly while it runs its own rc files - so requiring EVERY
+# enumerated process to be shell-named answered "not a shell" for a pane that
+# was nothing but a shell, for the first seconds of every pane's life. See
+# docs/herdr-backend.md "Measured 2026-07-28" for the measurement and the
+# recovery path that broke.
+#
+# A real foreground job always takes its own process group, so comparing
+# `foreground_process_group_id` with `shell_pid` separates the two cases exactly,
+# at any moment of the pane's life. The group leader's own name is still matched
+# against the shell allowlist (basename of `.name`, falling back to argv[0]'s,
+# with a leading `-` stripped so a login shell reported as `-bash` still counts)
+# so a pane whose "shell" is not a shell at all cannot pass.
+#
+# Anything unreadable returns 1, which composes to `unknown` - the refusal both
+# consumers already fail safe toward.
+#
+# A body carrying neither field cannot be judged by process group at all, so it
+# falls back to the pre-2026-07-28 all-processes-are-shells scan. That scan is
+# only ever wrong in the refusing direction, so on such a build the fallback can
+# leave husk recovery inert but can never license a destructive act.
 fm_backend_herdr_pane_foreground_is_shell() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out names n base
+  local session=$1 pane_id=$2 out shell_pid fg_pgid leader names n
   out=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>&1)
+  shell_pid=$(printf '%s' "$out" |
+    jq -r '.result.process_info.shell_pid // empty | tostring' 2>/dev/null)
+  fg_pgid=$(printf '%s' "$out" |
+    jq -r '.result.process_info.foreground_process_group_id // empty | tostring' 2>/dev/null)
+  if [ -n "$shell_pid" ] && [ -n "$fg_pgid" ]; then
+    [ "$fg_pgid" = "$shell_pid" ] || return 1
+    leader=$(printf '%s' "$out" | jq -r --arg pid "$fg_pgid" \
+      '.result.process_info.foreground_processes[]?
+         | select((.pid // "" | tostring) == $pid)
+         | (.name // (.argv[0] // "")) // ""' 2>/dev/null | head -n 1)
+    fm_backend_herdr_is_shell_name "$leader"
+    return
+  fi
   names=$(printf '%s' "$out" |
     jq -r '.result.process_info.foreground_processes[]?
       | (.name // (.argv[0] // "")) // ""' 2>/dev/null)
   [ -n "$names" ] || return 1
   while IFS= read -r n; do
-    [ -n "$n" ] || return 1
-    base=${n##*/}   # basename, in case name carries a path
-    base=${base#-}  # a login shell can be reported as -bash / -zsh
-    case "$base" in
-      sh|bash|zsh|dash|ash|ksh|fish|tcsh|csh) ;;
-      *) return 1 ;;
-    esac
+    fm_backend_herdr_is_shell_name "$n" || return 1
   done <<EOF
 $names
 EOF

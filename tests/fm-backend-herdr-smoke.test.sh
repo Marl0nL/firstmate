@@ -18,7 +18,12 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+# Disarm the EXIT trap BEFORE cleaning up: cleanup_all tears the lab session
+# down and consumes its fleet-state tripwire, so letting the trap run it a
+# second time printed a bogus "missing fleet-state tripwire ... refusing
+# destructive calls" after every real failure. That is the guard protecting
+# the captain's live default session; it must never cry wolf.
+fail() { printf 'not ok - %s\n' "$1" >&2; trap - EXIT; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
@@ -114,8 +119,16 @@ pass "real herdr: create_task prunes the freshly-created workspace's seeded defa
 # $PANE_ID/$TARGET (this suite's primary task, which the rest of the file
 # still depends on) so neither scenario disturbs it.
 
-# 1. A genuinely LIVE duplicate (a real registered agent, via herdr's own
-#    `pane report-agent`) must still refuse exactly as before.
+# 1. A genuinely LIVE duplicate must still refuse exactly as before.
+#    A registered agent RECORD is not enough to make this scenario live, and has
+#    not been since 2026-07-24: `fm_backend_herdr_pane_agent_reality` reads a
+#    bare-shell foreground as `dead` whatever the metadata says, precisely so a
+#    crashed agent's never-released record cannot keep a husk unreclaimable
+#    forever (docs/herdr-backend.md "Measured 2026-07-24"). `pane report-agent`
+#    only writes that record; it does not put an agent in the pane. So this arm
+#    builds the REAL live shape - a running non-shell foreground process holding
+#    the pane's terminal, plus the agent record - which is what a live crewmate
+#    actually looks like to both classifiers.
 LIVE_DUP_LABEL="fm-smoke-livedup"
 LIVE_DUP_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp) || fail "could not create the live-duplicate scenario's tab"
 read -r LIVE_DUP_TAB_ID LIVE_DUP_PANE_ID <<EOF
@@ -124,6 +137,11 @@ EOF
 if [ -z "$LIVE_DUP_TAB_ID" ] || [ -z "$LIVE_DUP_PANE_ID" ]; then
   fail "live-duplicate scenario tab creation did not return ids"
 fi
+fm_backend_herdr_send_text_line "$SESSION:$LIVE_DUP_PANE_ID" "sleep 300" \
+  || fail "could not start a live foreground process on the live-duplicate scenario's pane"
+sleep 1.5
+fm_backend_herdr_pane_foreground_is_shell "$SESSION" "$LIVE_DUP_PANE_ID" \
+  && fail "live-duplicate setup is wrong: a running foreground process should own this pane's terminal, not its shell"
 herdr pane report-agent "$LIVE_DUP_PANE_ID" --source fm-smoke-test --agent fm-smoke-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the live-duplicate scenario's pane"
 if fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp >/dev/null 2>&1; then

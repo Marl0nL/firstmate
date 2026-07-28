@@ -60,19 +60,32 @@ if [ "${1:-}" = pane ] && [ "${2:-}" = process-info ]; then
   for ((fi=0; fi<${#fake_args[@]}; fi++)); do
     [ "${fake_args[$fi]}" = --pane ] && fake_pane=${fake_args[$((fi+1))]:-}
   done
-  # `live` -> a bare shell foreground process (name bash); `live-agent` -> a
-  # NON-shell foreground process (a claude/node agent herdr has not registered)
-  # so a test can exercise the no-agent/live disambiguation; `unknown` -> an
-  # unparseable probe; default -> pane_not_found (no process).
+  # Every body mirrors a real 0.7.4 response, which always carries shell_pid and
+  # foreground_process_group_id alongside the process list - the two fields
+  # fm_backend_herdr_pane_foreground_is_shell judges terminal ownership by.
+  # `live` -> the pane's own shell owns the terminal (a bare shell);
+  # `live-startup` -> the SAME bare shell, still running its rc files, so the
+  # process list also carries the transient children it forked into its own
+  # process group (measured on a fresh pane, docs/herdr-backend.md "Measured
+  # 2026-07-28"); `live-agent` -> a
+  # NON-shell foreground job owns the terminal in its own process group (a
+  # claude/node agent herdr has not registered) so a test can exercise the
+  # no-agent/live disambiguation; `live-nofields` -> a hypothetical build that
+  # omits both process-group fields, which must fall back to the whole-list
+  # scan; `unknown` -> an unparseable probe; default -> pane_not_found.
   fake_verdict=dead
   case ",${FM_HERDR_PROCESS_INFO:-}," in
+    *",$fake_pane=live-startup,"*) fake_verdict=live-startup ;;
+    *",$fake_pane=live-nofields,"*) fake_verdict=live-nofields ;;
     *",$fake_pane=live-agent,"*) fake_verdict=live-agent ;;
     *",$fake_pane=live,"*) fake_verdict=live ;;
     *",$fake_pane=unknown,"*) fake_verdict=unknown ;;
   esac
   case "$fake_verdict" in
-    live) printf '{"result":{"process_info":{"foreground_process_group_id":4242,"foreground_processes":[{"name":"bash","pid":4242,"cwd":"/tmp"}]}}}\n' ;;
-    live-agent) printf '{"result":{"process_info":{"foreground_process_group_id":5292,"foreground_processes":[{"name":"2.1.215","argv":["/home/u/.local/share/claude/versions/2.1.215","--continue"],"pid":5292,"cwd":"/tmp"}]}}}\n' ;;
+    live) printf '{"result":{"process_info":{"shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"name":"bash","pid":4242,"cwd":"/tmp"}]}}}\n' ;;
+    live-startup) printf '{"result":{"process_info":{"shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"name":"bash","pid":4242,"cwd":"/tmp"},{"name":"rpm-ostree","pid":4243,"cwd":"/tmp"},{"name":"jq","pid":4244,"cwd":"/tmp"}]}}}\n' ;;
+    live-nofields) printf '{"result":{"process_info":{"foreground_processes":[{"name":"bash","pid":4242,"cwd":"/tmp"}]}}}\n' ;;
+    live-agent) printf '{"result":{"process_info":{"shell_pid":4242,"foreground_process_group_id":5292,"foreground_processes":[{"name":"2.1.215","argv":["/home/u/.local/share/claude/versions/2.1.215","--continue"],"pid":5292,"cwd":"/tmp"}]}}}\n' ;;
     unknown) printf '{"error":{"code":"internal_error","message":"probe failed"}}\n' ;;
     *) printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}\n' "$fake_pane" ;;
   esac
@@ -218,9 +231,9 @@ case "$cmd $sub" in
     done
     if jq_state -e --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length > 0' >/dev/null; then
       if [ -n "$(jq_state -r --arg p "$pane" '.agent_status[$p] // empty')" ]; then
-        printf '{"result":{"process_info":{"foreground_process_group_id":5292,"foreground_processes":[{"name":"2.1.218","argv":["/home/u/.local/share/claude/versions/2.1.218"],"pid":5292,"cwd":"/tmp"}]}}}\n'
+        printf '{"result":{"process_info":{"shell_pid":4242,"foreground_process_group_id":5292,"foreground_processes":[{"name":"2.1.218","argv":["/home/u/.local/share/claude/versions/2.1.218"],"pid":5292,"cwd":"/tmp"}]}}}\n'
       else
-        printf '{"result":{"process_info":{"foreground_process_group_id":4242,"foreground_processes":[{"name":"bash","pid":4242,"cwd":"/tmp"}]}}}\n'
+        printf '{"result":{"process_info":{"shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"name":"bash","pid":4242,"cwd":"/tmp"}]}}}\n'
       fi
     else
       printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}\n' "$pane"
@@ -800,8 +813,9 @@ TABLE
 }
 
 # fm_backend_herdr_pane_foreground_is_shell: the disambiguator for the
-# no-agent/live cell. A bare shell foreground is a shell; a claude/node
-# foreground is not; no process / unparseable is not.
+# no-agent/live cell. The pane's own shell owning the terminal is a shell; a
+# foreground job in its own process group is not; no process / unparseable is
+# not.
 test_foreground_is_shell_classifies_process_info() {
   local dir log resp fb rc
   run_shell() {  # <process-info-verdict> -> exit code of foreground_is_shell
@@ -815,7 +829,19 @@ test_foreground_is_shell_classifies_process_info() {
   run_shell live-agent; rc=$?; [ $rc -ne 0 ] || fail "a claude/node foreground process must NOT classify as a shell"
   run_shell gone; rc=$?; [ $rc -ne 0 ] || fail "a pane with no process must not classify as a shell (nothing to type into safely)"
   run_shell unknown; rc=$?; [ $rc -ne 0 ] || fail "an unparseable process-info must not classify as a shell"
-  pass "fm_backend_herdr_pane_foreground_is_shell: bash->shell, claude/node->not, gone/unknown->not"
+  # REGRESSION (2026-07-28): a shell still running its own rc files forks
+  # transient children into its OWN process group, so the process list carries
+  # non-shell names while foreground_process_group_id still equals shell_pid.
+  # Reading the list instead of the group answered "not a shell" here, which
+  # composed to `unknown` and made husk reclamation refuse every freshly
+  # restored pane - the exact shape a post-restart respawn hits.
+  run_shell live-startup; rc=$?
+  [ $rc -eq 0 ] || fail "a bare shell still forking its rc-file children into its OWN process group must classify as a shell"
+  # A build that reports neither process-group field falls back to the whole-list
+  # scan, which is only ever wrong toward refusal.
+  run_shell live-nofields; rc=$?
+  [ $rc -eq 0 ] || fail "a process-info body with no process-group fields must fall back to the whole-list shell scan"
+  pass "fm_backend_herdr_pane_foreground_is_shell: shell-owned terminal (settled or rc-startup) ->shell, foreground job->not, gone/unknown->not, no-fields->fallback scan"
 }
 
 # create_task must NOT close a same-labeled tab whose pane shows no agent
