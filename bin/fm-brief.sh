@@ -170,7 +170,7 @@ Use this only for material phase changes, a captain decision, a real blocker, a 
 This is also how you return the answer to a marked from-firstmate request above.
 Give every routed-work phase a stable key: open it with \`working [key=<work-slug>]: {material phase}\`, and use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
-When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved: {how it was decided or unblocked}\` (keyed with \`[key=<slug>]\` if you opened it with one) so it is durably closed instead of resurfacing behind later unrelated events.
+When a decision you escalated is answered or a blocker clears and your domain resumes, close it: \`resolved: {how it was decided or unblocked}\`, or if you opened it keyed, put the same \`[key=<slug>]\` right after \`resolved\`, before the colon - \`resolved [key=<slug>]: {how it was decided or unblocked}\` - so it is durably closed instead of resurfacing behind later unrelated events.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
 # Definition of done
@@ -255,7 +255,11 @@ The report is the only thing that survives, so anything worth keeping must be in
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
-   When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
+   Tracking more than one open decision at once, key it - the \`[key=<slug>]\` token goes right after the verb, before the colon:
+   \`needs-decision [key=<slug>]: {summary of options}\`
+   When firstmate replies or a blocker clears and you resume, close it the same way, key in the same spot:
+   \`resolved [key=<slug>]: {how it was decided or unblocked}\`
+   (a plain \`resolved: {how it was decided or unblocked}\` closes an unkeyed decision) so it is durably closed and does not keep resurfacing.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
@@ -364,7 +368,11 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
-   When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
+   Tracking more than one open decision at once, key it - the \`[key=<slug>]\` token goes right after the verb, before the colon:
+   \`needs-decision [key=<slug>]: {summary of options}\`
+   When firstmate replies or a blocker clears and you resume, close it the same way, key in the same spot:
+   \`resolved [key=<slug>]: {how it was decided or unblocked}\`
+   (a plain \`resolved: {how it was decided or unblocked}\` closes an unkeyed decision) so it is durably closed and does not keep resurfacing.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
