@@ -255,6 +255,12 @@ secondmate_sync() {
     fi
     if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
       rm -f "$marker"
+      # The nudge told the secondmate to re-read the surface now on disk in its
+      # home, so advance its loaded baseline to that HEAD. Without this the drift
+      # test in process_secondmate would fire again on every session start (a
+      # re-read does not rewrite the baseline; only a restart or this does),
+      # re-nudging an already-caught-up secondmate indefinitely.
+      record_instr_base "$home" "$home/state" || true
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
@@ -315,6 +321,9 @@ secondmate_sync() {
       }
       if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
         rm -f "$marker"
+        # Same de-dupe as the immediate send: advance the loaded baseline to the
+        # commit we just nudged the secondmate to re-read.
+        record_instr_base "$home_real" "$home_real/state" || true
         echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
       else
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"

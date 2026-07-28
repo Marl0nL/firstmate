@@ -23,8 +23,20 @@
 # tmux actions the skill performs. The script's job is the safe git mechanics
 # plus a parseable summary telling the caller what to do next:
 #   - one status line per target (updated/already current/skipped)
-#   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
+#   - reread-firstmate: yes|no    (does the running firstmate need to re-read)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
+#
+# reread-firstmate is decided against the commit THIS SESSION LOADED (recorded in
+# state/.instr-base at session start), not against the commit this script finds on
+# disk when it runs. A teardown fleet-sync can fast-forward this home (the shared
+# default branch of a linked worktree) AFTER the session loaded its instructions
+# but BEFORE the updater runs; comparing on-disk-before vs on-disk-after would then
+# see no movement and wrongly report "no" while the session runs stale
+# instructions. So the answer is "yes" whenever the watched instruction surface
+# (AGENTS.md, bin/, .agents/skills/) at the current HEAD differs from that recorded
+# baseline. A MISSING baseline is conservatively "yes": a spurious re-read is cheap,
+# a false "no" is a correctness failure. After reporting, the baseline is advanced
+# to the current HEAD, so once the caller re-reads, a second run is a no-op.
 #
 # Usage: fm-update.sh [--help]
 set -eu
@@ -51,9 +63,19 @@ fi
 
 reread_firstmate="no"
 ff_target "$FM_ROOT" "firstmate" origin no no
-if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
+# Compare the watched instruction surface at the CURRENT (post-fast-forward) HEAD
+# against the commit this session loaded (state/.instr-base), so a home already
+# fast-forwarded by a teardown fleet-sync - leaving ff_target's own before/after
+# blind - still reports the re-read it needs. A missing baseline is conservative
+# (see instr_surface_drifted / this file's header).
+if [ "$(instr_surface_drifted "$FM_ROOT" "$STATE")" = yes ]; then
   reread_firstmate="yes"
 fi
+# Advance the baseline to the surface the caller is now told to re-read to, so a
+# second /updatefirstmate after the re-read is correctly a no-op. Only re-read
+# points (session start, this updater) ever move the baseline; a silent
+# fast-forward never does, which is what keeps the drift above detectable.
+record_instr_base "$FM_ROOT" "$STATE" || true
 
 # --- secondmates -----------------------------------------------------------
 # An updated live secondmate is nudged whenever it advanced (nudge_requires_instr
