@@ -135,6 +135,8 @@ Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` pro
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 After creating a secondmate, move existing main-backlog queued items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it is idempotent and refuses In flight, Done, or non-secondmate homes.
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
+The registry's charter-summary field is always deterministically truncated to a short one-liner, since the whole registry prints in full at every session start; set `FM_SECONDMATE_SUMMARY` to supply that short summary directly instead of deriving it from the (possibly huge) charter text.
+The scope field is never truncated because it is the routing input the main firstmate matches work against at intake.
 Each seed writes an `.fm-secondmate-home` identity marker at the home root.
 The tracked root `.gitignore` ignores that marker, so validation can read it without making a freshly seeded home appear dirty to porcelain-based safety checks.
 This does not relax protection for any other untracked file.
