@@ -506,7 +506,8 @@ It never closes the husk first, because closing a workspace's last remaining tab
 This is the identical create-before-close safety argument `fm_backend_herdr_workspace_prune_seeded_default_tab` already established for the seeded default tab.
 
 The 0.7.1 e2e evidence for this section (`tests/fm-backend-herdr-respawn-idem-e2e.test.sh`, an isolated non-default session) exercised a real `session stop` + fresh `herdr server` restart followed by a same-labeled `fm_backend_herdr_create_task` call, closing and replacing the restored no-agent husk while a pane carrying a genuinely registered agent (via `pane report-agent`) refused.
-**The full `session stop` + restart e2e was not re-run against 0.7.4** (it restarts a real herdr server, out of scope for the isolated-lab safety contract this task worked under); its two arms were instead re-confirmed by cheaper means. The restored-husk arm: a bare shell reads `no-agent`/process-`live` -> composed `dead` -> reclaimed (measured live, acceptance table below). The registered-agent-refuses arm: **retested 2026-07-21 in an isolated lab** - `pane report-agent` on 0.7.4 leaves `pane get`'s `agent_session` null but DOES create an `agent get` record, and the recalibrated classifier reads that pane `live` via its agent-record fallback (`reality=live`, `tab_is_husk` refuses), so a report-agent-registered pane is still protected from close.
+**The full `session stop` + restart e2e was not re-run against 0.7.4** (it restarts a real herdr server, out of scope for the isolated-lab safety contract this task worked under); its two arms were instead re-confirmed by cheaper means. The restored-husk arm: a bare shell reads `no-agent`/process-`live` -> composed `dead` -> reclaimed (measured live, acceptance table below). The registered-agent-refuses arm: **retested 2026-07-21 in an isolated lab** - `pane report-agent` on 0.7.4 leaves `pane get`'s `agent_session` null but DOES create an `agent get` record, and the recalibrated classifier read that pane `live` via its agent-record fallback (`reality=live`, `tab_is_husk` refuses).
+**Superseded by the 2026-07-24 rule below:** a record over a bare-shell foreground now reads `dead`, so `pane report-agent` alone no longer protects a pane from close, and no longer simulates a live agent in a test - see "Consequence for `pane report-agent` as a test fixture" under the 2026-07-28 section.
 The recalibrated husk decision is additionally unit-covered end-to-end through the composed classifiers in `tests/fm-backend-herdr.test.sh` (a bare-shell husk with a live shell process is reclaimed, a ghost is reclaimed, a live agent refuses, an inconclusive process probe refuses), and the live bare-shell and two live-agent rows of its acceptance table were measured directly (below).
 The `dead` (`pane_not_found`) classification remains a conservative, defensively-coded path: killing a pane's process on a live server was observed to make herdr immediately reap both the pane AND its tab, so the tab never lingers for the duplicate check to find.
 
@@ -653,7 +654,7 @@ Metadata alone still cannot tell a live pane from a replayed ghost (both carry `
 `fm_backend_herdr_pane_agent_reality` composes them and is the single owner of the cross product; its full table is documented at the function in `bin/backends/herdr.sh` and unit-covered cell-by-cell in `tests/fm-backend-herdr.test.sh`.
 Both `live`-process cells need a third read (the `live`/`live` half was added 2026-07-24 - see that section below).
 A pane with a live process but no agent metadata (`no-agent`/`live`) is only `dead` when its foreground process is a genuine bare shell.
-If a non-shell process is running there, herdr has simply not registered it as an agent - a slow start, or a harness herdr's detection does not recognize - so the cell reads `unknown` rather than `dead`, and `fm_backend_herdr_pane_foreground_is_shell` (over `pane process-info`'s already-available argv, no new probe) is what tells the two apart.
+If a non-shell process is running there, herdr has simply not registered it as an agent - a slow start, or a harness herdr's detection does not recognize - so the cell reads `unknown` rather than `dead`, and `fm_backend_herdr_pane_foreground_is_shell` (over the `pane process-info` body already fetched for `process_state`, no new probe) is what tells the two apart - see "Measured 2026-07-28" below for which field of that body decides it.
 This is what stops `create_task` from closing, and fm-spawn's re-send from typing over, a running-but-undetected agent.
 A pane whose metadata DOES claim an agent (`live`/`live`) reads the same signal for the opposite reason: a bare-shell foreground there means the agent exited and left both its shell and its never-released `agent_session` behind, so that cell is `dead` too, and only a non-shell foreground is `live`.
 Two accessors read that table with deliberately opposite polarity, and neither is the other's negation - `unknown` satisfies neither:
@@ -744,7 +745,7 @@ Relaunching a *different* agent into the same pane does not clear it either - af
 That is the contradiction. Composed with the process probe alone, the shape `agent_session` present + a live shell process read `live` -> `fm_backend_herdr_agent_alive` = `alive` -> **an agent that exited or crashed reported alive indefinitely**: the session-start secondmate sweep would never respawn it, `fm_backend_herdr_tab_is_husk` would never reclaim its tab, and fm-spawn's re-send gate would never confirm the pane empty.
 It is the mirror image of the bug PR #22 fixed, in the other polarity.
 
-**The fix** (`fm_backend_herdr_pane_agent_reality`, `bin/backends/herdr.sh`): the `live`/`live` cell now consults `fm_backend_herdr_pane_foreground_is_shell`, the same disambiguator the `no-agent`/`live` cell already used, and reads `dead` when every foreground process is a bare shell.
+**The fix** (`fm_backend_herdr_pane_agent_reality`, `bin/backends/herdr.sh`): the `live`/`live` cell now consults `fm_backend_herdr_pane_foreground_is_shell`, the same disambiguator the `no-agent`/`live` cell already used, and reads `dead` when the pane's own shell owns its terminal.
 Both live-process cells now express one measured principle - **a bare-shell foreground means no agent is running here, whatever the metadata says** - and they differ only in what a NON-shell foreground means (`live` when metadata claims an agent, `unknown` when it does not).
 No new probe: `foreground_is_shell` reads the `pane process-info` body already fetched for `process_state`.
 
@@ -795,6 +796,71 @@ That is the NORMAL shape of a deliberately held crew - a crew that paused on an 
 So porting upstream's gate verbatim would invert it here: it would refuse the bounded cadence for exactly the crew the cadence exists to quiet, and the ordinary stale interval would keep firing.
 The gate is therefore NOT ported; `bin/fm-watch.sh`'s `hold_state_class` carries the reasoning inline.
 The two `/exit` rows also re-confirm the 2026-07-24 finding from a second machine and OS: the `agent_session` is never released, and only the bare-shell foreground reveals the exit.
+
+## Measured 2026-07-28 (herdr 0.7.4 / protocol 16): foreground ownership is the process GROUP, not the process list
+
+The two sections above both hinge on one question - is the pane's foreground a bare shell? - and both got the wrong answer for the first seconds of every pane's life, because `fm_backend_herdr_pane_foreground_is_shell` read the wrong field.
+
+`pane process-info` returns three things: `shell_pid`, `foreground_process_group_id`, and a `foreground_processes` enumeration of every process herdr finds in that group.
+The shipped implementation required EVERY enumerated process to be shell-named.
+An interactive shell forks constantly while it runs its own rc files, and those children land in the shell's own process group, so the enumeration is full of non-shell names while the pane is nothing but a shell.
+
+Measured on a fresh herdr pane on Bazzite/Fedora (`/bin/bash` interactive, sampled every ~120ms from the moment `tab create` returned, `default` session untouched throughout, all calls through `bin/fm-herdr-lab.sh`):
+
+```
+ 1 fgpgid=3532388 procs=[{"name":"bash","pid":3532388},{"name":"bash","pid":3532452},{"name":"brew","pid":3532454},{"name":"grep","pid":3532455},{"name":"brew","pid":3532458}]
+ 7 fgpgid=3532388 procs=[{"name":"bash","pid":3532388},{"name":"bash","pid":3532523},{"name":"flatpak","pid":3532524},{"name":"bash","pid":3532525}]
+ 8 fgpgid=3532388 procs=[{"name":"bash","pid":3532388},{"name":"sed","pid":3532546}]
+ 9 fgpgid=3532388 procs=[{"name":"bash","pid":3532388},{"name":"bash","pid":3532551},{"name":"rpm-ostree","pid":3532553},{"name":"jq","pid":3532555}]
+10 fgpgid=3532388 procs=[... ,{"name":"pkttyagent","pid":3532566}]
+13 fgpgid=3532388 procs=[{"name":"bash","pid":3532388}]      # settles here, ~2-3s in
+```
+
+`shell_pid` was 3532388 for every one of those reads.
+The four-way calibration table below is unchanged; what changed is which field decides its `shell`/`non-shell` column.
+
+### The discriminator
+
+`foreground_process_group_id == shell_pid` means the pane's own shell owns the terminal.
+A real foreground job always takes its own process group, so the comparison separates the two cases exactly, at any moment of the pane's life.
+Measured across a pane's whole lifecycle in one isolated lab session:
+
+| pane state | `shell_pid` | `foreground_process_group_id` | equal | enumerated processes |
+|---|---|---|---|---|
+| fresh pane, rc files still running | 3624438 | 3624438 | yes | `bash`, `grep`, `ps`, `grepconf.sh`, `rpm-ostree`, `jq`, `pkttyagent` |
+| settled at its prompt | 3624438 | 3624438 | yes | `bash` |
+| `sleep 30` in the foreground | 3624438 | 3625142 | no | `sleep` |
+| `python3 -c 'time.sleep(30)'` in the foreground | 3624438 | 3632128 | no | `python3` |
+| back at the prompt after the job finished | 3624438 | 3624438 | yes | `bash` |
+
+The group leader's own name is still matched against the shell allowlist, so a pane whose "shell" is not a shell cannot pass.
+A body carrying neither field falls back to the old whole-list scan, which is only ever wrong toward refusal.
+
+### What this broke, and the evidence it was a real defect
+
+Reading the list instead of the group made a genuine husk compose to `unknown`, and `unknown` refuses - so `fm_backend_herdr_tab_is_husk` refused to reclaim a restored pane, reproducing the 2026-07-03 manual-pane-close incident on every respawn after a herdr server restart.
+A restored pane's shell is freshly started, so a post-restart respawn always lands inside that window.
+`fm_backend_herdr_agent_alive` read `unknown` rather than `dead` in the same window, which is the refusal `bin/fm-bootstrap.sh`'s secondmate-liveness sweep needs a confident `dead` to act on - so a crashed secondmate would not have been respawned.
+
+Measured before and after, same host, 10 rounds of create-a-husk-then-respawn-into-it:
+
+```
+before: replaced=0 refused=10
+after:  replaced=10 refused=0
+```
+
+`tests/fm-backend-herdr-smoke.test.sh` and `tests/fm-backend-herdr-respawn-idem-e2e.test.sh` both failed on the husk arm for exactly this reason, and both pass at `723ab78~1` (before the liveness work), which is what identified this as a regression rather than a stale expectation.
+
+### Consequence for `pane report-agent` as a test fixture
+
+`pane report-agent` on an otherwise-bare pane is no longer a live-agent simulation, and has not been since the 2026-07-24 rule above: it writes the record but puts no agent in the pane, so the composed reality reads that pane `dead` on the bare-shell foreground.
+Both e2e suites' "a genuinely live registered agent still refuses" arms were passing only because the list-scan bug happened to answer `unknown` there.
+They now build the real shape - a running non-shell foreground process holding the terminal, plus the agent record - which is what a live crewmate actually presents to both classifiers.
+
+### Regression coverage
+
+`tests/fm-backend-herdr.test.sh`'s `test_foreground_is_shell_classifies_process_info` gained the rc-startup row (`live-startup`: shell-owned terminal, non-shell names in the list) and the no-fields fallback row.
+The fake CLI's `pane process-info` bodies now carry `shell_pid` and a realistic `foreground_process_group_id`, because a body without them cannot exercise the field this function actually reads.
 
 ## End-to-end verification (spawn -> steer -> peek -> done -> merge -> teardown)
 

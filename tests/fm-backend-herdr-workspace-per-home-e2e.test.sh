@@ -32,7 +32,12 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+# Disarm the EXIT trap BEFORE cleaning up: cleanup_all tears the lab session
+# down and consumes its fleet-state tripwire, so letting the trap run it a
+# second time printed a bogus "missing fleet-state tripwire ... refusing
+# destructive calls" after every real failure. That is the guard protecting
+# the captain's live default session; it must never cry wolf.
+fail() { printf 'not ok - %s\n' "$1" >&2; trap - EXIT; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 assert_contains_local() {  # <haystack> <needle> <msg>
   case "$1" in
@@ -63,6 +68,15 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-e2e.XXXXXX")
 SESSION="fm-lab-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"
+# FM_SPAWN_CONFIRM=0 for the same reason tests/lib.sh sets it fleet-wide: all
+# three spawns below use a stand-in launch command, not an agent. fm-spawn's
+# post-launch confirmation (bin/fm-spawn.sh, added 2026-07-18) refuses to report
+# success when the pane is a CONFIRMED bare shell, and `sh -c 'echo ...'` is a
+# bare shell by the time confirmation reads the pane, because it ran and exited.
+# That is the confirmation working, not a workspace-routing failure, so this
+# suite - which owns workspace-per-home ROUTING - opts out of it. The
+# confirmation behaviour has its own owner in tests/fm-spawn-agent-confirm.test.sh.
+export FM_SPAWN_CONFIRM=0
 WT1=; WT2=
 cleanup_all() {
   [ -n "$WT1" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT1" >/dev/null 2>&1

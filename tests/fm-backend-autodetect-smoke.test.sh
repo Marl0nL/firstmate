@@ -90,11 +90,19 @@ git -C "$PROJ" -c user.name='Firstmate Tests' -c user.email='tests@example.inval
 
 # --- spawn with NO explicit backend config; HERDR_ENV=1 is the only marker --
 
+# FM_SPAWN_CONFIRM=0 for the same reason tests/lib.sh sets it fleet-wide: this
+# suite's launch command is a stand-in, not an agent. fm-spawn's post-launch
+# confirmation (bin/fm-spawn.sh, added 2026-07-18) refuses to report success
+# when the pane is a CONFIRMED bare shell, and `sh -c 'echo ...'` is a bare
+# shell by the time confirmation reads the pane, because it ran and exited. That
+# is the confirmation working, not an auto-detection failure, so this suite -
+# which owns backend SELECTION - opts out of it. The confirmation behaviour has
+# its own owner in tests/fm-spawn-agent-confirm.test.sh.
 OUT_FILE="$TMP_ROOT/spawn.out"; ERR_FILE="$TMP_ROOT/spawn.err"
 env -u TMUX -u FM_BACKEND PATH="$PATH" HERDR_ENV=1 \
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
   FM_CONFIG_OVERRIDE="$CONFIG" FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
-  FM_SPAWN_NO_GUARD=1 \
+  FM_SPAWN_NO_GUARD=1 FM_SPAWN_CONFIRM=0 \
   "$ROOT/bin/fm-spawn.sh" "$ID" "$PROJ" "sh -c 'echo autodetect-smoke-ok'" \
   >"$OUT_FILE" 2>"$ERR_FILE"
 status=$?
