@@ -6,9 +6,18 @@
 # is absorbed only when the crew shows POSITIVE evidence it is still working (an
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
 # otherwise, so a crew that finishes (or stops and waits) without a current
-# working signal is never silently swallowed. A declared external-wait pause is
-# the separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# working signal is never silently swallowed. A DECLARED HOLD is the separate idle
+# absorb case: a crew that is idle on purpose because what it waits on is already
+# tracked elsewhere. There are three, and all three share ONE bounded cadence
+# (PAUSE_RESURFACE_SECS) rather than the ordinary stale path:
+#   - a declared external-wait pause (paused:), tracked by the crew's own reason;
+#   - a durable captain-held transfer (captain-held:), tracked by its captain-held
+#     backlog item;
+#   - a crew parked awaiting merge (reconciled done + a REGISTERED merge monitor),
+#     tracked by that merge monitor's own check wake.
+# A hold is absorbed but never swallowed: every one of them re-surfaces once per
+# bounded window for a recheck, so a hold nobody cleared cannot rot invisibly, and
+# a held crew's initial no-verb status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -19,7 +28,8 @@
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause is absorbed instead with its own long
+#                          hold (pause, captain-held, or parked-awaiting-merge) is
+#                          absorbed instead with its own long
 #                          re-surface cadence, never as a wedge. Only when neither
 #                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
@@ -143,10 +153,13 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
-# A crew that DECLARED a pause (paused: <reason>, fm-classify-lib.sh) is idling on
-# a known external wait, so its stale pane is absorbed rather than wedge-escalated;
-# it re-surfaces once for a recheck every PAUSE_RESURFACE_SECS - far longer than the
-# wedge threshold, but finite so a forgotten pause cannot rot invisibly.
+# The bounded cadence shared by all three declared holds (see the file header):
+# a declared external-wait pause (paused:), a durable captain-held transfer
+# (captain-held:), and a crew parked awaiting merge. Each is idling on something
+# already tracked elsewhere, so its stale pane is absorbed rather than
+# wedge-escalated; it re-surfaces once for a recheck every PAUSE_RESURFACE_SECS -
+# far longer than the wedge threshold, but finite so a forgotten hold cannot rot
+# invisibly. fm-classify-lib.sh owns the default so both supervisors agree.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
@@ -356,21 +369,34 @@ capture_failure() {  # <window> <key>
   wake "$reason"
 }
 
-# Absorb a stale pane whose crew is in a DECLARED external-wait pause (paused:),
-# and re-surface it once every PAUSE_RESURFACE_SECS for a recheck so it cannot rot
-# invisibly. Called on any stale poll once the crew is known paused (first sight,
-# after crew_absorb_class; and repeat sights, gated by the .paused-<key> flag), so
-# it must be cheap: it NEVER re-reads the crew state. The re-surface age is anchored
-# on the pause's own STATUS-FILE mtime, not a per-hash marker, so a churny idle pane
-# (a ticking clock, a token counter) cannot keep resetting the cadence the way a
-# hash-tied timer would. A .paused-resurfaced-<key> throttle marker records the last
-# re-surface epoch so, once past the window, it fires once per window rather than
-# every poll. Advances the stale suppressor to <hash> and flags the key paused.
-handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
+# Absorb a stale pane whose crew is in a DECLARED HOLD, and re-surface it once
+# every PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. <kind>
+# selects which hold is being absorbed and therefore what the recheck asks the
+# supervisor to confirm; it changes the reason wording ONLY, never the cadence,
+# because the three holds are one policy with one owner:
+#   paused (default) - a declared external-wait pause (paused:) or a durable
+#                      captain-held transfer (captain-held:); both say "idle on
+#                      purpose, the wait is recorded in the status log itself".
+#   parked           - a finished crew idling on its open PR behind a REGISTERED
+#                      merge monitor (crew_is_parked_awaiting_merge).
+# Called on any stale poll once the hold is established (first sight, after
+# hold_state_class; repeat sights gated by the
+# .paused-<key> flag), so it must be cheap: it NEVER re-reads the crew state. The
+# re-surface age is anchored on the hold's own STATUS-FILE mtime, not a per-hash
+# marker, so a churny idle pane (a ticking clock, a token counter) cannot keep
+# resetting the cadence the way a hash-tied timer would. A
+# .paused-resurfaced-<key> throttle marker records the last re-surface epoch so,
+# once past the window, it fires once per window rather than every poll. Advances
+# the stale suppressor to <hash> and flags the key held.
+handle_paused_stale() {  # <window> <task> <hash> [kind]
+  local win=$1 task=$2 h=$3 kind=${4:-paused} key statusf mtime age rf rf_age reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
-  : > "$STATE/.paused-$key"
+  # The flag file CARRIES the hold kind, so hold_state_class's cheap path can
+  # re-assert the same hold without another authoritative read. An older watcher
+  # left this file empty; an empty value simply misses the cheap path and takes the
+  # authoritative re-read, so the format change self-heals across a restart.
+  printf '%s' "$kind" > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
@@ -379,12 +405,15 @@ handle_paused_stale() {  # <window> <task> <hash>
   rf="$STATE/.paused-resurfaced-$key"
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
-    reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
+    case "$kind" in
+      parked) reason="stale: $win (parked ${age}s awaiting merge - its merge monitor is the live signal, rechecked on a long cadence not a wedge; confirm the PR is still open and still watched)" ;;
+      *)      reason="stale: $win (paused ${age}s, awaiting external - declared hold, rechecked on a long cadence not a wedge; confirm the wait still holds)" ;;
+    esac
     fm_wake_append stale "$win" "$reason" || exit 1
     date +%s > "$rf"
     wake "$reason"
   fi
-  triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+  triage_log "absorbed stale ($kind hold, age ${age}s): $win"
 }
 
 clear_pause_state() {  # <window>
@@ -404,23 +433,105 @@ clear_pause_tracking() {  # <window>
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
-pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class
+# hold_state_class: THE single decision of which declared hold, if any, owns this
+# stale pane right now. Prints exactly one token, which every stale-seam caller
+# switches on:
+#   working - authoritative state says the crew is actively working (an active
+#             no-mistakes run-step or a busy pane). Outranks every hold: full
+#             wedge sensitivity resumes with no manual re-arm.
+#   parked  - a finished crew idling on its open PR behind a REGISTERED merge
+#             monitor (crew_is_parked_awaiting_merge). Bounded hold cadence.
+#   paused  - the status log DECLARES a hold - an external-wait pause (paused:) or
+#             a durable captain-held transfer (captain-held:) - and authoritative
+#             state does not contradict it. Bounded hold cadence.
+#   none    - no hold and no positive working evidence: surface it.
+#
+# This replaced the narrower pause-only classifier so all three holds share one
+# throttle and one owner. Cost discipline is unchanged: the expensive
+# fm-crew-state.sh read happens at most once per STALE_ESCALATE_SECS per window,
+# because an ESTABLISHED hold (its kind recorded in .paused-<key> by
+# handle_paused_stale) stands on the cheap path until the .paused-rechecked-<key>
+# window elapses. The parked test is ordered first among the authoritative reads
+# and is itself gated on check registration, which costs no state read at all for
+# the crews that have no merge monitor.
+#
+# Reconciles the DECLARED HOLD in the status log (paused: or captain-held:) against
+# authoritative crew state.
+#
+# NO AGENT-LIVENESS GATE, deliberately, and this is where this port diverges from
+# upstream firstmate PR #743. Upstream additionally required
+# fm_backend_agent_alive to report `dead` before allowing the bounded cadence, so
+# that "a still-alive agent parked at an external-decision gate surfaces
+# immediately". That gate was written against upstream's METADATA-ONLY herdr
+# classifier, which mapped agent_state `no-agent` straight to `dead` - and our own
+# 0.7.4 recalibration measured `no-agent` for effectively every pane-typed
+# crewmate, so on herdr the gate answered `dead` almost always and never actually
+# fired. Under THIS tree's composed classifier (bin/backends/herdr.sh
+# fm_backend_herdr_pane_agent_reality) the same crew reads `alive` whenever its
+# harness process is still up and idle at its prompt, which is the NORMAL shape of
+# a deliberately held crew. Porting the gate verbatim would therefore invert it:
+# it would surface, on the ordinary stale path, exactly the held crew this cadence
+# exists to quiet. Our measurement wins, so the gate is not ported.
+#
+# What still keeps a wedge from being swallowed is unchanged and does not need
+# liveness: the hold must be DECLARED in the crew's own status log, and
+# crew_absorb_class must not report `working` - the moment an active run-step or a
+# busy pane says otherwise, this returns working and full wedge sensitivity
+# resumes. The bounded cadence itself is the backstop: every hold re-surfaces for
+# a recheck once per PAUSE_RESURFACE_SECS, so even a crew that declared a hold and
+# then died reaches the supervisor.
+hold_state_class() {  # <window> <task>
+  local win=$1 task=$2 key last recheck_file class cached
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
-  if ! status_is_paused "$last"; then
+  cached=$(cat "$STATE/.paused-$key" 2>/dev/null || true)
+
+  # Cheap path: an ALREADY-ESTABLISHED hold stands until its recheck window
+  # elapses, so a held pane costs no authoritative read per poll. A `paused` hold
+  # additionally re-reads the (already loaded) status line, so a crew that appends
+  # a new verb loses the hold on the very next poll rather than waiting out the
+  # window; a `parked` hold has no such log signal to watch, and its own re-read is
+  # bounded by the same window.
+  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+    case "$cached" in
+      parked) printf 'parked'; return ;;
+      paused)
+        if status_is_paused_or_captain_held "$last"; then
+          printf 'paused'
+          return
+        fi
+        ;;
+    esac
+  fi
+
+  # Authoritative re-read. Parked first: its gate is check REGISTRATION, which
+  # costs no fm-crew-state.sh read for a crew with no merge monitor at all.
+  if crew_is_parked_awaiting_merge "$task" "$STATE"; then
+    date +%s > "$recheck_file"
+    printf 'parked'
+    return
+  fi
+  if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"
     crew_absorb_class "$task"
     return
   fi
-  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    printf 'paused'
-    return
-  fi
   class=$(crew_absorb_class "$task")
+  # A verified durable captain-held transfer earns the bounded cadence on its own.
+  # crew_absorb_class can never answer `paused` for one: bin/fm-crew-state.sh reads
+  # PAST the bookkeeping line to the state verb underneath, so a captain-held crew
+  # reconciles to parked/done/blocked and lands here as `none`. That `none` is not
+  # evidence of a wedge - bin/fm-decision-hold.sh appends `captain-held:` only after
+  # VERIFYING that a captain-held backlog item owns the decision, which is stronger
+  # positive evidence than any pane read: it proves firstmate is already tracking
+  # the exact thing this crew waits on. `working` is deliberately not upgraded, so
+  # a re-activated crew still outranks the hold.
+  if [ "$class" = none ] && status_line_is_captain_held "$last"; then
+    class=paused
+  fi
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
     *) rm -f "$recheck_file" ;;
@@ -428,12 +539,29 @@ pause_state_class() {  # <window> <task>
   printf '%s' "$class"
 }
 
+# Surface a stale pane on the ordinary (non-hold) path. When the crew's log
+# DECLARES a hold, this is a deliberate fail-open: authoritative state refused to
+# corroborate the hold, so firstmate gets ONE immediate look - but the hold markers
+# are then (re)armed and the re-surface throttle stamped, so the very next poll
+# falls onto the bounded cadence instead of the wedge timer. Without that, a crew
+# whose hold cannot be corroborated would surface, then re-arm a wedge timer and
+# escalate as a possible wedge at STALE_ESCALATE_SECS, which is the ordinary stale
+# cadence this change exists to stop. Ported from upstream firstmate PR #743.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key
+  local win=$1 h=$2 key task last
   key=$(printf '%s' "$win" | tr ':/.' '___')
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.stale-since-$key"
+  task=$(window_to_task "$win" "$STATE")
+  last=$(last_status_line "$STATE/$task.status")
+  if status_is_paused_or_captain_held "$last"; then
+    printf 'paused' > "$STATE/.paused-$key"
+    date +%s > "$STATE/.paused-rechecked-$key"
+    date +%s > "$STATE/.paused-resurfaced-$key"
+  else
+    rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  fi
   wake "stale: $win"
 }
 
@@ -828,7 +956,14 @@ EOF
     key=${key//\//_}
     key=${key//./_}
     last=$(last_status_line "$STATE/$task.status")
-    if ! status_is_paused "$last" && [ -e "$STATE/.paused-$key" ]; then
+    # Drop hold tracking the moment the log stops declaring one - EXCEPT for a
+    # parked-awaiting-merge hold, which is never declared by a status verb at all
+    # (its evidence is `done:` plus a registered merge monitor), so a log test can
+    # never see it and would otherwise wipe its bounded cadence on every poll.
+    # hold_state_class is what retires a parked hold, by ceasing to return `parked`.
+    if [ -e "$STATE/.paused-$key" ] \
+       && ! status_is_paused_or_captain_held "$last" \
+       && [ "$(cat "$STATE/.paused-$key" 2>/dev/null || true)" != parked ]; then
       clear_pause_tracking "$w"
     fi
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
@@ -859,7 +994,7 @@ EOF
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
-          case "$(pause_state_class "$w" "$task")" in
+          case "$(hold_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$w" ;;
           esac
@@ -885,35 +1020,56 @@ EOF
           # line. On a NEW hash, give an active run/busy pane (the same
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
-          if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
+          # The two declared holds that reach THIS branch rather than the
+          # non-terminal one below both look terminal on purpose:
+          #   - parked awaiting merge: the crew's real state verb IS done:;
+          #   - captain-held: that line is BOOKKEEPING, so the terminal reader looks
+          #     past it to the needs-decision:/done: underneath.
+          # So hold_state_class has to be consulted here too, not only below - the
+          # upstream port placed it on the non-terminal path alone, where a
+          # captain-held crew never lands.
+          new_hash=0
+          [ "$(cat "$sf" 2>/dev/null || true)" = "$h" ] || new_hash=1
+          if [ "$new_hash" = 1 ] || [ -e "$pf" ]; then
             task=$(window_to_task "$w" "$STATE")
-            if crew_is_parked_awaiting_merge "$task" "$STATE"; then
-              # Parked awaiting merge: a finished crew (reconciled done) with an
-              # armed merge-monitor idling on its open PR. Its merge-check, not this
-              # churny idle-pane hash, is the live signal, so ABSORB the stale wake
-              # and arm NO wedge timer (a parked crew has nothing to wedge on; clear
-              # any leftover timer from a prior working phase). The predicate is
-              # re-read on every distinct hash, so the moment the crew is re-activated
-              # (busy pane, or its latest state verb moves off done) it stops
-              # reporting done and full stale sensitivity resumes here on the next
-              # poll - a re-activated crew that then wedges is surfaced exactly as any
-              # working crew would be. The done: PR-ready itself already reached
-              # firstmate via the signal path when the crew appended it; re-surfacing
-              # this idle pane adds nothing.
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf" "$ewf"
-              triage_log "absorbed stale (parked awaiting merge - merge-check is the live signal): $w"
-            elif crew_is_provably_working "$task"; then
-              printf '%s' "$h" > "$sf"
-              date +%s > "$ssf"
-              triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
-            else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              mark_surfaced "$STATE/$task.status"
-              wake "stale: $w"
-            fi
+            case "$(hold_state_class "$w" "$task")" in
+              parked)
+                # Parked awaiting merge: a finished crew (reconciled done) with a
+                # REGISTERED merge monitor idling on its open PR. Its merge-check, not
+                # this churny idle-pane hash, is the live signal, so ABSORB the stale
+                # wake and arm NO wedge timer (a parked crew has nothing to wedge on;
+                # handle_paused_stale clears any leftover timer from a prior working
+                # phase). Re-evaluated, never latched: the moment the crew is
+                # re-activated (busy pane, or its latest state verb moves off done) it
+                # stops reporting done and full stale sensitivity resumes. The done:
+                # PR-ready itself already reached firstmate via the signal path when the
+                # crew appended it, so an immediate re-surface of this idle pane adds
+                # nothing - but the bounded cadence still rechecks it, so a PR whose
+                # merge word never comes cannot sit unwatched forever.
+                handle_paused_stale "$w" "$task" "$h" parked
+                ;;
+              paused)
+                handle_paused_stale "$w" "$task" "$h"
+                ;;
+              working)
+                # A NEW hash is a fresh stale episode, so the wedge timer restarts;
+                # re-entering on an unchanged hash (a hold that authoritative state
+                # just overrode) must NOT keep resetting it, or a crew that wedges
+                # right after a hold lifts would never reach the threshold.
+                clear_pause_state "$w"
+                printf '%s' "$h" > "$sf"
+                if [ "$new_hash" = 1 ] || [ ! -e "$ssf" ]; then date +%s > "$ssf"; fi
+                triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+                ;;
+              *)
+                clear_pause_state "$w"
+                fm_wake_append stale "$w" "stale: $w" || exit 1
+                printf '%s' "$h" > "$sf"
+                rm -f "$ssf"
+                mark_surfaced "$STATE/$task.status"
+                wake "stale: $w"
+                ;;
+            esac
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
             # wedge timer is running for it) - keep treating it that way
@@ -927,26 +1083,28 @@ EOF
         else
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
           # Decided once per distinct stale hash (the costly run-step read runs only
-          # on first sight, never every poll) via crew_absorb_class, which returns
-          # BOTH absorb reasons from one fm-crew-state.sh read:
+          # on first sight, never every poll) via hold_state_class:
           #   - working: an actively-running pipeline legitimately sits on a static
           #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
           #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
-          #   - paused: the crew DECLARED an external wait (paused:), so absorb on the
-          #     long PAUSE_RESURFACE_SECS recheck cadence instead of wedge-escalating;
+          #   - parked / paused: a declared hold, so absorb on the long
+          #     PAUSE_RESURFACE_SECS recheck cadence instead of wedge-escalating;
           #   - none: no running pipeline, idle pane, no busy signature, no declared
-          #     pause - the crew has STOPPED. Surface immediately so firstmate peeks
+          #     hold - the crew has STOPPED. Surface immediately so firstmate peeks
           #     (it may be done via an interactive menu that wrote no done: status,
           #     waiting on a decision, or wedged) instead of leaving the finish to
           #     wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
-            case "$(crew_absorb_class "$task")" in
+            case "$(hold_state_class "$w" "$task")" in
               working)
                 clear_pause_tracking "$w"
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
+                ;;
+              parked)
+                handle_paused_stale "$w" "$task" "$h" parked
                 ;;
               paused)
                 handle_paused_stale "$w" "$task" "$h"
@@ -957,14 +1115,20 @@ EOF
             esac
           else
             task=$(window_to_task "$w" "$STATE")
-            if [ -e "$pf" ] || status_is_paused "$(last_status_line "$STATE/$task.status")"; then
-              case "$(pause_state_class "$w" "$task")" in
+            if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+              case "$(hold_state_class "$w" "$task")" in
+                parked)  handle_paused_stale "$w" "$task" "$h" parked ;;
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$w"
                          printf '%s' "$h" > "$sf"
-                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
+                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared hold)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
-                *)       surface_nonterminal_stale "$w" "$h" ;;
+                # An unchanged hash whose hold authoritative state will not
+                # corroborate stays on the bounded cadence rather than re-surfacing
+                # every poll: the crew already got its one immediate look from
+                # surface_nonterminal_stale, which armed these markers precisely so
+                # the repeat lands here. Ported from upstream firstmate PR #743.
+                *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
@@ -973,8 +1137,13 @@ EOF
         fi
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping.
+        # Reaching here with n>=2 means the pane is BUSY - the crew is working again -
+        # so every hold, parked included, is retired. The undeclared-hold arm keeps
+        # its parked exemption for the same reason as at the top of the loop: a
+        # parked hold is never declared by a status verb, so a log test cannot see it.
         rm -f "$ssf" "$ewf"
-        if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+        if [ -e "$pf" ] && { [ "$n" -ge 2 ] || { [ "$(cat "$pf" 2>/dev/null || true)" != parked ] \
+             && ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; }; then
           clear_pause_tracking "$w"
         fi
       fi
@@ -983,10 +1152,24 @@ EOF
       echo 0 > "$cf"
       rm -f "$ssf" "$ewf"
       task=$(window_to_task "$w" "$STATE")
-      if ! afk_present && status_is_paused "$(last_status_line "$STATE/$task.status")" && ! window_is_busy "$w" "$tail40"; then
-        case "$(pause_state_class "$w" "$task")" in
+      # The CHANGED-hash route, and the one that matters most for a held crew: a
+      # redraw-jittered idle pane (a clock, a token counter) never produces two
+      # identical hashes, so it never reaches the stale triage above at all - it lands
+      # here on every single poll. Keeping the bounded cadence alive here is what stops
+      # a held crew from being re-evaluated from scratch each poll.
+      #
+      # The pre-gate is deliberately three CHEAP tests, because hold_state_class can
+      # cost an fm-crew-state.sh read and this runs every poll for every window: a
+      # declared hold in the line already read, an established hold marker, or the mere
+      # PRESENCE of a check file (the only crews that can be parked). A crew with none
+      # of those cannot be held, so it never pays for the read.
+      if ! afk_present \
+         && { status_is_paused_or_captain_held "$last" || [ -e "$pf" ] || [ -f "$STATE/$task.check.sh" ]; } \
+         && ! window_is_busy "$w" "$tail40"; then
+        case "$(hold_state_class "$w" "$task")" in
+          parked) handle_paused_stale "$w" "$task" "$h" parked ;;
           paused) handle_paused_stale "$w" "$task" "$h" ;;
-          *)      clear_pause_tracking "$w" ;;
+          *)      [ -e "$pf" ] && clear_pause_tracking "$w" ;;
         esac
       else
         [ -e "$pf" ] && clear_pause_tracking "$w"

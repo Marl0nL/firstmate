@@ -25,18 +25,6 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
-# An armed merge-monitor, exactly as bin/fm-pr-check.sh now leaves one: the check
-# file is present AND registered through the check trust path. Registration is
-# what makes it genuinely armed - the watcher REFUSES an unregistered check
-# instead of running it (bin/fm-check-lib.sh), and a refusal is an actionable
-# wake, so an unregistered fixture would not model a parked crew at all.
-arm_merge_monitor() {  # <state> <id>
-  local state=$1 id=$2
-  : > "$state/$id.check.sh"
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
-    || fail "could not arm the merge-monitor fixture for $id"
-}
-
 fm_test_tmproot TMP_ROOT fm-watch-triage-tests
 
 # Common watcher knobs: tight poll/grace, no check or heartbeat cadence unless a
@@ -293,6 +281,33 @@ test_status_is_paused_classifier() {
   pass "status_is_paused: only the leading paused verb matches, and paused is not captain-relevant"
 }
 
+# status_is_paused_or_captain_held: the ONE place the external-wait pause verb and
+# the durable captain-held transfer verb are treated alike, because the stale seam
+# owes both the same bounded hold cadence. Everywhere else they stay distinct -
+# captain-held: is bookkeeping and paused: is a state - so this must match exactly
+# those two leading verbs and nothing else.
+test_status_is_paused_or_captain_held_classifier() {
+  status_is_paused_or_captain_held 'paused: awaiting the upstream release' \
+    || fail "paused: not recognized as a declared hold"
+  status_is_paused_or_captain_held 'captain-held [key=merge]: tracked by task-x-decision-merge' \
+    || fail "captain-held: not recognized as a declared hold"
+  status_is_paused_or_captain_held '  captain-held: tracked by hold-7' \
+    || fail "leading-space captain-held: not recognized as a declared hold"
+  status_is_paused_or_captain_held 'done: PR https://x/y/pull/4' \
+    && fail "done: wrongly recognized as a declared hold"
+  status_is_paused_or_captain_held 'blocked: the release is captain-held upstream' \
+    && fail "a blocked line merely mentioning captain-held false-matched"
+  status_is_paused_or_captain_held 'resolved: closed [key=q1]' \
+    && fail "resolved: bookkeeping wrongly recognized as a declared hold"
+  status_is_paused_or_captain_held '' && fail "an empty line classified as a declared hold"
+  # The verb overrides still reach through the combined predicate.
+  FM_CLASSIFY_CAPTAIN_HELD_VERB='held-by-cap' status_is_paused_or_captain_held 'held-by-cap: tracked' \
+    || fail "FM_CLASSIFY_CAPTAIN_HELD_VERB override not honored"
+  FM_CLASSIFY_CAPTAIN_HELD_VERB='held-by-cap' status_is_paused_or_captain_held 'captain-held: tracked' \
+    && fail "the captain-held verb override did not replace the default verb"
+  pass "status_is_paused_or_captain_held: exactly the pause and captain-held verbs, overrides honored"
+}
+
 # crew_absorb_class: the single fm-crew-state.sh read that returns BOTH absorb
 # reasons - working (active run/busy pane), paused (declared external wait), or none
 # (surface it) - so the watcher's stale path gets both for one bounded call.
@@ -334,7 +349,7 @@ test_crew_is_parked_awaiting_merge_classifier() {
 
   # Positive: reconciled done + armed merge-monitor + idle -> parked (absorb).
   FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR https://x/pr/1'
-  arm_merge_monitor "$state" a
+  arm_registered_check "$state" a
   crew_is_parked_awaiting_merge a "$state" \
     || fail "done crew with an armed merge-monitor not classed parked"
   # Done + resolved: is still reconciled done by fm-crew-state, so it stays parked.
@@ -364,7 +379,7 @@ test_crew_is_parked_awaiting_merge_classifier() {
     || fail "a done crew with no armed merge-monitor was classed parked"
   # A non-done terminal (needs-decision/blocked/failed) even with an armed check must
   # surface - firstmate action is needed, so it is not parked.
-  arm_merge_monitor "$state" a
+  arm_registered_check "$state" a
   FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
   ! crew_is_parked_awaiting_merge a "$state" \
     || fail "a crew parked at a gate was classed parked-awaiting-merge"
@@ -374,6 +389,60 @@ test_crew_is_parked_awaiting_merge_classifier() {
   ! crew_is_parked_awaiting_merge a "" || fail "empty state-dir classed parked"
   unset FM_FAKE_CREW_STATE
   pass "crew_is_parked_awaiting_merge: done+armed-check+idle only; reactivation and missing check fail closed"
+}
+
+# The carry-over decision this port settles: a REFUSED check is still a FILE on
+# disk, so the old `[ -f state/<id>.check.sh ]` gate handed a crew the parked
+# absorb on the strength of a merge monitor the watcher will never execute. The
+# absorb's justification is "the merge-check is the live signal"; for a refused
+# check that is simply false, so the gate now demands REGISTRATION
+# (fm_custom_check_registered). Every refusal shape must fail closed, and failing
+# closed costs nothing new - the crew surfaces exactly as it did before the parked
+# absorb existed. The separate `check: rejected unauthenticated state checks:` wake
+# is untouched and still reports the broken monitoring on its own.
+test_parked_absorb_requires_a_registered_check() {
+  local dir fakebin state
+  dir=$(make_case parked-requires-registered); fakebin="$dir/fakebin"; state="$dir/state"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR https://x/pr/1'
+
+  # Baseline: a properly registered monitor still earns the absorb.
+  arm_registered_check "$state" a
+  crew_is_parked_awaiting_merge a "$state" || fail "a registered merge-monitor lost the parked absorb"
+
+  # Refusal shape 1 - UNREGISTERED: the check file exists with no trust record.
+  rm -f "$state/a.check-trust"
+  ! crew_is_parked_awaiting_merge a "$state" \
+    || fail "an UNREGISTERED check file still bought the parked absorb"
+
+  # Refusal shape 2 - TAMPERED: registered, then the bytes were rewritten, so the
+  # recorded hash no longer matches and the watcher refuses to run it.
+  arm_registered_check "$state" a
+  printf '#!/usr/bin/env bash\necho pwned\n' > "$state/a.check.sh"
+  ! crew_is_parked_awaiting_merge a "$state" \
+    || fail "a TAMPERED check still bought the parked absorb"
+
+  # Refusal shape 3 - NOT PRIVATE: registered and unmodified, but the check is
+  # group/world-accessible, which the trust path refuses at execution time.
+  arm_registered_check "$state" a
+  chmod 755 "$state/a.check.sh"
+  ! crew_is_parked_awaiting_merge a "$state" \
+    || fail "a NON-PRIVATE check still bought the parked absorb"
+  chmod 700 "$state/a.check.sh"
+
+  # Refusal shape 4 - the TRUST RECORD itself is not private.
+  arm_registered_check "$state" a
+  chmod 644 "$state/a.check-trust"
+  ! crew_is_parked_awaiting_merge a "$state" \
+    || fail "a NON-PRIVATE trust record still bought the parked absorb"
+
+  # And re-registering restores the absorb, so the tightening is recoverable by the
+  # documented repair (bin/fm-check-register.sh) rather than being a dead end.
+  chmod 600 "$state/a.check-trust"
+  arm_registered_check "$state" a
+  crew_is_parked_awaiting_merge a "$state" || fail "re-registering did not restore the parked absorb"
+  unset FM_FAKE_CREW_STATE
+  pass "crew_is_parked_awaiting_merge: only a REGISTERED merge-monitor earns the parked absorb"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -598,7 +667,7 @@ test_parked_awaiting_merge_stale_absorbed() {
   printf 'awaiting merge, PR open' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/parked.meta"
   printf 'done: PR https://example.test/pr/7\n' > "$state/parked.status"
-  arm_merge_monitor "$state" parked   # armed merge-monitor
+  arm_registered_check "$state" parked   # armed merge-monitor
   sig=$(seen_sig "$state/parked.status"); printf '%s' "$sig" > "$state/.seen-parked_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "awaiting merge, PR open")
@@ -636,7 +705,7 @@ test_parked_reactivated_verb_off_done_surfaces() {
   printf 'stuck mid-edit' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/reactverb.meta"
   printf 'done: PR https://example.test/pr/11\nworking: enhancing the PR per steer\n' > "$state/reactverb.status"
-  arm_merge_monitor "$state" reactverb   # STILL armed
+  arm_registered_check "$state" reactverb   # STILL armed
   # Quiet the signal path (status pre-seen) so this exercises the STALE seam: the
   # crew must surface HERE despite the still-armed merge-monitor.
   sig=$(seen_sig "$state/reactverb.status"); printf '%s' "$sig" > "$state/.seen-reactverb_status"
@@ -673,7 +742,7 @@ test_parked_reactivated_working_crew_still_wedge_escalates() {
   printf 'enhancing the PR...' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/reactbusy.meta"
   printf 'done: PR https://example.test/pr/9\n' > "$state/reactbusy.status"
-  arm_merge_monitor "$state" reactbusy
+  arm_registered_check "$state" reactbusy
   sig=$(seen_sig "$state/reactbusy.status"); printf '%s' "$sig" > "$state/.seen-reactbusy_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "enhancing the PR...")
@@ -1380,8 +1449,10 @@ test_classifier_primitives
 test_captain_held_bookkeeping_classifier
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
+test_status_is_paused_or_captain_held_classifier
 test_crew_absorb_class_classifier
 test_crew_is_parked_awaiting_merge_classifier
+test_parked_absorb_requires_a_registered_check
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed

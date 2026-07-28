@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared wake classifier: the common source of truth for captain-relevant status
-# tests, declared-external-wait vocabulary, and the working/paused absorb
+# tests, declared-hold vocabulary, and the working/held absorb
 # classification that makes no-verb signal and stale-pane wakes safe to absorb.
 # Sourced by BOTH the always-on watcher
 # (bin/fm-watch.sh) and the away-mode daemon (bin/fm-supervise-daemon.sh) so the
@@ -14,12 +14,12 @@
 # signatures).
 #
 # The one exception is the absorb classification (crew_absorb_class and its
-# working/paused wrappers). It is NOT a pure status-file read: it reuses
-# bin/fm-crew-state.sh, which may make a bounded no-mistakes call, to decide
-# whether a crew that just stopped its turn or went stale is working, deliberately
-# paused, or neither. Callers run it ONLY on no-verb signal handling and first
-# sighting of a stale hash, never on every wake, so the per-wake triage stays
-# cheap.
+# working/paused wrappers, plus crew_is_parked_awaiting_merge). It is NOT a pure
+# status-file read: it reuses bin/fm-crew-state.sh, which may make a bounded
+# no-mistakes call, to decide whether a crew that just stopped its turn or went
+# stale is working, deliberately held, or neither. Callers run it ONLY on no-verb
+# signal handling and first sighting of a stale hash, never on every wake, so the
+# per-wake triage stays cheap.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -30,6 +30,19 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 # Overridable so tests can stub the run-step/pane verdict without a real worktree
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
+
+# Check-script authentication, for the parked-awaiting-merge absorb below: that
+# absorb is earned by an ARMED merge monitor, and only a REGISTERED check is
+# armed - the watcher refuses an unregistered, tampered, or non-private check
+# without executing it (bin/fm-check-lib.sh owns the trust record and the
+# verification rules). Sourced HERE, not by each consumer, because both the
+# always-on watcher and the away-mode daemon call that predicate and the daemon
+# does not otherwise load the check library; a consumer-side source would give
+# the two supervisors different answers. Sourcing is idempotent (function
+# definitions plus two empty state variables), so the watcher's own later source
+# of the same file is a no-op.
+# shellcheck source=bin/fm-check-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-check-lib.sh"
 
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
@@ -51,11 +64,13 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# Bounded re-surface cadence for a declared pause. Far longer than the wedge
-# threshold (FM_STALE_ESCALATE_SECS, default 240s) so a deliberate wait is not
-# nagged like a wedge, yet finite so a forgotten pause cannot rot invisibly - it
-# re-surfaces once for a recheck every window. One hour by default; both consumers
-# read FM_PAUSE_RESURFACE_SECS with this default so the cadence has one owner.
+# Bounded re-surface cadence for every DECLARED HOLD the stale seam absorbs: a
+# declared external-wait pause, a durable captain-held transfer, and a crew parked
+# awaiting its merge. Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS,
+# default 240s) so a deliberate wait is not nagged like a wedge, yet finite so a
+# forgotten hold cannot rot invisibly - it re-surfaces once for a recheck every
+# window. One hour by default; both consumers read FM_PAUSE_RESURFACE_SECS with
+# this default so the cadence has one owner.
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
@@ -161,6 +176,27 @@ status_is_paused() {  # <status-line>
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
+}
+
+# 0 if a status line declares EITHER an external-wait pause (paused:) or a
+# verified durable captain-held transfer (captain-held:, appended by
+# bin/fm-decision-hold.sh once the decision has a captain-held backlog owner).
+# Both declarations say the same thing to the stale seam: this crew is idle ON
+# PURPOSE and the thing it waits on is tracked somewhere firstmate already looks,
+# so its idle pane must use the bounded PAUSE_RESURFACE_SECS cadence rather than
+# the ordinary stale path. Ported from upstream firstmate PR #743.
+#
+# The two verbs are NOT interchangeable anywhere else, and this predicate is
+# deliberately the only place they merge: `paused:` is a state event, while
+# `captain-held:` is DECISION BOOKKEEPING (status_line_is_bookkeeping), so the
+# terminal-state reader still looks past captain-held: to the real state verb
+# underneath. That is why a captain-held crew reaches the stale seam's TERMINAL
+# branch while a paused one reaches the non-terminal branch, and why the watcher
+# has to consult this predicate on both.
+status_is_paused_or_captain_held() {  # <status-line>
+  local line=$1
+  status_is_paused "$line" && return 0
+  status_line_is_captain_held "$line"
 }
 
 # --- durable keyed decisions ------------------------------------------------
@@ -390,12 +426,27 @@ crew_is_paused() {  # <id>
 # idling on its open PR: its authoritative reconciled current state is `done`
 # (bin/fm-crew-state.sh, which folds the no-mistakes run-step, the pane
 # busy-signature, and the status log's last REAL state verb - trailing `resolved:`
-# bookkeeping skipped via last_state_status_line - into one verdict) AND an armed
-# merge-monitor (state/<id>.check.sh) is present. Such a crew legitimately sits idle
+# bookkeeping skipped via last_state_status_line - into one verdict) AND a
+# REGISTERED merge-monitor (state/<id>.check.sh, verified through
+# fm_custom_check_registered) is present. Such a crew legitimately sits idle
 # until its PR merges; its merge-check, not a stale-pane poll, is the live signal,
-# so the stale seam ABSORBS it instead of wedge-escalating each churny idle-pane
-# hash (a redraw-jittered idle pane is not byte-stable, so its captured hash keeps
-# changing and would otherwise re-surface as a fresh possible-wedge every poll).
+# so the stale seam ABSORBS it on the bounded PAUSE_RESURFACE_SECS cadence instead
+# of wedge-escalating each churny idle-pane hash (a redraw-jittered idle pane is
+# not byte-stable, so its captured hash keeps changing and would otherwise
+# re-surface as a fresh possible-wedge every poll).
+#
+# REGISTERED, not merely present. The absorb's whole justification is "the
+# merge-check is the live signal", and a check the watcher REFUSES - unregistered,
+# tampered, or not private (bin/fm-check-lib.sh) - never executes, so for such a
+# crew that justification is simply false: it would be granted an absorb backed by
+# monitoring that is provably not running. Testing only `[ -f ... ]` let a refused
+# check buy the absorb, which inverts this file's absorb-only-on-positive-evidence
+# discipline. The refusal is still surfaced on its own dedicated `check: rejected
+# unauthenticated state checks:` wake, untouched by this; that wake says the
+# MONITORING is broken, while this predicate decides whether THIS CREW may be left
+# unwatched, and those are different questions. Failing this test costs nothing
+# new - the crew simply surfaces exactly as it did before the parked absorb
+# existed.
 #
 # Sibling of crew_is_provably_working, pinned to the SAME escalation seam and re-read
 # from CURRENT state on every evaluation - NEVER a latched "was done once" flag. The
@@ -410,13 +461,15 @@ crew_is_paused() {  # <id>
 # any non-`done` state (working/parked/paused/blocked/failed/unknown) all return
 # non-parked, so the wake surfaces exactly as today. A positive `done` verdict is the
 # ONLY absorb, so an ambiguous pane busy-state (read as unknown, never as done) can
-# never mask a wedge. The check.sh test is FIRST so a crew with no armed
+# never mask a wedge. The registration test is FIRST so a crew with no armed
 # merge-monitor costs no fm-crew-state.sh read - the same cheap-gate discipline
-# crew_absorb_class relies on. FM_CREW_STATE_BIN lets tests stub the verdict.
+# crew_absorb_class relies on, and verification is only a stat plus one sha256 of a
+# small shim, far cheaper than the state read it gates. FM_CREW_STATE_BIN lets
+# tests stub the verdict.
 crew_is_parked_awaiting_merge() {  # <id> <state-dir>
   local id=$1 state=$2 line st
   [ -n "$id" ] && [ -n "$state" ] || return 1
-  [ -f "$state/$id.check.sh" ] || return 1
+  fm_custom_check_registered "$state" "$id" || return 1
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) return 1 ;; esac
   st=${line#state: }; st=${st%% *}

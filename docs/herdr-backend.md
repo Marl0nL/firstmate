@@ -775,6 +775,27 @@ A just-created pane can briefly report zero foreground processes, which reads `n
 - **Regression coverage:** `tests/fm-backend-herdr.test.sh` - `test_pane_agent_state_detects_non_claude_harness` (the pi/codex registration shape), `test_exited_agent_leaves_stale_session_over_bare_shell_and_reads_dead` (the stale record read end to end through `pane_agent_reality`, `agent_alive` and `tab_is_husk`, plus the live-agent counter-case), and the extra `live live shell -> dead` row in `test_pane_agent_reality_full_cross_product` and in the polarity test.
   The stateful fake's `pane process-info` now fronts the agent's own process for a pane that has an agent and a bare shell for one that does not, because the old fake modelled every live agent with a `bash` foreground - which this measurement shows is the EXITED-agent shape.
 
+### Re-measured 2026-07-27: what a DELIBERATELY HELD crew reads, and why the bounded stale cadence has no liveness gate
+
+Upstream firstmate PR #743 bounds the stale-wake cadence for a crew that is idle on purpose, and gates that bounded cadence on `fm_backend_agent_alive` reporting `dead` - its stated intent being that "a still-alive agent parked at an external-decision gate surfaces immediately".
+That gate was written against upstream's METADATA-ONLY classifier, whose `fm_backend_herdr_agent_alive` mapped `pane_agent_state` `no-agent` straight to `dead`; the 2026-07-21 recalibration above measured `no-agent` for effectively every pane-typed crewmate on 0.7.4, so on herdr that gate answered `dead` almost always and never actually fired.
+Before porting it, the shape it turns on was re-measured against THIS fork's composed classifier, in an isolated lab session driven entirely through `bin/fm-herdr-lab.sh` (herdr 0.7.4, Linux x86_64, `default` session untouched and verified intact after teardown):
+
+| pane state | `pane_agent_state` | `pane_process_state` | foreground | `pane_agent_reality` | `agent_alive` |
+|---|---|---|---|---|---|
+| bare shell, no agent ever launched | `no-agent` | `live` | shell | `dead` | `dead` |
+| claude registered (2s after launch) | `live` | `live` | non-shell | `live` | `alive` |
+| claude IDLE at its prompt, +20s | `live` | `live` | non-shell | `live` | `alive` |
+| claude IDLE at its prompt, +60s | `live` | `live` | non-shell | `live` | `alive` |
+| claude after `/exit`, +10s | `live` | `live` | shell | `dead` | `dead` |
+| claude after `/exit`, +40s | `live` | `live` | shell | `dead` | `dead` |
+
+The middle rows are the load-bearing ones: **an idle-at-its-prompt agent reads `alive`, sustained across a full minute of idling**, because its harness process is still the pane's sole foreground process.
+That is the NORMAL shape of a deliberately held crew - a crew that paused on an external wait, or finished and is waiting for the captain's merge word, does not exit its harness.
+So porting upstream's gate verbatim would invert it here: it would refuse the bounded cadence for exactly the crew the cadence exists to quiet, and the ordinary stale interval would keep firing.
+The gate is therefore NOT ported; `bin/fm-watch.sh`'s `hold_state_class` carries the reasoning inline.
+The two `/exit` rows also re-confirm the 2026-07-24 finding from a second machine and OS: the `agent_session` is never released, and only the bare-shell foreground reveals the exit.
+
 ## End-to-end verification (spawn -> steer -> peek -> done -> merge -> teardown)
 
 Beyond the fake-CLI unit tests (`tests/fm-backend-herdr.test.sh`) and the real-CLI smoke tests (`tests/fm-backend-herdr-smoke.test.sh` and `tests/fm-backend-autodetect-smoke.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME`, a scratch `local-only` git project, and an isolated `HERDR_SESSION`:

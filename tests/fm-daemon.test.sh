@@ -152,20 +152,22 @@ test_stale_terminal_escalates() {
   pass "stale + terminal status escalates immediately"
 }
 
-# A crew PARKED AWAITING MERGE - reconciled done + an armed merge-monitor
-# (state/<id>.check.sh) - is absorbed by the away-mode stale path (self-handle), not
-# re-escalated as a terminal stale on every churny idle-pane hash. Same shared
-# predicate (crew_is_parked_awaiting_merge) the always-on watcher uses, so both modes
-# agree. handle_wake's self branch drops any wedge marker for this captain-relevant
-# crew and never escalates on the wake, and it records NO seen marker, so the done:
-# PR-ready still reaches the digest via the catch-all scan.
+# A crew PARKED AWAITING MERGE - reconciled done + a REGISTERED merge-monitor
+# (state/<id>.check.sh plus its trust record) - is absorbed by the away-mode stale
+# path (self-handle), not re-escalated as a terminal stale on every churny idle-pane
+# hash. Same shared predicate (crew_is_parked_awaiting_merge) the always-on watcher
+# uses, so both modes agree - INCLUDING the registration requirement, which is why
+# this fixture registers rather than merely touching the check file. handle_wake's
+# self branch drops any wedge marker for this captain-relevant crew and never
+# escalates on the wake, and it records NO seen marker, so the done: PR-ready still
+# reaches the digest via the catch-all scan.
 test_stale_parked_awaiting_merge_self_handles() {
   local dir state fakebin out key
   dir=$(make_supercase stale-parked-merge)
   state="$dir/state"; fakebin="$dir/fakebin"
   make_fake_crew_state "$fakebin" >/dev/null
   printf 'done: PR https://example.test/pr/13\n' > "$state/parked-w11.status"
-  : > "$state/parked-w11.check.sh"   # armed merge-monitor
+  arm_registered_check "$state" parked-w11   # armed (and registered) merge-monitor
   export FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR https://example.test/pr/13'
   out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     classify_stale "sess:fm-parked-w11" "$state")
@@ -192,7 +194,7 @@ test_stale_parked_reactivated_off_done_full_sensitivity() {
   state="$dir/state"; fakebin="$dir/fakebin"
   make_fake_crew_state "$fakebin" >/dev/null
   printf 'done: PR https://example.test/pr/14\nworking: enhancing the PR per steer\n' > "$state/react-w12.status"
-  : > "$state/react-w12.check.sh"   # STILL armed
+  arm_registered_check "$state" react-w12   # STILL armed and registered
   export FM_FAKE_CREW_STATE='state: working · source: status-log · working: enhancing the PR per steer'
   out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     classify_stale "sess:fm-react-w12" "$state")
@@ -204,6 +206,45 @@ test_stale_parked_reactivated_off_done_full_sensitivity() {
   [ -e "$state/.subsuper-stale-$key" ] || fail "a re-activated non-terminal crew did not record a wedge persistence marker"
   unset FM_FAKE_CREW_STATE
   pass "a re-activated crew (verb off done) with an armed check is not parked in the daemon: full wedge sensitivity resumes"
+}
+
+# The two-consumer half of the parked absorb's registration gate. bin/fm-classify-lib.sh
+# is shared with this daemon, which is the SINGLE triage owner while away mode is
+# active, so tightening crew_is_parked_awaiting_merge to require a REGISTERED check
+# had to be proven here too and not only in the watcher. A refused check - present on
+# disk but unregistered, so the watcher will never execute it - must not buy the
+# absorb in away mode either: the crew escalates as an ordinary terminal stale, which
+# is exactly the behavior before the parked absorb existed. The daemon reaches this
+# through classify_stale, its own entry point, so the proof covers the real path and
+# not just the predicate.
+test_stale_parked_unregistered_check_escalates_in_daemon() {
+  local dir state fakebin out
+  dir=$(make_supercase stale-parked-unregistered)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  printf 'done: PR https://example.test/pr/15\n' > "$state/unreg-w13.status"
+  export FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR https://example.test/pr/15'
+
+  # Registered: the daemon self-handles, as the case above already proves.
+  arm_registered_check "$state" unreg-w13
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    classify_stale "sess:fm-unreg-w13" "$state")
+  case "$out" in self\|parked*) ;; *) fail "the daemon lost the parked absorb for a REGISTERED check: $out" ;; esac
+
+  # Drop only the trust record, leaving the check file exactly where it was: the
+  # watcher would REFUSE to run this monitor, so it is not a live signal and the
+  # daemon must escalate rather than absorb.
+  rm -f "$state/unreg-w13.check-trust"
+  [ -f "$state/unreg-w13.check.sh" ] || fail "the fixture lost the check file itself"
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    classify_stale "sess:fm-unreg-w13" "$state")
+  case "$out" in
+    self\|parked*) fail "an UNREGISTERED check still bought the parked absorb in the away daemon: $out" ;;
+    escalate\|*) ;;
+    *) fail "an unregistered parked crew did not escalate in the away daemon: $out" ;;
+  esac
+  unset FM_FAKE_CREW_STATE
+  pass "the away daemon honors the parked absorb's registration gate: a refused merge-monitor escalates"
 }
 
 # A DECLARED external-wait pause (paused:) is neither a wedge nor a terminal
@@ -1723,6 +1764,7 @@ test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_stale_parked_awaiting_merge_self_handles
 test_stale_parked_reactivated_off_done_full_sensitivity
+test_stale_parked_unregistered_check_escalates_in_daemon
 test_stale_paused_classifies_pause
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
