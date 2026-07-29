@@ -20,12 +20,38 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    # With FM_FAKE_PANE_PATH_DIR set, hand each window its OWN worktree under that
+    # dir, named after the window (fm-<id>) recorded by the last new-window. Real
+    # treehouse never hands two live tasks the same slot, and fm-spawn's
+    # worktree-lease guard refuses it, so a multi-task fixture must not either.
+    if [ -n "${FM_FAKE_PANE_PATH_DIR:-}" ] && [ -n "${FM_FAKE_WINDOW_NAME_FILE:-}" ]; then
+      name=$(cat "$FM_FAKE_WINDOW_NAME_FILE" 2>/dev/null || true)
+      if [ -n "$name" ]; then
+        printf '%s\n' "$FM_FAKE_PANE_PATH_DIR/$name"
+        exit 0
+      fi
+    fi
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    if [ -n "${FM_FAKE_WINDOW_NAME_FILE:-}" ]; then
+      prev=
+      for a in "$@"; do
+        if [ "$prev" = "-n" ]; then
+          printf '%s\n' "$a" > "$FM_FAKE_WINDOW_NAME_FILE"
+        fi
+        prev=$a
+      done
+    fi
+    exit 0
+    ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -354,10 +380,17 @@ test_batch_forwards_shared_profile_flags() {
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  # One worktree per batch pair, keyed by window name: two live tasks must never
+  # share a slot (bin/fm-spawn.sh's worktree-lease guard refuses it outright).
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-batch-a "$CASE_DIR/wt-batch/fm-$id1"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-batch-b "$CASE_DIR/wt-batch/fm-$id2"
+  export FM_FAKE_PANE_PATH_DIR="$CASE_DIR/wt-batch"
+  export FM_FAKE_WINDOW_NAME_FILE="$CASE_DIR/window-name"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
+  unset FM_FAKE_PANE_PATH_DIR FM_FAKE_WINDOW_NAME_FILE
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
   assert_contains "$out" "spawned $id1 harness=codex" "first batch task did not use shared harness"
   assert_contains "$out" "spawned $id2 harness=codex" "second batch task did not use shared harness"
