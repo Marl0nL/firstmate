@@ -15,6 +15,183 @@ LIB="$ROOT/bin/fm-wake-lib.sh"
 
 fm_test_tmproot TMP_ROOT fm-watcher-lock-tests
 
+# --- process-ancestry helpers for the watcher-detachment tests ---------------
+#
+# The arm's detach contract has two independent legs, and these helpers cover the
+# ancestry one. A harness that stops its own tracked background task kills the
+# launching shell's process TREE by walking live parent links, which is why the
+# arm's former own-session child was still reaped every time. So these helpers let
+# a test see the tree the way that harness does.
+# The other leg is signal scoping, covered separately by the process-group test
+# below: the launch is also setsid'd out of the arm's process group, and that is not
+# redundant belt-and-braces. See the DETACH CONTRACT in bin/fm-watch-arm.sh and the
+# 2026-07-30 section of docs/turnend-guard.md for the measurements and for the one
+# contrary observation that keeps both legs load-bearing.
+
+# Every live descendant pid of <pid>, one per line, walked recursively from ONE ps
+# snapshot. `ps -A` rather than `ps -e`, because -e means "also show the
+# environment" on BSD/macOS ps while -A is "all processes" everywhere.
+pid_descendants() {  # <pid>
+  local top=$1 table frontier next seen pid ppid
+  table=$(ps -A -o pid=,ppid= 2>/dev/null || true)
+  frontier=" $top "
+  seen=" "
+  while [ -n "$frontier" ]; do
+    next=
+    while read -r pid ppid; do
+      [ -n "$pid" ] || continue
+      case "$frontier" in *" $ppid "*) ;; *) continue ;; esac
+      case "$seen" in *" $pid "*) continue ;; esac
+      seen="$seen$pid "
+      next="$next$pid "
+      printf '%s\n' "$pid"
+    done <<< "$table"
+    frontier=$next
+    [ -n "$frontier" ] && frontier=" $frontier"
+  done
+}
+
+# The parent chain above <pid>, one pid per line, up to init. Bounded so a ps
+# snapshot that shifts under us can never spin.
+pid_ancestors() {  # <pid>
+  local pid=$1 parent i=0
+  while [ "$i" -lt 40 ]; do
+    parent=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    case "$parent" in
+      ''|0|*[!0-9]*) return 0 ;;
+    esac
+    printf '%s\n' "$parent"
+    [ "$parent" = 1 ] && return 0
+    pid=$parent
+    i=$((i + 1))
+  done
+}
+
+# The basenames of the arm's temp capture dirs currently in <state>, in glob order.
+# A test compares this before and after a re-arm: an arm that attaches to a live
+# watcher never creates one, so an unchanged list proves it did not fork a second
+# watcher. Built from a glob rather than `ls` so it stays shellcheck-clean.
+launch_dirs() {  # <state>
+  local state=$1 d out=
+  for d in "$state"/.watch-arm.*; do
+    [ -d "$d" ] || continue
+    out="$out$(basename "$d") "
+  done
+  printf '%s\n' "$out"
+}
+
+# Read a path's mtime through the production helper, so an "advancing beacon" check
+# compares exactly the timestamps supervision itself reads.
+path_mtime() {  # <state> <path>
+  FM_STATE_OVERRIDE="$1" bash -c '. "$1"; fm_path_mtime "$2"' _ "$LIB" "$2"
+}
+
+# Bounded reap of a backgrounded arm: poll for its exit, return its status, and
+# SIGKILL it if it outlived the window (returning 124 the way wait_for_exit does).
+# Deliberately NOT wait_for_exit: that helper falls back to a TERM plus a BLOCKING
+# `wait`, and an arm that cannot run its signal trap - because it is parked in a
+# command substitution polling the detached watcher - wedges the whole suite there
+# instead of failing the one assertion.
+reap_arm() {  # <pid> <tenths>
+  local pid=$1 limit=$2 i=0
+  while [ "$i" -lt "$limit" ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      return "$?"
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  return 124
+}
+
+# Stop a detached launch by EXACT pid: the watcher first, then the launcher that
+# waits on it. Never a pattern kill - every firstmate home runs a process whose
+# command line matches fm-watch.sh, so `pkill -f fm-watch` would reap siblings,
+# including the captain's live watcher.
+stop_detached_watcher() {  # <watcher-pid> <launcher-pid>
+  local watcher=$1 launcher=${2:-} i=0
+  if [ -n "$watcher" ]; then
+    kill -TERM "$watcher" 2>/dev/null || true
+    while [ "$i" -lt 50 ] && is_live_non_zombie "$watcher"; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    kill -KILL "$watcher" 2>/dev/null || true
+  fi
+  [ -n "$launcher" ] || return 0
+  # The launcher exits on its own once the watcher it waits on is gone.
+  i=0
+  while [ "$i" -lt 50 ] && is_live_non_zombie "$launcher"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -KILL "$launcher" 2>/dev/null || true
+}
+
+# Arm a fresh watcher for <case-name>, then kill the ARM exactly the way a harness
+# stops its own tracked background task: the arm pid plus every live descendant,
+# SIGKILL, with no chance for a trap to run. On the way it asserts that nothing in
+# the detached launch is reachable from the arm, because that ancestry - not signal
+# scoping - is what decides whether the watcher dies with its launcher.
+#
+# The scenario is recorded in the ARMED_* variables instead of printed, because a
+# fail inside a command substitution would only exit that subshell and let the suite
+# carry on reporting ok.
+#
+# FM_POLL=1 keeps the liveness beacon beating about once a second so a caller can
+# watch it advance inside a bounded window; every other cadence is pinned off so the
+# watcher never wakes and exits on its own mid-test.
+ARMED_DIR=
+ARMED_STATE=
+ARMED_ARMOUT=
+ARMED_WATCHER=
+ARMED_LAUNCHER=
+ARMED_BEAT=
+arm_then_tree_kill() {  # <case-name>
+  local case_name=$1 fakebin armpid desc p i=0
+  local -a tree
+  ARMED_DIR=$(make_case "$case_name")
+  ARMED_STATE="$ARMED_DIR/state"
+  ARMED_ARMOUT="$ARMED_DIR/arm.out"
+  fakebin="$ARMED_DIR/fakebin"
+  # stdout AND stderr, because the harness hands firstmate one merged stream and
+  # reads it as the wake reason.
+  PATH="$fakebin:$PATH" FM_HOME="$ARMED_DIR" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$ARMED_ARMOUT" 2>&1 &
+  armpid=$!
+  while [ "$i" -lt 150 ]; do
+    grep -qF 'watcher: started pid=' "$ARMED_ARMOUT" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$ARMED_ARMOUT" \
+    || fail "arm ($case_name) did not start a watcher: $(cat "$ARMED_ARMOUT")"
+  ARMED_WATCHER=$(cat "$ARMED_STATE/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$ARMED_WATCHER" ] || fail "arm ($case_name) recorded no watcher lock pid"
+  ARMED_LAUNCHER=$(ps -o ppid= -p "$ARMED_WATCHER" 2>/dev/null | tr -d ' ')
+  [ -n "$ARMED_LAUNCHER" ] || fail "arm ($case_name) watcher has no parent to identify the detach launcher"
+  ARMED_BEAT=$(path_mtime "$ARMED_STATE" "$ARMED_STATE/.last-watcher-beat")
+  [ -n "$ARMED_BEAT" ] || fail "arm ($case_name) watcher wrote no liveness beacon"
+  [ "$ARMED_LAUNCHER" != "$armpid" ] \
+    || fail "arm ($case_name) watcher is still a direct child of the arm $armpid"
+  # The regression: the watcher used to be a setsid'd CHILD of the arm, so it sat in
+  # this descendant set and a tree kill reached it through the live parent link.
+  # A session of its own did not save it, because a tree walk follows parentage.
+  tree=("$armpid")
+  desc=$(pid_descendants "$armpid")
+  for p in $desc; do
+    [ "$p" != "$ARMED_WATCHER" ] \
+      || fail "arm ($case_name) watcher $p is a descendant of the arm $armpid - a harness tree kill would reap it"
+    [ "$p" != "$ARMED_LAUNCHER" ] \
+      || fail "arm ($case_name) detach launcher $p is a descendant of the arm $armpid - a harness tree kill would reap the whole launch"
+    tree+=("$p")
+  done
+  kill -KILL "${tree[@]}" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+}
+
 
 test_singleton_start() {
   local dir state fakebin out1 out2 pid1 pid2 live i
@@ -558,13 +735,19 @@ test_arm_starts_and_self_heals() {
   pass "arm starts+confirms a fresh watcher on a clean lock and self-heals a dead-pid lock (never healthy off a dead pid)"
 }
 
-test_arm_hup_leaves_watcher_running_in_own_session() {
-  # A signal to the arm must NOT take the watcher down with it: the watcher is
-  # forked with setsid into its own session, and the arm's HUP/TERM/INT traps
-  # deliberately do not kill it, so a reaped launcher leaves proactive
-  # supervision running. The arm still exits (129 on HUP) and still removes its
-  # own temp capture file.
-  local dir state fakebin armout i armpid lock_pid status wsess
+test_arm_hup_leaves_detached_watcher_running() {
+  # A signal to the arm must NOT take the watcher down with it, and the stronger
+  # property the current implementation owes: the watcher must not even be REACHABLE
+  # from the arm. It is launched double-forked, so the launch is reparented off the
+  # arm's tree (to init or the user manager) before the arm returns - see the DETACH
+  # CONTRACT in bin/fm-watch-arm.sh. setsid alone was NOT enough, because a new
+  # session does not break the parent link a harness tree kill walks, so these
+  # assertions are about ancestry rather than the old "watcher is its own session
+  # leader" shape (it no longer is: the detach launcher leads that session).
+  # The arm still exits 129 on HUP, its traps still deliberately spare the watcher,
+  # and it still removes its own temp capture DIR - state/.watch-arm.*, which
+  # replaced the old single .watch-arm-output.* file.
+  local dir state fakebin armout i armpid lock_pid launcher status wsess armsess desc p anc saw_init
   dir=$(make_case arm-hup-survives)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -580,14 +763,31 @@ test_arm_hup_leaves_watcher_running_in_own_session() {
   grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP survival check"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   [ -n "$lock_pid" ] || fail "arm did not record a watcher lock pid"
-  # setsid makes the watcher its own session leader (session id == its own pid),
-  # proving it is not in the arm's process group.
+  # The watcher's parent is the detach launcher, never the arm.
+  launcher=$(ps -o ppid= -p "$lock_pid" 2>/dev/null | tr -d ' ')
+  [ -n "$launcher" ] || fail "watcher has no parent to identify the detach launcher"
+  [ "$launcher" != "$armpid" ] || fail "watcher is still a direct child of the arm (ppid $launcher)"
+  # The launch also gets its own session, so no process-group- or session-scoped
+  # signal aimed at the arm can reach it either.
   wsess=$(ps -o sess= -p "$lock_pid" 2>/dev/null | tr -d ' ')
-  [ "$wsess" = "$lock_pid" ] || fail "watcher child is not its own session leader (sess '$wsess' != pid '$lock_pid')"
+  armsess=$(ps -o sess= -p "$armpid" 2>/dev/null | tr -d ' ')
+  [ -n "$wsess" ] && [ -n "$armsess" ] || fail "could not read the watcher and arm sessions"
+  [ "$wsess" != "$armsess" ] || fail "watcher shares the arm's session (sess '$wsess')"
+  # Nothing in the launch may appear anywhere in the arm's descendant set. Sampled
+  # while the arm is still alive, because that is when a harness would walk it.
+  desc=$(pid_descendants "$armpid")
+  for p in $desc; do
+    [ "$p" != "$lock_pid" ] || fail "watcher $p is a descendant of the arm $armpid"
+    [ "$p" != "$launcher" ] || fail "detach launcher $p is a descendant of the arm $armpid"
+  done
   kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
-  wait_for_exit "$armpid" 80
+  # PROMPTLY 129: the arm is the harness-visible waiter, so a signalled arm has to
+  # die and let the harness notify. A trap that only runs when the watcher finally
+  # exits is the same as no trap - the signal that was supposed to release the arm
+  # instead leaves it parked for the whole watcher cycle.
+  reap_arm "$armpid" 100
   status=$?
-  [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
+  [ "$status" -eq 129 ] || fail "arm did not exit 129 within 10s of HUP (got $status) - its HUP trap cannot run while it is parked in the detached-watcher poll"
   # Let the arm's death settle, then confirm the watcher is still alive.
   i=0
   while [ "$i" -lt 20 ]; do
@@ -595,15 +795,227 @@ test_arm_hup_leaves_watcher_running_in_own_session() {
     i=$((i + 1))
   done
   is_live_non_zombie "$lock_pid" || fail "HUP on the arm reaped the watcher (regression: the watcher must survive its launcher)"
-  ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP left the arm temp output behind"
-  # The surviving watcher is now this test's to stop (the arm no longer does).
-  kill -TERM "$lock_pid" 2>/dev/null || true
+  [ "$(ps -o ppid= -p "$lock_pid" 2>/dev/null | tr -d ' ')" != "$armpid" ] \
+    || fail "watcher's parent is still the dead arm"
+  # Its parent chain must climb to init (through the launcher and whatever adopted
+  # it) without ever passing through the arm.
+  saw_init=0
+  anc=$(pid_ancestors "$lock_pid")
+  for p in $anc; do
+    [ "$p" != "$armpid" ] || fail "arm $armpid is still an ancestor of the surviving watcher"
+    [ "$p" = 1 ] && saw_init=1
+  done
+  [ "$saw_init" -eq 1 ] || fail "surviving watcher's parent chain does not reach init (chain: $(echo "$anc" | tr '\n' ' '))"
+  [ -z "$(launch_dirs "$state")" ] || fail "HUP left the arm temp capture dir behind: $(launch_dirs "$state")"
+  # The surviving watcher and its launcher are now this test's to stop (the arm no
+  # longer does).
+  stop_detached_watcher "$lock_pid" "$launcher"
+  pass "arm leaves a detached watcher running on HUP (not reachable from the arm's tree, temp capture dir cleaned)"
+}
+
+test_arm_group_kill_leaves_watcher_supervising() {
+  # The detach contract's SECOND leg. Ancestry is what a process-tree stop follows,
+  # but a signal aimed at the arm's whole PROCESS GROUP would reach an orphan that
+  # still shared that group, so the launch is setsid'd into its own session and group
+  # as well. That setsid is not redundant belt-and-braces, and this test exists so a
+  # future cleanup cannot quietly drop it: an orphan in the killed group dies.
+  # The arm itself is started through setsid here, purely so the negative signal
+  # below can only ever reach the arm's own group - never this test's.
+  local dir state fakebin armout armpid armpgid selfpgid watcher launcher wpgid beat_before after i
+  dir=$(make_case arm-group-kill)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 setsid "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
   i=0
-  while [ "$i" -lt 40 ] && is_live_non_zombie "$lock_pid"; do
+  while [ "$i" -lt 150 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done
-  pass "arm leaves the watcher running in its own session on HUP (survives reaping)"
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start a watcher: $(cat "$armout")"
+  watcher=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$watcher" ] || fail "arm recorded no watcher lock pid"
+  launcher=$(ps -o ppid= -p "$watcher" 2>/dev/null | tr -d ' ')
+  beat_before=$(path_mtime "$state" "$state/.last-watcher-beat")
+  [ -n "$beat_before" ] || fail "watcher wrote no liveness beacon"
+  # A negative signal is destructive, so prove the target group before sending one:
+  # it must be the arm's own group and it must NOT be this test's group.
+  armpgid=$(ps -o pgid= -p "$armpid" 2>/dev/null | tr -d ' ')
+  selfpgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+  [ "$armpgid" = "$armpid" ] || fail "arm is not its own process-group leader (pgid '$armpgid'), refusing to group-kill"
+  [ "$armpgid" != "$selfpgid" ] || fail "arm shares this test's process group, refusing to group-kill"
+  wpgid=$(ps -o pgid= -p "$watcher" 2>/dev/null | tr -d ' ')
+  [ "$wpgid" != "$armpgid" ] \
+    || fail "watcher $watcher is in the arm's process group $armpgid - a group-scoped stop would reap it"
+  kill -KILL "-$armpgid" 2>/dev/null || true
+  reap_arm "$armpid" 50 >/dev/null 2>&1 || true
+  is_live_non_zombie "$armpid" && fail "arm survived a SIGKILL to its own process group"
+  is_live_non_zombie "$watcher" \
+    || fail "a process-group kill on the arm reaped the watcher (regression: the launch must be setsid'd out of the arm's group)"
+  after=$beat_before
+  i=0
+  while [ "$i" -lt 200 ]; do
+    after=$(path_mtime "$state" "$state/.last-watcher-beat")
+    [ -n "$after" ] && [ "$after" -gt "$beat_before" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  { [ -n "$after" ] && [ "$after" -gt "$beat_before" ]; } \
+    || fail "liveness beacon stopped advancing after the group kill (was $beat_before, still $after)"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher" ] \
+    || fail "surviving watcher no longer holds the singleton lock with its own pid"
+  stop_detached_watcher "$watcher" "$launcher"
+  pass "a process-group kill on the arm leaves the watcher alive, beating, and holding the lock"
+}
+
+test_arm_tree_kill_leaves_watcher_supervising() {
+  # The regression this pins is the measured bug (2026-07-30, Claude Code 2.1.220):
+  # when the harness stops its own tracked background task it kills the launching
+  # shell's process TREE by live parent links, so the previous own-session child died
+  # with every stopped arm - dozens of watcher deaths in one session. A process-tree
+  # kill aimed at the arm must now leave supervision completely untouched.
+  local watcher launcher state armout beat_before after i line
+  arm_then_tree_kill arm-tree-kill
+  watcher=$ARMED_WATCHER
+  launcher=$ARMED_LAUNCHER
+  state=$ARMED_STATE
+  armout=$ARMED_ARMOUT
+  beat_before=$ARMED_BEAT
+  # Let the kill settle before judging survival.
+  i=0
+  while [ "$i" -lt 20 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$watcher" \
+    || fail "a process-tree kill on the arm reaped the watcher (regression: the harness stopping its arm task must not take supervision down)"
+  # Alive is not enough. Only an ADVANCING liveness beacon proves the watcher is
+  # still running its cycle rather than sitting wedged or unparented mid-poll.
+  after=$beat_before
+  i=0
+  while [ "$i" -lt 200 ]; do
+    after=$(path_mtime "$state" "$state/.last-watcher-beat")
+    [ -n "$after" ] && [ "$after" -gt "$beat_before" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  { [ -n "$after" ] && [ "$after" -gt "$beat_before" ]; } \
+    || fail "liveness beacon stopped advancing after the tree kill (was $beat_before, still $after) - the watcher survived but is no longer supervising"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher" ] \
+    || fail "surviving watcher no longer holds the singleton lock with its own pid (lock '$(cat "$state/.watch.lock/pid" 2>/dev/null || true)', watcher '$watcher')"
+  # The arm's whole captured stream must be status lines only. Firstmate reads this
+  # merged stdout+stderr as the wake reason, so a stray shell diagnostic - e.g. a
+  # redirection error from reading a pid file that has not landed yet - becomes a
+  # fabricated wake.
+  while read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      'watcher: started pid='*) ;;
+      *) fail "arm printed a line that is not one of its status lines - firstmate reads this stream as a wake reason (got '$line')" ;;
+    esac
+  done < "$armout"
+  stop_detached_watcher "$watcher" "$launcher"
+  pass "a process-tree kill on the arm leaves the watcher alive, beating, and holding the lock"
+}
+
+test_rearm_after_tree_kill_attaches_to_surviving_watcher() {
+  # The payoff of detaching: a stopped arm task now costs only a CHEAP re-arm. The
+  # fresh arm must attach to the watcher that outlived the tree kill - same pid - and
+  # must not fork a second watcher, disturb the lock, or exit early; it exits zero
+  # only when that watcher's cycle actually ends, which is what makes the harness
+  # notify fire at the right moment instead of as a false empty wake.
+  local watcher launcher state armout fakebin before_dirs after_dirs armpid status i
+  arm_then_tree_kill arm-rearm-after-tree-kill
+  watcher=$ARMED_WATCHER
+  launcher=$ARMED_LAUNCHER
+  state=$ARMED_STATE
+  fakebin="$ARMED_DIR/fakebin"
+  armout="$ARMED_DIR/rearm.out"
+  # The killed arm could not clean up its own capture dir, so the leftover is part of
+  # the pre-state: what matters is that the re-arm adds NO new one, which is only
+  # possible if it never forked a launch.
+  before_dirs=$(launch_dirs "$state")
+  PATH="$fakebin:$PATH" FM_HOME="$ARMED_DIR" FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF "watcher: attached pid=$watcher" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$watcher" "$armout" \
+    || fail "re-arm did not attach to the watcher that survived the tree kill: $(cat "$armout")"
+  ! grep -qF 'watcher: started' "$armout" || fail "re-arm started a second watcher instead of attaching to the survivor"
+  ! grep -qF 'watcher: FAILED' "$armout" || fail "re-arm reported FAILED for a healthy surviving watcher"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher" ] || fail "re-arm disturbed the surviving watcher's lock"
+  after_dirs=$(launch_dirs "$state")
+  [ "$after_dirs" = "$before_dirs" ] \
+    || fail "re-arm created a launch dir, so it forked a watcher instead of attaching cheaply (before '$before_dirs', after '$after_dirs')"
+  is_live_non_zombie "$armpid" || fail "re-arm exited while the surviving watcher was still healthy"
+  # Ending that watcher's cycle is what releases the attached arm, with exit 0.
+  stop_detached_watcher "$watcher" "$launcher"
+  reap_arm "$armpid" 100
+  status=$?
+  [ "$status" -eq 0 ] || fail "attached re-arm did not exit zero after the surviving watcher's cycle ended (status $status): $(cat "$armout")"
+  pass "re-arm after a tree kill attaches to the surviving watcher without restarting supervision"
+}
+
+test_arm_prunes_only_dead_launch_dirs() {
+  # A tree-killed arm cannot clean up its own capture dir, and a stopped arm task is
+  # now an ordinary, frequent event, so the next arm sweeps the leftovers. It may
+  # only remove what is PROVABLY finished: both recorded pids dead and the dir older
+  # than the prune age. A dir whose watcher or launcher is still alive belongs to a
+  # live cycle - possibly a concurrent arm's - and a young dir with no pid files yet
+  # is an arm mid-launch, so removing either would sabotage real supervision.
+  local dir state fakebin armout dead live_pid armpid lock_pid launcher i
+  dir=$(make_case arm-prune-launch-dirs)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  dead=$(dead_pid)
+  sleep 300 &
+  live_pid=$!
+  mkdir "$state/.watch-arm.deadold"
+  printf '%s\n' "$dead" > "$state/.watch-arm.deadold/watcher.pid"
+  printf '%s\n' "$dead" > "$state/.watch-arm.deadold/launcher.pid"
+  mkdir "$state/.watch-arm.livewatcher"
+  printf '%s\n' "$live_pid" > "$state/.watch-arm.livewatcher/watcher.pid"
+  printf '%s\n' "$dead" > "$state/.watch-arm.livewatcher/launcher.pid"
+  mkdir "$state/.watch-arm.livelauncher"
+  printf '%s\n' "$dead" > "$state/.watch-arm.livelauncher/watcher.pid"
+  printf '%s\n' "$live_pid" > "$state/.watch-arm.livelauncher/launcher.pid"
+  # Backdate past the prune age only AFTER writing the pid files, because writing a
+  # file bumps the directory mtime the age is read from.
+  touch -t 200001010000 \
+    "$state/.watch-arm.deadold" \
+    "$state/.watch-arm.livewatcher" \
+    "$state/.watch-arm.livelauncher"
+  mkdir "$state/.watch-arm.freshnew"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 150 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start while pruning leftover launch dirs: $(cat "$armout")"
+  [ ! -d "$state/.watch-arm.deadold" ] || fail "arm kept an aged launch dir whose watcher and launcher are both dead"
+  [ -d "$state/.watch-arm.livewatcher" ] || fail "arm pruned a launch dir whose recorded watcher is still alive"
+  [ -d "$state/.watch-arm.livelauncher" ] || fail "arm pruned a launch dir whose recorded launcher is still alive"
+  [ -d "$state/.watch-arm.freshnew" ] || fail "arm pruned a launch dir younger than the prune age"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$lock_pid" ] || fail "pruning arm recorded no watcher lock pid"
+  launcher=$(ps -o ppid= -p "$lock_pid" 2>/dev/null | tr -d ' ')
+  # End the watcher's cycle before reaping the arm: the arm only leaves its poll when
+  # the watcher it launched is gone.
+  stop_detached_watcher "$lock_pid" "$launcher"
+  reap_arm "$armpid" 100 || true
+  kill "$live_pid" 2>/dev/null || true
+  wait "$live_pid" 2>/dev/null || true
+  pass "arm prunes only launch dirs that are aged with both recorded pids dead"
 }
 
 test_arm_propagates_immediate_wake_before_confirmation() {
@@ -741,7 +1153,11 @@ test_watch_restart_reports_healthy_peer_without_attaching
 test_watcher_self_evicts_on_lock_takeover
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_arm_starts_and_self_heals
-test_arm_hup_leaves_watcher_running_in_own_session
+test_arm_hup_leaves_detached_watcher_running
+test_arm_tree_kill_leaves_watcher_supervising
+test_arm_group_kill_leaves_watcher_supervising
+test_rearm_after_tree_kill_attaches_to_surviving_watcher
+test_arm_prunes_only_dead_launch_dirs
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable

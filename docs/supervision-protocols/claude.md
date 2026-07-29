@@ -12,9 +12,13 @@ When this session owns supervision and away mode is not active:
 7. Failure or missing cycle only: treat `watcher: FAILED - no live watcher with a fresh beacon` as an alarm and repair it before ending the turn.
 8. Ordinary wake: when the background task completes with `signal:`, `stale:`, `check:`, or `heartbeat`, drain queued wakes, handle them, then start exactly one fresh background task.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records or a real watcher reason line.
-9. Recovery only: if a forced restart is genuinely needed, run `bin/fm-watch-arm.sh --restart` through the same Claude background task mechanism.
-10. Do not send idle progress while the watcher is parked.
+9. Stopped arm task: if the harness reports the background arm task stopped or killed and it printed no wake reason, only the waiter died; the watcher keeps running detached.
+   Drain, then start exactly one fresh `bin/fm-watch-arm.sh` background task, which attaches to that surviving cycle.
+   Do not use `--restart` for this, and do not report it as lost supervision.
+10. Recovery only: if a forced restart is genuinely needed, run `bin/fm-watch-arm.sh --restart` through the same Claude background task mechanism.
+11. Do not send idle progress while the watcher is parked.
 
 Claude Code's background task completion is the wake mechanism.
 The watcher itself remains `bin/fm-watch.sh`, and `bin/fm-watch-arm.sh` is only the verified background arm wrapper.
 Re-arm attaches to an existing healthy cycle when one is already present, so the background task stays live until that cycle ends.
+Stopping a background task kills the launching shell's process tree, so the arm deliberately keeps the watcher out of both that tree and the arm's process group; `docs/turnend-guard.md` records those measurements.

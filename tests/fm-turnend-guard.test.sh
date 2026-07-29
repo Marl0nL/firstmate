@@ -20,6 +20,11 @@ fm_test_tmproot TMP_ROOT fm-turnend-guard
 fm_git_identity fmtest fmtest@example.invalid
 
 REQUIRED_REASON='repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task'
+# The first line of the hand-run block bin/fm-turnend-guard.sh prints when no hook
+# payload ever arrives.
+# Asserted verbatim because the whole point of that block is that a human or agent
+# reading the output cannot mistake it for a verdict.
+NO_PAYLOAD_LINE='fm-turnend-guard: NO HOOK PAYLOAD ON STDIN - NOTHING WAS CHECKED.'
 
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
 
@@ -177,6 +182,40 @@ run_hook() {
 run_hook_via() {  # <script-root> <fm-home> <stop_active>
   local dir=$1 home=$2 stop_active=$3
   printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
+# The guard invoked BY HAND: same scoping and same FM_HOME as run_hook, but with
+# no hook payload channel at all on fd 0.
+# /dev/null is a character device, which is one of the two shapes the guard
+# positively identifies as a hand run (the other is an interactive terminal), and it
+# is the shape a test can create hermetically.
+# The guard classifies hand runs NEGATIVELY on purpose, so shapes it cannot name -
+# a closed fd 0, say - keep the silent fail-open and are deliberately not covered
+# here; the read timeout is what catches those.
+run_hook_no_payload() {  # <script-root>
+  local dir=$1 home
+  home=$(cd "$dir" && pwd)
+  CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" < /dev/null 2>&1
+}
+
+# Bounded wait for a backgrounded guard: return its exit status once it is gone, or
+# 124 after the budget expires.
+# The payload-channel tests below deliberately hand the guard a stdin nobody ever
+# closes, which is exactly the shape that made an unbounded `cat` hang forever, so
+# a regression there must fail this suite rather than wedge it.
+wait_for_guard_exit() {  # <pid> [budget-in-tenths-of-a-second]
+  local pid=$1 limit=${2:-100} i=0
+  while [ "$i" -lt "$limit" ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      return "$?"
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  return 124
 }
 
 # An alias spelling of <target>: a symlinked directory reaching the very same
@@ -616,14 +655,159 @@ test_hook_silent_without_jq() {
   pass "fm-turnend-guard: fails open (never blocks) when jq is missing"
 }
 
-test_hook_silent_without_stdin() {
+# --- no hook payload: hand run vs the real hook path ------------------------
+#
+# This whole group replaces an assertion that a payload-less run exits 0 in
+# silence, which is precisely the behavior that misled a live session on
+# 2026-07-29: someone ran the guard by hand, got a silent 0, and read it as proof
+# that supervision was healthy when the guard had in fact checked nothing at all -
+# so the guard's real warnings were dismissed as false positives.
+# A hand run must now be unmistakably loud and exit 3, a code that is neither the
+# pass (0) nor the blind-turn block (2), while the real hook path keeps its
+# deliberate silent fail-open.
+
+# A payload-less run in a home the guard WOULD have blocked must not answer with
+# any verdict at all - not the block banner, and not silence.
+# Exit 3 is asserted because a caller scoring 0 or 2 would be scoring a check that
+# never ran.
+test_hook_loud_hand_run_without_payload_in_unhealthy_primary() {
   local dir out status
-  dir=$(make_primary_dir "$TMP_ROOT/hook-nostdin")
+  dir=$(make_primary_dir "$TMP_ROOT/hook-nopayload-unhealthy")
   : > "$dir/state/task1.meta"
-  out=$(bash "$dir/bin/fm-turnend-guard.sh" < /dev/null 2>&1); status=$?
-  expect_code 0 "$status" "hook must exit 0 on empty/absent stdin"
-  [ -z "$out" ] || fail "hook produced output on empty stdin: $out"
-  pass "fm-turnend-guard: silent no-op on empty stdin"
+  out=$(run_hook_no_payload "$dir"); status=$?
+  expect_code 3 "$status" "a hand run with no payload must exit 3, never a pass or a block"
+  [ -n "$out" ] || fail "hand run with no payload was silent - the exact false all-clear this pins"
+  assert_contains "$out" "$NO_PAYLOAD_LINE" "hand run must say loudly that nothing was checked"
+  assert_not_contains "$out" "TURN WOULD END BLIND" "a run that checked nothing must not report the blind-turn verdict"
+  pass "fm-turnend-guard: hand run with no payload is loud and exits 3 in an unhealthy primary"
+}
+
+# The loud block must not depend on fleet state.
+# A live identity-matched watcher lock with a fresh beacon is the one situation
+# where a real hook payload would legitimately produce a silent 0, so it is the
+# case most likely to regress back into "nothing to report" - but the guard still
+# checked nothing, and saying otherwise is the original defect.
+test_hook_loud_hand_run_without_payload_when_healthy() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-nopayload-healthy")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watcher holder"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook_no_payload "$dir"); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 3 "$status" "a hand run must exit 3 even where a real payload would have passed"
+  [ -n "$out" ] || fail "hand run in a healthy home was silent - health is not what a payload-less run measured"
+  assert_contains "$out" "$NO_PAYLOAD_LINE" "the loud block must not be conditional on fleet health"
+  pass "fm-turnend-guard: hand run with no payload stays loud in a fully healthy home"
+}
+
+# The real hook path keeps its deliberate silent fail-open: every tracked adapter
+# pipes the payload in and closes it, and a pipe that reached clean EOF is not a
+# shape the guard will call a hand run, so an empty one is a hook payload it could
+# not parse.
+# Blocking or shouting there could wedge a live session over a payload the guard
+# never got to read.
+test_hook_silent_on_empty_piped_payload() {
+  local dir home out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-empty-pipe")
+  home=$(cd "$dir" && pwd)
+  : > "$dir/state/task1.meta"
+  out=$(printf '' | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "an empty payload on a real hook pipe must keep failing open"
+  [ -z "$out" ] || fail "empty piped payload produced output: $out"
+  pass "fm-turnend-guard: an empty piped payload is still a silent fail-open (real hook path unchanged)"
+}
+
+# A stdin nobody ever closes is the normal shape of an agent's own shell, where fd 0
+# is a socket the harness holds open, so the guard's old unbounded `cat` sat there
+# forever instead of answering.
+# The bounded read must turn that into the same loud hand-run block, and this test
+# is itself bounded so a regression fails the suite instead of hanging it.
+test_hook_loud_when_payload_channel_stays_open_without_data() {
+  local dir home fifo holder guard out_file out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-payload-held-open")
+  home=$(cd "$dir" && pwd)
+  : > "$dir/state/task1.meta"
+  fifo="$dir/held-open.fifo"
+  out_file="$TMP_ROOT/hook-payload-held-open.out"
+  mkfifo "$fifo"
+  # A writer that opens the channel and then never says anything, ever.
+  sleep 30 > "$fifo" &
+  holder=$!
+  CLAUDECODE=1 FM_HOME="$home" FM_TURNEND_PAYLOAD_TIMEOUT=1 \
+    bash "$dir/bin/fm-turnend-guard.sh" < "$fifo" > "$out_file" 2>&1 &
+  guard=$!
+  wait_for_guard_exit "$guard" 100; status=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  out=$(cat "$out_file")
+  [ "$status" -ne 124 ] || fail "guard never returned on a stdin nobody closes - the unbounded-read hang is back"
+  expect_code 3 "$status" "a payload channel that never delivers must be treated as a hand run"
+  assert_contains "$out" "$NO_PAYLOAD_LINE" "a timed-out payload read must say loudly that nothing was checked"
+  pass "fm-turnend-guard: a payload channel held open with no data returns loudly instead of hanging"
+}
+
+# Bounding the read must not break a legitimately slow writer: a hook that opens the
+# channel immediately and writes a moment later is still a real hook, and its
+# payload must be honoured normally rather than scored as an absent one.
+# The write lands well inside the configured window, so a failure here means the
+# read gave up early rather than waiting out its own timeout.
+test_hook_honours_a_late_payload_within_the_timeout() {
+  local dir home fifo writer guard out_file out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-payload-late")
+  home=$(cd "$dir" && pwd)
+  : > "$dir/state/task1.meta"
+  fifo="$dir/late.fifo"
+  out_file="$TMP_ROOT/hook-payload-late.out"
+  mkfifo "$fifo"
+  # Open the channel now, deliver a second later, then close it exactly as a real
+  # hook does.
+  ( exec 3> "$fifo"; sleep 1; printf '{"stop_hook_active":false}' >&3; exec 3>&- ) &
+  writer=$!
+  CLAUDECODE=1 FM_HOME="$home" FM_TURNEND_PAYLOAD_TIMEOUT=10 \
+    bash "$dir/bin/fm-turnend-guard.sh" < "$fifo" > "$out_file" 2>&1 &
+  guard=$!
+  wait_for_guard_exit "$guard" 200; status=$?
+  kill "$writer" 2>/dev/null || true
+  wait "$writer" 2>/dev/null || true
+  out=$(cat "$out_file")
+  [ "$status" -ne 124 ] || fail "guard never returned while a late payload was in flight"
+  expect_code 2 "$status" "a payload that arrives inside the timeout must still be judged normally"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  assert_not_contains "$out" "$NO_PAYLOAD_LINE" "a payload that did arrive must never be reported as absent"
+  pass "fm-turnend-guard: a payload written late but inside the timeout is still read and judged"
+}
+
+# `read -d ''` replaced `cat`, so the payload must still be consumed whole across
+# more than one pipe buffer - a truncated read would corrupt the JSON and quietly
+# lose the loop-guard field.
+# Exit 0 alone would be a worthless assertion here because a truncated payload also
+# fails jq and fails open to 0, so the false variant does the real work: only a
+# complete 128KB payload parses and reaches the block.
+test_hook_reads_a_large_multiline_payload_completely() {
+  local dir home filler payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-large-payload")
+  home=$(cd "$dir" && pwd)
+  : > "$dir/state/task1.meta"
+  filler=$(head -c 131072 /dev/zero | tr '\000' 'x')
+  [ "${#filler}" -eq 131072 ] || fail "filler fixture is ${#filler} bytes, expected 131072"
+  payload=$(printf '{\n  "ignored_filler": "%s",\n  "stop_hook_active": false\n}\n' "$filler")
+  out=$(printf '%s' "$payload" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 2 "$status" "a large multi-line payload must be read whole and still parse as JSON"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  payload=$(printf '{\n  "ignored_filler": "%s",\n  "stop_hook_active": true\n}\n' "$filler")
+  out=$(printf '%s' "$payload" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "the loop guard must still be honoured at the tail of a large payload"
+  [ -z "$out" ] || fail "large loop-guarded payload produced output: $out"
+  pass "fm-turnend-guard: a 128KB multi-line payload is read completely and its trailing loop guard honoured"
 }
 
 test_hook_runs_fast() {
@@ -1023,7 +1207,12 @@ test_hook_exempts_linked_worktree_with_stray_marker
 test_hook_exempts_linked_worktree_with_non_ascii_marker
 test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
-test_hook_silent_without_stdin
+test_hook_loud_hand_run_without_payload_in_unhealthy_primary
+test_hook_loud_hand_run_without_payload_when_healthy
+test_hook_silent_on_empty_piped_payload
+test_hook_loud_when_payload_channel_stays_open_without_data
+test_hook_honours_a_late_payload_within_the_timeout
+test_hook_reads_a_large_multiline_payload_completely
 test_hook_runs_fast
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
