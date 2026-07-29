@@ -57,6 +57,13 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Every spawn also refuses a worktree that ANOTHER task of this FM_HOME already
+#   records as `worktree=` in its state/<id>.meta, naming the owning task. A
+#   respawn of the SAME task id into its own recorded worktree stays legitimate.
+#   The check is deliberately home-scoped: it reads only $STATE of the current
+#   FM_HOME and never sweeps sibling homes, whose state is not this home's to read
+#   or reason about. See assert_worktree_unleased() below for why it exists and
+#   what it cannot cover.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -96,7 +103,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,85p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -603,6 +610,57 @@ validate_firstmate_operational_dirs() {
   done
 }
 
+real_path_or_raw() {  # <path>
+  local path=$1 real
+  if real=$(cd "$path" 2>/dev/null && pwd -P); then
+    printf '%s\n' "$real"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
+# Worktree-lease guard. Twice on 2026-07-29 a spawn was handed a worktree a LIVE
+# task was already working in: once in the main home after a herdr-server restart
+# left a task's meta pointing at another task's worktree (the confused crewmate
+# wrote its uncommitted fixes there, where they were reverted as foreign edits and
+# lost), and once in a secondmate home, where `treehouse get` re-leased a live
+# crewmate's worktree and reset it to the default branch. The pool judges a slot
+# free by whether a live PROCESS sits with its cwd inside it, and an agent whose
+# process cwd is the pane's launch dir leaves an owned slot looking free. This
+# home's own state/*.meta is the record that actually knows the slot is taken, so
+# consult it before the new agent touches anything.
+#
+# Scope, deliberately: reads only $STATE of the CURRENT FM_HOME. Sibling homes
+# lease from the same pool but their state is not this home's to read, and each
+# home runs this same guard over its own records. The pool itself is not this
+# script's to fix.
+#
+# Limit, honestly: for a session-provider backend the worktree's identity is only
+# knowable AFTER `treehouse get` has already acquired (and reset) it, so this
+# guard cannot prevent that acquisition-time reset - it converts a silent
+# destruction into a loud abort before the branch, hook, meta, and launch steps,
+# and names the task to reconcile. Orca allocates its own worktree, and a
+# secondmate home is supplied rather than leased, so on those paths the guard
+# fires before anything is written at all.
+assert_worktree_unleased() {  # <source>
+  local source=$1 wt_real meta other_id other_wt other_real
+  wt_real=$(real_path_or_raw "$WT")
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    other_id=$(basename "$meta" .meta)
+    # A deliberate respawn of the SAME task id into its own recorded worktree is
+    # legitimate (recovery, restart, /updatefirstmate) and must stay allowed.
+    [ "$other_id" != "$ID" ] || continue
+    other_wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$other_wt" ] || continue
+    other_real=$(real_path_or_raw "$other_wt")
+    if [ "$other_wt" = "$WT" ] || [ "$other_real" = "$wt_real" ]; then
+      echo "error: $source yielded worktree '$WT', which task '$other_id' already records as its own in $meta; refusing to launch $ID into a worktree another task of this home is using. Reconcile $other_id first (bin/fm-crew-state.sh $other_id), then respawn." >&2
+      exit 1
+    fi
+  done
+}
+
 if [ "$KIND" = secondmate ]; then
   if [ -z "$FIRSTMATE_HOME" ] && [ -f "$STATE/$ID.meta" ]; then
     FIRSTMATE_HOME=$(grep '^home=' "$STATE/$ID.meta" | cut -d= -f2- || true)
@@ -616,6 +674,12 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   WT="$PROJ_ABS"
+  # A secondmate spawn never reaches validate_spawn_worktree - its home IS the
+  # supplied path, so the isolation assertion (worktree distinct from the project)
+  # cannot apply. The lease guard still does, and it runs HERE, before the
+  # fast-forward and config push below: neither may touch a home this home's own
+  # records say belongs to another task.
+  assert_worktree_unleased "secondmate home"
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
   # PRIMARY checkout's current default-branch commit, so a freshly spawned or
   # recovery-respawned secondmate always runs the primary's version (AGENTS.md
@@ -669,15 +733,6 @@ fi
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
-real_path_or_raw() {  # <path>
-  local path=$1 real
-  if real=$(cd "$path" 2>/dev/null && pwd -P); then
-    printf '%s\n' "$real"
-  else
-    printf '%s\n' "$path"
-  fi
-}
-
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -688,6 +743,7 @@ real_path_or_raw() {  # <path>
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
   local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  assert_worktree_unleased "$source"
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
