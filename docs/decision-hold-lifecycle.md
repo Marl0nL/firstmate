@@ -24,6 +24,12 @@ A home whose configured backlog backend is not tasks-axi (`config/backlog-backen
 There `hold` and `resolve` refuse rather than fabricate a durable record, while `complete` and `verify` degrade to the status-fold inventory: the attestation and the every-open-decision-is-inventoried gate still apply, no transfer event is written, and the status decision keeps carrying the item.
 Degraded runs say so on stdout, so the weaker guarantee is never silent, and scout teardown stays gated instead of permanently refused.
 
+A resolved hold eventually leaves the live backlog: Done retention prunes a closed record into the configured archive (`[markdown] archive` in the home's `.tasks.toml`, `data/done-archive.md` by default), and `tasks-axi prune` moves rather than deletes it.
+`verify` and `complete` therefore accept an archived record for a hold that is missing from `data/backlog.md`, but only when that record is closed, kind `captain`, and carries the resolution record `resolve` writes, judged one archived record at a time.
+That combination is what distinguishes a pruned-after-resolution hold from a hold that never existed, which before this distinction existed left such a scout permanently unable to pass the gate and its scratch worktree leased.
+An archived record that does not prove resolution - a still-open hold pruned out of another section, a closed record with no resolution body, or a record of another kind - still refuses, so a genuinely unresolved captain decision keeps blocking teardown.
+For the same reason `hold` refuses to re-create an identity whose archived record proves resolution, and `resolve` reports that durable fact instead of reopening it.
+
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The gate is strictly additional: it can refuse a scout teardown the report check would have allowed, and it never relaxes another refusal.
 It is not consulted on the ship path at all, so the unlanded-work refusal is untouched by a decision inventory in any state.
@@ -66,6 +72,10 @@ It begins with a completed investigation and visual review whose genuine unresol
 The initial Bearings snapshot correctly has no open decision, and the teardown gate refuses to erase the source.
 Further regressions cover tasks-axi's quoted multi-entry `blocked_by` output, a hold surviving the loss of all volatile state, and a manual-backlog home degrading instead of bricking scout teardown.
 
+Pruned-resolution date: 2026-07-30, after a scout hit the gap live on 2026-07-28 with resolved holds aged out of Done retention.
+Its two regressions drive the real `tasks-axi prune --keep 0 --state done` path rather than a hand-written fixture for the positive case, and use hand-written archive fixtures for the refusal cases that tasks-axi will not produce on its own.
+The refusal cases include a resolution record that belongs to a neighbouring archived row, which must not clear the gate for the hold's own row.
+
 The verification commands and their exact summarized outputs follow.
 
 ```text
@@ -80,6 +90,8 @@ ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
 ok - a captain hold survives a restart that loses all volatile state and stays answerable
+ok - a resolved hold pruned into the archive stays distinguishable from one that never existed
+ok - an archived record clears the gate only when it proves resolution
 ok - a manual-backlog home refuses hold mutations and degrades the gate instead of bricking teardown
 
 $ bash tests/fm-watch-triage.test.sh
