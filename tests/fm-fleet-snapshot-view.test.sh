@@ -417,6 +417,63 @@ test_view_renders_dead_secondmate_agent_status() {
 # append-only stream. This is the fmdev masking bug: last-event-wins read the trailing
 # `done` and reported pending_decision=false while a needs-decision was still open. The
 # durable keyed fold (fm-classify-lib.sh) keeps it open until an explicit resolution.
+# A status line whose decision key was tagged AFTER the colon folds under the
+# unkeyed `default` key, so the fold cannot tell firstmate anything is wrong. The
+# snapshot must therefore carry the detector's warning (fm-classify-lib.sh's
+# status_misplaced_decision_keys) and the human view must render it, while a clean
+# fleet stays free of the section entirely.
+test_misplaced_status_key_surfaces_in_snapshot_and_view() {
+  local home fakebin out view
+  home=$(make_home misplaced-key)
+  fm_write_meta "$home/state/mistagged-task.meta" \
+    "window=firstmate:fm-mistagged-task" \
+    "worktree=$home/projects/mistagged" \
+    "project=$home/projects/alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  cat > "$home/state/mistagged-task.status" <<'EOF'
+working: started
+needs-decision: [key=api-shape] pick one of two shapes
+needs-decision [key=route]: pick north or south
+EOF
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "mistagged-task")
+    | (.hints.status_key_misplacements | length) == 1
+      and .hints.status_key_misplacements[0].line == 2
+      and (.hints.status_key_misplacements[0].raw | contains("[key=api-shape]"))
+      and (.hints.open_decisions | any(.key == "default"))
+      and (.hints.open_decisions | any(.key == "api-shape") | not)
+  ' >/dev/null || fail "the snapshot did not warn about a key tagged after the colon: $out"
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  assert_contains "$view" "## Status Key Warnings" "the view must surface the mistagged key"
+  assert_contains "$view" "| mistagged-task | 2 | needs-decision: [key=api-shape] pick one of two shapes |" \
+    "the view must name the task, line, and offending status line"
+
+  home=$(make_home well-tagged-key)
+  fm_write_meta "$home/state/tagged-task.meta" \
+    "window=firstmate:fm-tagged-task" \
+    "worktree=$home/projects/tagged" \
+    "project=$home/projects/alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'needs-decision [key=route]: pick north or south\nresolved [key=route]: went north\n' \
+    > "$home/state/tagged-task.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "tagged-task")
+    | (.hints.status_key_misplacements | length) == 0
+  ' >/dev/null || fail "correctly keyed lines produced a false warning: $out"
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  assert_not_contains "$view" "Status Key Warnings" \
+    "a clean fleet must not render the warning section"
+  pass "a status key mistagged after the colon reaches the snapshot and the fleet view"
+}
+
 test_open_decision_survives_later_unrelated_event() {
   local home fakebin out
   home=$(make_home masking)
@@ -590,6 +647,7 @@ test_empty_fleet_json
 test_fixture_snapshot_json
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
+test_misplaced_status_key_surfaces_in_snapshot_and_view
 test_secondmate_open_decision_survives_live_endpoint
 test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution

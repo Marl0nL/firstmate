@@ -37,6 +37,7 @@ For herdr, that pane fallback trusts a native `busy` verdict outright, but corro
 For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 The script header owns the exact JSON schema.
+The snapshot also carries a status-format warning per task: a decision key tagged after the colon instead of in the key position lands in free text where no parser looks, so `bin/fm-classify-lib.sh`'s detector flags the line and the human view renders it rather than letting the event fold silently under the unkeyed `default` key.
 
 ### Registered secondmate current state
 

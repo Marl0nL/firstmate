@@ -613,6 +613,148 @@ test_hold_survives_a_restart_that_loses_all_volatile_state() {
   pass "a captain hold survives a restart that loses all volatile state and stays answerable"
 }
 
+# Done retention prunes a CLOSED backlog record out of the live backlog and into
+# the archive. A scout whose decisions were all resolved therefore reaches a state
+# where its holds are absent from data/backlog.md - which, before this regression
+# was fixed, read identically to holds that never existed and refused teardown
+# forever, leaving the scratch worktree leased (hit live on 2026-07-28). The
+# archived resolution record is what distinguishes the two, and an archived record
+# that does NOT prove resolution must still refuse.
+test_pruned_resolved_hold_still_passes_the_gate() {
+  local home origin hold rc
+  home=$(make_home pruned-resolution)
+  origin=sample-pruned-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Investigate sample pruning" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create pruned-resolution origin"
+  write_origin_meta "$home" "$origin"
+  printf 'needs-decision [key=route]: choose route north or route south\ndone: report complete\n' \
+    > "$home/state/$origin.status"
+  printf '# Sample pruned review\n\nOne captain choice remained and has been answered.\n' \
+    > "$home/data/$origin/report.md"
+  hold=$(run_decisions "$home" hold "$origin" route \
+    --title "Choose the pruned sample route" --reason "captain route choice pending" --repo sample) \
+    || fail "could not register the pruned-resolution hold"
+  run_decisions "$home" complete "$origin" route >/dev/null || fail "completion gate failed"
+  tasks_in "$home" add pruned-followup "Apply the pruned sample route" --kind ship --repo sample >/dev/null \
+    || fail "could not create dependent work"
+  tasks_in "$home" block pruned-followup --by "$hold" >/dev/null \
+    || fail "could not route dependent work behind the hold"
+  printf 'Take route north.\n' > "$home/pruned-decision.txt"
+  run_decisions "$home" resolve "$origin" route --decision-file "$home/pruned-decision.txt" \
+    --routed-to pruned-followup >/dev/null || fail "could not resolve the hold"
+
+  # Retention now moves the closed hold out of the live backlog. tasks-axi never
+  # deletes it: the record, its captain kind, and its resolution body move to the
+  # configured archive.
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null || fail "could not prune the Done section"
+  assert_no_grep "$hold" "$home/data/backlog.md" "the fixture must actually prune the resolved hold"
+  assert_grep "$hold" "$home/data/done-archive.md" "the pruned hold left no durable archived record"
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "the fixture must reproduce a hold that is no longer visible to tasks-axi show"
+  fi
+
+  run_decisions "$home" verify "$origin" >/dev/null 2> "$home/pruned-verify.err" \
+    || fail "a pruned-after-resolution hold bricked the gate: $(cat "$home/pruned-verify.err")"
+  run_decisions "$home" complete "$origin" route >/dev/null 2> "$home/pruned-complete.err" \
+    || fail "a pruned-after-resolution hold bricked completion: $(cat "$home/pruned-complete.err")"
+  run_teardown "$home" "$origin" >/dev/null 2> "$home/pruned-teardown.err" \
+    || fail "a pruned-after-resolution hold bricked scout teardown: $(cat "$home/pruned-teardown.err")"
+
+  # The same identity must not be silently reopened just because the live backlog
+  # no longer carries it.
+  set +e
+  run_decisions "$home" hold "$origin" route --title "Choose the pruned sample route" \
+    --reason "captain route choice pending" --repo sample > "$home/reopen.out" 2> "$home/reopen.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an archived resolved decision was reopened as a fresh hold"
+  assert_grep "already durably resolved" "$home/reopen.err" "the refusal must name the durable resolution"
+  set +e
+  run_decisions "$home" resolve "$origin" route --decision-file "$home/pruned-decision.txt" \
+    --routed-to pruned-followup > "$home/reresolve.out" 2> "$home/reresolve.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an archived resolved decision was resolved a second time"
+  assert_grep "already durably resolved" "$home/reresolve.err" \
+    "the re-resolve refusal must name the durable resolution"
+  pass "a resolved hold pruned into the archive stays distinguishable from one that never existed"
+}
+
+# The other half of the same distinction: an ARCHIVED record only clears the gate
+# when it proves resolution. A still-open hold pruned out of another section, a
+# closed record with no resolution body, a non-captain record, and an absent record
+# must all keep refusing, or the gate would stop protecting unresolved decisions.
+test_archived_record_without_resolution_still_refuses() {
+  local home origin hold archive
+  home=$(make_home archived-unresolved)
+  origin=sample-archived-review
+  mkdir -p "$home/data/$origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Sample archived review\n\nOne captain choice was never answered.\n' \
+    > "$home/data/$origin/report.md"
+  hold="$origin-decision-route"
+  archive="$home/data/done-archive.md"
+  printf 'decisions_reviewed=1\ndecision_keys=route\n' >> "$home/state/$origin.meta"
+
+  # Still open, merely archived out of the live file.
+  cat > "$archive" <<EOF
+## Archived 2026-07-28
+- [ ] $hold - Choose the archived sample route (repo: sample) (kind: captain) (hold: captain route choice pending) (hold-kind: captain)
+  Origin: $origin
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/open.out" 2> "$home/open.err"; then
+    fail "an archived but still-open hold cleared the gate"
+  fi
+  if run_teardown "$home" "$origin" > "$home/open-teardown.out" 2> "$home/open-teardown.err"; then
+    fail "an archived but still-open hold allowed scout teardown"
+  fi
+
+  # Closed, but with no resolution record, so nothing proves the captain answered.
+  cat > "$archive" <<EOF
+## Archived 2026-07-28
+- [x] $hold - Choose the archived sample route (repo: sample) (kind: captain) (done 2026-07-28) (hold-kind: captain)
+  Origin: $origin
+  State: awaiting captain decision.
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/closed.out" 2> "$home/closed.err"; then
+    fail "an archived closed hold with no resolution record cleared the gate"
+  fi
+
+  # A resolution record must belong to the SAME record, not be assembled out of a
+  # neighbouring one.
+  cat > "$archive" <<EOF
+## Archived 2026-07-28
+- [x] $hold - Choose the archived sample route (repo: sample) (kind: captain) (done 2026-07-28) (hold-kind: captain)
+  Origin: $origin
+- [x] sample-other-work - Unrelated landed work (repo: sample) (kind: ship) (done 2026-07-28)
+  Resolution recorded by fm-decision-hold.
+  Routed work:
+  - sample-other-followup
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/split.out" 2> "$home/split.err"; then
+    fail "a resolution record from a different archived row cleared the gate"
+  fi
+
+  # And the genuine shape still clears it, so these refusals are about proof, not
+  # about refusing archives.
+  cat > "$archive" <<EOF
+## Archived 2026-07-28
+- [x] $hold - Choose the archived sample route (repo: sample) (kind: captain) (done 2026-07-28) (hold-kind: captain)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000000000000000000000000000000000000000000000000000000000000000
+  Routed identities: sample-archived-followup
+  Captain decision:
+  Take route north.
+  Routed work:
+  - sample-archived-followup
+EOF
+  run_decisions "$home" verify "$origin" >/dev/null 2> "$home/good.err" \
+    || fail "a genuine archived resolution record was refused: $(cat "$home/good.err")"
+  pass "an archived record clears the gate only when it proves resolution"
+}
+
 # A home that opted out of the tasks-axi backlog backend has nowhere to STORE a
 # structured hold. Refusing every scout teardown there would be a regression, and
 # silently passing the gate would lose decisions. Instead the mutations refuse
@@ -670,4 +812,6 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
 test_hold_survives_a_restart_that_loses_all_volatile_state
+test_pruned_resolved_hold_still_passes_the_gate
+test_archived_record_without_resolution_still_refuses
 test_manual_backlog_backend_degrades_instead_of_bricking_teardown

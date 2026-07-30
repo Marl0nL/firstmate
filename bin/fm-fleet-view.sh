@@ -102,5 +102,21 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
    end),
   "",
   "## Secondmates",
-  .secondmate_guidance.note
+  .secondmate_guidance.note,
+  "",
+  # Mistagged decision keys are rendered only when present: such a line folds under
+  # the unkeyed `default` key, so its decision is silently shared or closed by the
+  # wrong event until the line is re-appended with the key before the colon.
+  (if ([.tasks[]? | select((.hints.status_key_misplacements // []) | length > 0)] | length) == 0 then
+    empty
+   else
+    "## Status Key Warnings",
+    "",
+    "A `[key=...]` token after the colon is free-text: these lines folded under the unkeyed `default` key.",
+    "",
+    "| ID | Line | Status line |",
+    "| --- | --- | --- |",
+    (.tasks[] as $t | ($t.hints.status_key_misplacements // [])[]
+      | "| \($t.id) | \(.line) | \(.raw) |")
+   end)
 '

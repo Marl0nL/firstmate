@@ -245,6 +245,46 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
     *) printf 'default' ;;
   esac
 }
+# 0 when a status line looks like it MEANT to key a decision but put the token in
+# the wrong place: after the colon, inside the free-text note, where no parser
+# looks. The line then folds under the unkeyed `default` key, so an opener silently
+# shares one key with every other unkeyed decision and a `resolved` line silently
+# closes something else. Observed twice on 2026-07-27 and again after PR #32's
+# by-example scaffold fix, which is why the shape is DETECTED here rather than only
+# discouraged in the brief.
+#
+# Deliberately a warning-only read: it changes no parse, so a flagged line still
+# folds exactly as before and a false positive costs nothing but a surfaced note.
+# It is also deliberately verb-agnostic - a `[key=...]` token in a note body is
+# suspicious whatever the verb, and every folded verb list already has an owner
+# above that this must not become a third copy of.
+# Only the wrong-place case flags: a line whose key position already carries a
+# token is parsed as intended, so a note that additionally mentions another key
+# (a resolve explaining which decision superseded it) is left alone.
+status_line_key_misplaced() {  # <status-line>
+  local line=$1 prefix=${1%%:*}
+  case "$line" in *:*) ;; *) return 1 ;; esac
+  case "$prefix" in *\[key=*\]*) return 1 ;; esac
+  case "$(status_line_note "$line")" in *\[key=*\]*) return 0 ;; esac
+  return 1
+}
+
+# Print "<line-number>\t<line>" for every line of a status file carrying that
+# misplaced-key shape; print nothing when the file is clean or absent. This is the
+# scan supervision surfaces render (bin/fm-fleet-snapshot.sh's
+# hints.status_key_misplacements) so a mistagged line is visible to firstmate
+# instead of quietly folding under the wrong key.
+status_misplaced_decision_keys() {  # <status-file>
+  local f=$1 line n=0
+  [ -f "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    status_line_key_misplaced "$line" || continue
+    printf '%s\t%s\n' "$n" "$line"
+  done < "$f"
+  return 0
+}
+
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
 _fm_decision_drop() {  # <open-set> <key>

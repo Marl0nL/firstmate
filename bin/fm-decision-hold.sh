@@ -33,6 +33,16 @@
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
 #
+# A hold that was RESOLVED and then pruned out of the live backlog's Done
+# retention is still durably recorded: tasks-axi prunes by MOVING the record into
+# its configured archive and never deletes it. `verify` and `complete` therefore
+# accept an archived record that is closed, kind captain, and carries the
+# resolution record this script writes, which is what distinguishes a
+# pruned-after-resolution hold from one that never existed. An archived record
+# without that resolution record - including a still-open hold pruned out of some
+# other section - is NOT accepted, so a genuinely unresolved captain decision keeps
+# refusing scout teardown exactly as before.
+#
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
 # It writes the captain decision and routed identities into the hold body, clears
 # those dependency edges, and only then marks the hold Done. A failure before the
@@ -133,6 +143,60 @@ show_field() {  # <show-output> <field>
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
 }
 
+# Path of the durable archive tasks-axi MOVES a pruned record into (it never
+# deletes one - see `tasks-axi prune --help`). Read from the active home's
+# `[markdown] archive` setting, falling back to tasks-axi's own default.
+archive_path() {
+  local toml="$FM_HOME/.tasks.toml" rel=''
+  if [ -f "$toml" ]; then
+    rel=$(sed -n 's/^[[:space:]]*archive[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$toml" | head -1)
+  fi
+  [ -n "$rel" ] || rel=data/done-archive.md
+  case "$rel" in
+    /*) printf '%s\n' "$rel" ;;
+    *) printf '%s/%s\n' "$FM_HOME" "$rel" ;;
+  esac
+}
+
+# 0 when the archive holds a record for <hold-id> that is CLOSED, kind captain,
+# and carries the resolution record command_resolve writes. That combination is
+# what makes a pruned-after-resolution hold distinguishable from a hold that never
+# existed, without accepting an archived record that was never resolved: an open
+# hold pruned out of another section keeps its `- [ ]` box and has no resolution
+# record, so it still fails this test. Each archived record - the `- [x] <id> - `
+# row plus its indented body lines - is judged on its own, so one satisfying
+# record can never be assembled out of two unrelated ones.
+archive_has_resolved_hold() {  # <hold-id>
+  local file
+  file=$(archive_path)
+  [ -f "$file" ] || return 1
+  awk -v id="$1" '
+    function judge() {
+      if (in_record && captain && recorded && routed) { found = 1 }
+      in_record = 0; captain = 0; recorded = 0; routed = 0
+    }
+    index($0, "- [x] " id " - ") == 1 {
+      judge()
+      in_record = 1
+      if (index($0, "(kind: captain)") > 0) { captain = 1 }
+      next
+    }
+    # A rendered body carries blank lines between its sections, so a blank line is
+    # neutral rather than a record boundary; only the next row or a non-indented
+    # line ends a record.
+    /^[[:space:]]*$/ { next }
+    /^[[:space:]]/ {
+      if (in_record) {
+        if (index($0, "Resolution recorded by fm-decision-hold.") > 0) { recorded = 1 }
+        if (index($0, "Routed work:") > 0) { routed = 1 }
+      }
+      next
+    }
+    { judge() }
+    END { judge(); exit(found ? 0 : 1) }
+  ' "$file"
+}
+
 origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
@@ -204,7 +268,13 @@ verify_hold_resolved() {  # <hold-id>
 
 verify_hold_durable() {  # <hold-id>
   local id=$1 show state held kind hold_kind body
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+  if ! show=$(task_show "$id"); then
+    # Absent from the live backlog is not proof the decision never existed: Done
+    # retention prunes a CLOSED record into the archive. Accept only an archived
+    # record that still proves resolution, and otherwise keep refusing.
+    archive_has_resolved_hold "$id" && return 0
+    fail "captain decision $id is absent from $FM_HOME/data/backlog.md and has no resolved record in $(archive_path)"
+  fi
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -275,6 +345,11 @@ command_hold() {
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
   else
+    # Same reasoning as verify_hold_durable: absent from the live backlog can mean
+    # pruned-after-resolution, and re-creating that identity would silently reopen
+    # a decision the captain already answered.
+    ! archive_has_resolved_hold "$id" \
+      || fail "captain decision $id is already durably resolved in $(archive_path); use a new decision key for a new decision"
     if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
       repo=${repo%/}
@@ -425,6 +500,12 @@ command_resolve() {
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
     printf 'resolved: %s\n' "$id"
     return 0
+  fi
+  # A resolved record pruned into the archive keeps no live body to re-verify the
+  # retry identity against, so this reports the durable fact instead of reopening
+  # the decision or comparing against a record it cannot read back in the same form.
+  if ! task_show "$id" >/dev/null 2>&1 && archive_has_resolved_hold "$id"; then
+    fail "captain decision $id is already durably resolved and its record has been archived into $(archive_path); its routed work was released when it closed"
   fi
   verify_hold_active "$id"
   hold_show=$(task_show "$id")
