@@ -26,6 +26,11 @@
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
+#     hints.status_key_misplacements is fm-classify-lib.sh's
+#     status_misplaced_decision_keys scan: one bounded {line,raw} record per status
+#     line whose decision key was tagged AFTER the colon, where no parser looks.
+#     It is a format warning about the log, never reconciled against current_state,
+#     and bounded by FM_SNAPSHOT_KEY_MISPLACEMENTS.
 #     endpoint.exists is the cheap backend endpoint-presence read. It is NOT
 #     liveness: a backend that replays a persisted session layout across a
 #     server restart reports present for panes whose processes are gone.
@@ -90,6 +95,7 @@ FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
 FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
+FM_SNAPSHOT_KEY_MISPLACEMENTS=${FM_SNAPSHOT_KEY_MISPLACEMENTS:-10}
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
@@ -120,6 +126,7 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_LINES "$FM_SNAPSHOT_REGISTRY_LINES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_BYTES "$FM_SNAPSHOT_REGISTRY_BYTES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_RECORDS "$FM_SNAPSHOT_REGISTRY_RECORDS"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_KEY_MISPLACEMENTS "$FM_SNAPSHOT_KEY_MISPLACEMENTS"
 
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
@@ -432,6 +439,22 @@ task_json_lines() {
       [ splits("\n") | select(length > 0)
         | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
         | select(. != null) ]')
+    # Mistagged decision keys: a `[key=...]` token placed AFTER the colon sits in
+    # the free-text note where no parser looks, so the line folds under the unkeyed
+    # `default` key and silently opens or closes the wrong decision.
+    # fm-classify-lib.sh's status_line_key_misplaced owns the shape; this only
+    # renders its bounded scan so a mistagged line is visible instead of silent.
+    # Unlike the fold above, this is NOT reconciled against the crew lifecycle: the
+    # line is malformed whatever the crew is doing now, and the fix is to re-append
+    # it correctly.
+    key_misplacements_json=$(status_misplaced_decision_keys "$status_log" \
+      | jq -R -s --argjson max "$FM_SNAPSHOT_KEY_MISPLACEMENTS" '
+      [ splits("\n") | select(length > 0)
+        | (capture("^(?<line>[0-9]+)\t(?<raw>.*)$")?)
+        | select(. != null)
+        | {line:(.line | tonumber),
+           raw:(.raw | if length > 200 then .[:200] + "…" else . end)} ]
+      | .[:$max]')
     pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
     blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
 
@@ -494,6 +517,7 @@ task_json_lines() {
       --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
       --argjson open_decisions "$open_decisions_json" \
+      --argjson key_misplacements "$key_misplacements_json" \
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
@@ -526,6 +550,7 @@ task_json_lines() {
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,
           open_decisions:$open_decisions,
+          status_key_misplacements:$key_misplacements,
           scout_report_present:$report_present,
           last_event_text:$last_event_raw
         },

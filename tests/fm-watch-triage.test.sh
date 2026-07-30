@@ -230,6 +230,59 @@ test_captain_held_bookkeeping_classifier() {
   pass "the captain-held transfer verb closes only its own status copy and never masks the real state verb"
 }
 
+# A decision key tagged AFTER the colon lands in the free-text note, where no
+# parser looks, so the line folds under the unkeyed `default` key: an opener shares
+# one key with every other unkeyed decision and a `resolved` line closes something
+# else. Crews made that exact mistake twice on 2026-07-27, and PR #32's by-example
+# scaffold fix discourages it without making it visible. The detector must flag the
+# shape without changing any parse, and must not flag a correctly keyed line.
+test_misplaced_decision_key_detector() {
+  local dir state scan open
+  dir=$(make_case classify-misplaced-key); state="$dir/state"
+
+  status_line_key_misplaced "needs-decision: [key=api-shape] pick a shape" \
+    || fail "the detector missed a key token at the start of the note"
+  status_line_key_misplaced "blocked: waiting [key=lease] on a lease" \
+    || fail "the detector missed a key token later in the note"
+  status_line_key_misplaced "resolved: closed [key=api-shape]" \
+    || fail "the detector missed a misplaced key on a closing line"
+  status_line_key_misplaced "needs-decision [key=api-shape]: pick a shape" \
+    && fail "the detector flagged a correctly keyed line"
+  status_line_key_misplaced "resolved [key=a]: superseded by [key=b]" \
+    && fail "the detector flagged a keyed line whose note mentions another key"
+  status_line_key_misplaced "working: building the [key] index" \
+    && fail "the detector flagged prose that is not a key token"
+  status_line_key_misplaced "done: PR https://x/y/pull/3" \
+    && fail "the detector flagged an ordinary status line"
+  status_line_key_misplaced "needs-decision [key=a] no colon at all" \
+    && fail "the detector flagged a line with no note to misplace a key into"
+
+  cat > "$state/misplaced.status" <<'EOF'
+working: started
+needs-decision: [key=api-shape] pick one of two shapes
+needs-decision [key=route]: pick north or south
+resolved [key=route]: went north
+EOF
+  scan=$(status_misplaced_decision_keys "$state/misplaced.status")
+  [ "$scan" = $'2\tneeds-decision: [key=api-shape] pick one of two shapes' ] \
+    || fail "the scan did not report exactly the mistagged line with its line number: $scan"
+
+  # The detector is warning-only: the fold still treats the mistagged line exactly
+  # as before, which is what makes the warning safe to add and worth surfacing.
+  open=$(status_open_decisions "$state/misplaced.status")
+  printf '%s' "$open" | grep -F $'default\tneeds-decision' >/dev/null \
+    || fail "the detector changed how a mistagged line folds"
+  printf '%s' "$open" | grep -F $'api-shape\t' >/dev/null \
+    && fail "the detector started parsing a misplaced key as a real key"
+
+  printf 'working: started\ndone: PR https://x/y/pull/3\n' > "$state/clean.status"
+  [ -z "$(status_misplaced_decision_keys "$state/clean.status")" ] \
+    || fail "the scan reported a warning for a clean status log"
+  [ -z "$(status_misplaced_decision_keys "$state/absent.status")" ] \
+    || fail "the scan reported a warning for an absent status log"
+  pass "a decision key mistagged after the colon is detected without changing any parse"
+}
+
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
@@ -1447,6 +1500,7 @@ test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
 test_captain_held_bookkeeping_classifier
+test_misplaced_decision_key_detector
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_status_is_paused_or_captain_held_classifier
