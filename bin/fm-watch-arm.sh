@@ -17,8 +17,9 @@
 # docs/arm-pretool-check.md for the blessed tree and deny reason codes. It is a
 # pre-execution seatbelt, not a substitute for the verification here.
 #
-# This script forks the watcher as a tracked child, then VERIFIES the outcome
-# before it settles in. It confirms a watcher process is genuinely alive AND the
+# This script launches the watcher DETACHED from its own process tree (see the
+# DETACH CONTRACT below), then VERIFIES the outcome before it settles in.
+# It confirms a watcher process is genuinely alive AND the
 # liveness beacon (state/.last-watcher-beat) is fresh within FM_GUARD_GRACE (the
 # single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
 # exactly one unambiguous status line:
@@ -32,12 +33,45 @@
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
-# returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live until the identity-matched holder is no longer
+# returns the FAILED line. On started it stays live for the whole watcher cycle and
+# propagates the wake reason; on attached it stays live until the
+# identity-matched holder is no longer
 # healthy, then exits zero so the harness background-notify fires then (not as a
 # false empty wake). On restart-only healthy it exits zero after the duplicate
 # child stands down. On FAILED it exits non-zero so the failure is loud. A live
 # cycle already present means re-arm attaches - do not start a second watcher.
+#
+# DETACH CONTRACT (why the watcher is not this script's child):
+# A harness that stops its own tracked background task kills the arm's process
+# TREE, walking live parent links - measured 2026-07-30 on Claude Code 2.1.220
+# inside a herdr pane; see docs/turnend-guard.md for the probe and its table.
+# setsid alone does NOT survive that: a new session/process group does not break
+# the parent link the walk follows, so the previous own-session fork still took
+# the watcher down with every stopped arm task.
+# So the watcher is launched DOUBLE-FORKED: `( setsid <self> --detach-launch ... & )`
+# exits its intermediate subshell immediately, which reparents the launch away
+# from this arm (to the init/user manager) before the arm returns. Nothing in the
+# launch descends from the arm, so a tree kill aimed at the arm cannot reach it.
+# BOTH halves of that launch are load-bearing and neither is redundant: the double
+# fork defeats a kill that walks parent links, and the setsid defeats one scoped to
+# the arm's process group. Every reproduced measurement says the stop follows
+# parentage, but an independent probe once reported the group being killed too, and
+# that observation did not reproduce; keeping the setsid costs nothing and is the
+# only thing standing between a group-scoped stop and the original bug. Do not
+# remove it as belt-and-braces. tests/fm-watcher-lock.test.sh pins each leg with its
+# own kill shape.
+# The cost is that the watcher is no longer a wait-able child: this arm polls the
+# recorded pid and reads the status the detach launcher records, which keeps the
+# arm alive for exactly as long as the watcher runs. That preserves the whole
+# supervision contract - the arm stays the harness-visible waiter whose exit
+# notifies the harness, the singleton lock and liveness beacon are untouched, and
+# a killed arm now costs only a cheap re-arm that ATTACHES to the still-live
+# watcher instead of restarting supervision.
+#
+# --detach-launch <dir>: INTERNAL re-exec of this script, never called by hand.
+# It is the small process that owns the watcher: it records its own pid, forks the
+# watcher, records the watcher pid, and records the watcher's exit status in <dir>
+# so the polling arm can report it honestly.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or report restart-only healthy if a
@@ -50,6 +84,10 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Absolute path to THIS script, for the --detach-launch re-exec: read off
+# BASH_SOURCE rather than hardcoded, so a copy under another name re-execs itself
+# and not whatever fm-watch-arm.sh happens to sit beside it.
+SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -132,8 +170,32 @@ mode=arm
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
   --restart) mode=restart ;;
+  --detach-launch) mode=detach-launch ;;
   *) echo "usage: $(basename "$0") [--restart]" >&2; exit 2 ;;
 esac
+
+# INTERNAL detach launcher (see the DETACH CONTRACT above). This process owns the
+# watcher so the ARM never does: it is already reparented away from the arm's tree
+# by the time it runs. It records everything the polling arm needs and interprets
+# nothing.
+if [ "$mode" = detach-launch ]; then
+  launch_dir=${2:-}
+  [ -n "$launch_dir" ] && [ -d "$launch_dir" ] || {
+    echo "usage: $(basename "$0") --detach-launch <launch-dir>" >&2
+    exit 2
+  }
+  printf '%s\n' "$$" > "$launch_dir/launcher.pid"
+  "$WATCH" > "$launch_dir/out" 2>&1 </dev/null &
+  detached_watcher=$!
+  printf '%s\n' "$detached_watcher" > "$launch_dir/watcher.pid"
+  wait "$detached_watcher"
+  detached_rc=$?
+  # A best-effort write: the arm may already have removed the launch dir (it does
+  # that when it is signalled), and losing the status file must not change the
+  # watcher's own outcome.
+  printf '%s\n' "$detached_rc" > "$launch_dir/rc" 2>/dev/null || true
+  exit "$detached_rc"
+fi
 
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
@@ -155,6 +217,39 @@ if [ "$mode" = restart ]; then
   fi
 fi
 
+# LAUNCH_PRUNE_MIN_AGE guards a launch dir a concurrent arm has only just created
+# (its pid files land within milliseconds, but nothing is atomic).
+LAUNCH_PRUNE_MIN_AGE=30
+
+# Remove launch dirs whose arm, watcher, AND launcher are all gone. An arm killed
+# outright (SIGKILL, or a harness tree kill that outran the trap) cannot clean up
+# after itself, and a stopped arm task is now an ordinary, frequent event, so the
+# next arm sweeps the leftovers instead of letting them accumulate in state/.
+# A launch with ANY of the three still alive is never touched. All three matter:
+# the watcher and launcher are the obvious owners, and the ARM is the process that
+# still needs the capture to read the wake reason and exit status out of it - a
+# launch whose launcher was killed can outlive its rc file while its arm is still
+# reading, and pruning that from under a concurrent arm would silently swallow a
+# real wake reason.
+# This runs BEFORE the attach short-circuit below, because the frequent case is
+# exactly a killed arm whose watcher SURVIVED: the next arm attaches and never
+# reaches the launch path, so a prune placed there would never sweep anything.
+prune_dead_launch_dirs() {
+  local d owner alive
+  for d in "$STATE"/.watch-arm.*; do
+    [ -d "$d" ] || continue
+    [ "$(fm_path_age "$d")" -ge "$LAUNCH_PRUNE_MIN_AGE" ] || continue
+    alive=0
+    for owner in arm.pid watcher.pid launcher.pid; do
+      fm_pid_alive "$(tr -d '[:space:]' 2>/dev/null < "$d/$owner" || true)" && { alive=1; break; }
+    done
+    [ "$alive" -eq 1 ] && continue
+    rm -rf "$d" 2>/dev/null || true
+  done
+}
+
+prune_dead_launch_dirs
+
 # If a genuinely live+fresh watcher already holds the lock, do not start a second
 # one - attach to that cycle and wait until it ends so the harness notify fires
 # then, not as an immediate empty wake. (--restart skips this: it just stopped
@@ -164,53 +259,159 @@ if [ "$mode" = arm ] && healthy_watcher; then
   attach_and_wait "$HEALTHY_PID"
 fi
 
-# Start the watcher as a tracked child in its OWN session (setsid) and confirm it
-# before settling in.
-# We still wait on the child, so a normal wake exit propagates out and the harness
-# re-notifies firstmate, and $! stays the watcher pid the confirm and lock checks
-# match on.
-# The own-session fork is what lets the watcher SURVIVE this arm being reaped: a
-# process-group- or session-scoped signal to the arm (a herdr/terminal SIGHUP, or
-# the harness stopping this background task) no longer reaches the watcher, and
-# the signal traps below deliberately do NOT kill it either.
+# Launch the watcher DETACHED from this arm's process tree (see the DETACH
+# CONTRACT in the header) and confirm it before settling in.
 # Intentional watcher teardown is --restart only (an explicit kill of the recorded
-# lock pid), so a reaped launcher leaves proactive supervision running instead of
+# lock pid), so a reaped arm leaves proactive supervision running instead of
 # taking it down.
 child=
 child_out=
-# rm_child_out removes ONLY the arm's temp capture file.
+launch_dir=
+launcher_pid=
+
+# Read a recorded number (a pid, or the watcher exit status) from the current
+# launch dir, or fail if it is absent or not a plain number yet.
+# The stderr redirect comes BEFORE the input redirect on purpose: redirections are
+# applied left to right, so a `< missing-file 2>/dev/null` would still print the
+# shell's own "No such file or directory" - straight into the arm's output, which
+# firstmate reads as a wake reason. Polling for a file that is not there yet is
+# the normal case here, so it must be genuinely silent.
+read_launch_number() {  # <file-name>
+  local value
+  value=$(tr -d '[:space:]' 2>/dev/null < "$launch_dir/$1" || true)
+  case "$value" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+# rm_launch_dir removes ONLY the arm's own temp capture directory.
 # It deliberately does NOT kill the watcher, so a signal to this arm cannot take
-# the forked watcher down with it.
-rm_child_out() {
-  if [ -n "$child_out" ]; then
-    rm -f "$child_out" 2>/dev/null || true
+# the detached watcher down with it. The watcher's wake reason is already durable
+# in state/.wake-queue before it exits, so discarding this capture loses nothing.
+rm_launch_dir() {
+  if [ -n "$launch_dir" ]; then
+    rm -rf "$launch_dir" 2>/dev/null || true
   fi
 }
-# kill_child stops the forked watcher child explicitly.
-# It is used ONLY on the FAILED-to-confirm path, where the child never became the
+# kill_child stops the detached watcher launch explicitly.
+# It is used ONLY on the FAILED-to-confirm path, where the launch never became the
 # healthy singleton and must not be left behind; it is intentionally NOT wired
 # into the signal traps.
+# The watcher goes first: killing its launcher first would orphan a watcher this
+# arm just declared unconfirmable.
+# The launcher is then stopped by PROCESS GROUP where that is provably safe. On the
+# path where the watcher pid never landed, the arm knows the launcher but not the
+# watcher the launcher may already have forked, and a pid-only kill would leave
+# exactly the orphan this function exists to prevent. setsid makes the launcher its
+# own session and group leader, so its pgid equals its pid; that equality is
+# re-verified here before any negative signal, because signalling a group the arm
+# does not own could reach the arm's own siblings.
 kill_child() {
-  if [ -n "$child" ] && fm_pid_alive "$child"; then
-    kill -TERM "$child" 2>/dev/null || true
+  local watcher pgid
+  watcher=$(read_launch_number watcher.pid) || watcher=$child
+  if [ -n "$watcher" ] && fm_pid_alive "$watcher"; then
+    kill -TERM "$watcher" 2>/dev/null || true
+  fi
+  if [ -n "$launcher_pid" ] && fm_pid_alive "$launcher_pid"; then
+    pgid=$(ps -o pgid= -p "$launcher_pid" 2>/dev/null | tr -d '[:space:]')
+    if [ "$pgid" = "$launcher_pid" ]; then
+      kill -TERM "-$launcher_pid" 2>/dev/null || true
+    else
+      kill -TERM "$launcher_pid" 2>/dev/null || true
+    fi
   fi
 }
-trap 'rm_child_out; exit 129' HUP
-trap 'rm_child_out; exit 143' TERM INT
+trap 'rm_launch_dir; exit 129' HUP
+trap 'rm_launch_dir; exit 143' TERM INT
 
-child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
+# The recorded status of a detached watcher that has already exited. The launcher
+# writes it right after the watcher exits, so a short poll covers that ordering.
+# If it never lands, the launcher itself was killed, so fall back to the watcher's
+# own output rather than inventing a success.
+# If the whole capture is GONE, report success: the capture is the only thing that
+# was lost, the wake reason itself was appended to state/.wake-queue before the
+# watcher exited, and a non-zero exit here would tell firstmate a healthy cycle
+# FAILED and send it chasing a watcher that ran perfectly well.
+detached_status() {
+  local rc i=0
+  while [ "$i" -lt 25 ]; do
+    if rc=$(read_launch_number rc); then
+      printf '%s\n' "$rc"
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -e "$child_out" ]; then
+    printf '0\n'
+  elif watch_output_has_wake "$child_out"; then
+    printf '0\n'
+  else
+    printf '1\n'
+  fi
+}
+
+# Block for as long as the detached watcher runs.
+# This is the poll-based stand-in for `wait <child>`, and it is what keeps this arm
+# alive as the harness-visible waiter for the whole watcher cycle.
+# It reuses ATTACH_POLL rather than adding a second cadence knob: this is the same
+# kind of long wait attach_and_wait already performs, and the extra sub-second
+# latency it can add to a wake is nothing beside the harness's own notify latency.
+# It must NOT be called inside a command substitution and must not print the
+# status itself: bash defers a trapped signal until the current foreground command
+# finishes, so a long poll running inside `$( )` would hold the HUP/TERM trap off
+# for the entire watcher cycle - the arm would ignore a graceful stop and never
+# clean up its launch dir. `wait <child>` was interruptible; this has to stay
+# interruptible too, so the caller waits here and reads the status afterwards.
+detached_wait() {
+  while fm_pid_alive "$child"; do
+    sleep "$ATTACH_POLL"
+  done
+}
+
+# Bounded best-effort wait for a stood-down launch to disappear, used on the paths
+# where a peer watcher won the singleton and this launch is irrelevant.
+wait_for_child_exit() {  # <tenths>
+  local limit=$1 i=0
+  while [ "$i" -lt "$limit" ] && fm_pid_alive "$child"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+}
+
+launch_dir=$(mktemp -d "$STATE/.watch-arm.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
-# setsid forks the watcher into its OWN session and process group so a
-# process-group- or session-scoped signal aimed at this arm cannot reap it, while
-# $! stays the watcher pid and it stays a wait-able child (setsid execs in place
-# because the backgrounded subshell is not a group leader in a non-job-control
-# script).
-# Full stdio redirection detaches it from the arm's streams so it never holds a
-# controlling terminal.
-setsid "$WATCH" >"$child_out" 2>&1 </dev/null &
-child=$!
+child_out="$launch_dir/out"
+# Record this arm as an owner of the capture, so another arm's prune can see that
+# someone still needs it even after the launcher is gone.
+printf '%s\n' "$$" > "$launch_dir/arm.pid" 2>/dev/null || true
+# The double fork: the intermediate subshell backgrounds the setsid'd launcher and
+# exits immediately, so the launch is reparented off this arm's tree (see the
+# DETACH CONTRACT). setsid additionally gives it its own session, so no
+# process-group- or session-scoped signal aimed at the arm reaches it either, and
+# full stdio redirection keeps it off the arm's streams and off any terminal.
+# SELF is resolved absolutely because the arm never controls its caller's cwd.
+( setsid "$SELF" --detach-launch "$launch_dir" >/dev/null 2>&1 </dev/null & )
+# The launcher records its own pid first, then the watcher's, so poll for the
+# watcher pid the confirm loop matches on. Bounded by the confirm timeout: if it
+# never lands, the honest answer is the FAILED line below.
+launch_deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
+while :; do
+  launcher_pid=$(read_launch_number launcher.pid) || launcher_pid=
+  child=$(read_launch_number watcher.pid) || child=
+  [ -n "$child" ] && break
+  if [ "$(date +%s)" -ge "$launch_deadline" ]; then
+    trap - HUP TERM INT
+    echo "watcher: FAILED - no live watcher with a fresh beacon"
+    kill_child
+    rm_launch_dir
+    exit 1
+  fi
+  sleep 0.05
+done
 child_done=0
 
 # Verify the outcome: poll until this child is the confirmed healthy watcher, or
@@ -221,34 +422,34 @@ while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then
       echo "watcher: started pid=$child (beacon fresh)"
-      wait "$child"
-      rc=$?
+      detached_wait
+      rc=$(detached_status)
       print_watch_output "$child_out"
-      rm -f "$child_out" 2>/dev/null || true
+      rm_launch_dir
       exit "$rc"
     fi
     # Another watcher won the singleton; our child stood down.
     if [ "$mode" = arm ]; then
       report_attached
-      wait "$child" 2>/dev/null || true
-      rm -f "$child_out" 2>/dev/null || true
+      wait_for_child_exit 50
+      rm_launch_dir
       child=
       child_out=
+      launch_dir=
       trap - HUP TERM INT
       attach_and_wait "$HEALTHY_PID"
     fi
     report_healthy
-    wait "$child" 2>/dev/null || true
-    rm -f "$child_out" 2>/dev/null || true
+    wait_for_child_exit 50
+    rm_launch_dir
     exit 0
   fi
   if [ "$child_done" -eq 0 ] && ! fm_pid_alive "$child"; then
-    wait "$child"
-    rc=$?
+    rc=$(detached_status)
     child_done=1
     if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
       print_watch_output "$child_out"
-      rm -f "$child_out" 2>/dev/null || true
+      rm_launch_dir
       exit 0
     fi
   fi
@@ -259,6 +460,6 @@ done
 trap - HUP TERM INT
 echo "watcher: FAILED - no live watcher with a fresh beacon"
 kill_child
-rm_child_out
-wait "$child" 2>/dev/null || true
+wait_for_child_exit 20
+rm_launch_dir
 exit 1

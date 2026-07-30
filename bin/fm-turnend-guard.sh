@@ -16,6 +16,14 @@
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
+# Fail-open on the REAL hook path is deliberate and unchanged: an empty or
+# unreadable payload, or a missing jq, exits 0 in silence rather than risking a
+# wedged session over a payload it cannot parse.
+# A run with no payload channel at all - someone running this script BY HAND - is
+# the opposite hazard and is NOT silent: it prints a loud "nothing was checked"
+# block and exits 3, because a silent 0 there reads as an all-clear this guard
+# never gave. See the stdin block below for the evidence behind that.
+#
 # Ships with TRACKED harness hook files at the repo root, so this file is
 # checked out into every worktree of this repo: the primary checkout, every
 # secondmate home (treehouse-leased or git-cloned), and any crewmate/scout task
@@ -48,10 +56,79 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 
-# Read the whole turn-end hook payload once; never block on unreadable/absent
-# stdin.
-PAYLOAD=$(cat 2>/dev/null || true)
-[ -n "$PAYLOAD" ] || exit 0
+# Is stdin obviously NOT a hook payload channel? Every tracked adapter in this repo
+# writes the JSON down a pipe and closes it (claude, codex, and grok through a shell
+# pipe; opencode and pi through a spawned stdin pipe), so the shapes below are ones
+# no real hook produces: an interactive terminal, or a character device such as
+# /dev/null.
+# The test is deliberately NEGATIVE - anything it cannot positively identify as a
+# hand run is treated as a real hook channel and keeps the silent fail-open. A
+# positive "is this a pipe/socket/regular file" test would have to be right about
+# /dev/stdin on every platform this repo runs on (Linux and Darwin), and being
+# wrong there would make a real hook noisy; being wrong this way only costs the
+# loud line on an exotic hand run, which the read timeout below catches anyway.
+fm_stdin_is_hand_run_channel() {
+  [ -t 0 ] && return 0
+  [ -c /dev/stdin ] && return 0
+  return 1
+}
+
+# Read the whole turn-end hook payload once, BOUNDED: `cat` blocks forever on a
+# stdin nobody ever closes, and that is the normal shape of an agent's shell (a
+# harness-held socket on fd 0, measured 2026-07-30 on Claude Code 2.1.220), so a
+# hand run used to hang instead of answering. Every real hook writes its payload in
+# one go and closes, so a read that times out means either no payload at all or a
+# writer that is not behaving like a hook.
+# `read -d ''` consumes to EOF (or the timeout) and still assigns what it got.
+# Its own stderr is silenced because a closed fd 0 makes the builtin print a raw
+# "read error: Bad file descriptor" that the old `cat 2>/dev/null` swallowed, and
+# callers scrape this script's stderr as a reason string.
+PAYLOAD_TIMEOUT=${FM_TURNEND_PAYLOAD_TIMEOUT:-2}
+PAYLOAD=
+PAYLOAD_READ_STATUS=0
+IFS= read -r -d '' -t "$PAYLOAD_TIMEOUT" PAYLOAD 2>/dev/null || PAYLOAD_READ_STATUS=$?
+PAYLOAD_TIMED_OUT=0
+[ "$PAYLOAD_READ_STATUS" -gt 128 ] && PAYLOAD_TIMED_OUT=1
+
+# The timeout is a TOTAL budget, not an idle timeout, so a writer that dribbles the
+# payload can leave a PARTIAL one here. That parses as nothing, and the jq failure
+# below would then fail open in silence - the same false all-clear this script now
+# refuses to give. Say it, and still fail open: a payload this script could not read
+# whole is not grounds for blocking a turn.
+if [ -n "$PAYLOAD" ] && [ "$PAYLOAD_TIMED_OUT" -eq 1 ]; then
+  {
+    printf 'fm-turnend-guard: HOOK PAYLOAD TRUNCATED after %ss - NOTHING WAS CHECKED.\n' "$PAYLOAD_TIMEOUT"
+    printf 'fm-turnend-guard: This is NOT a supervision health check and NOT an all-clear.\n'
+    printf 'fm-turnend-guard: Raise FM_TURNEND_PAYLOAD_TIMEOUT if this hook really is that slow.\n'
+  } >&2
+  exit 0
+fi
+if [ -z "$PAYLOAD" ]; then
+  # On the real hook path an empty/unreadable payload stays a SILENT exit 0. That
+  # fail-open is deliberate: without the payload we cannot read the loop guard, and
+  # a guard that blocks on a payload it cannot parse could wedge a live session.
+  # A real hook closes its payload channel, so that path always reaches EOF; a
+  # channel still held open when the read times out is not a hook delivering
+  # nothing, it is a shell whose stdin belongs to something else.
+  if [ "$PAYLOAD_TIMED_OUT" -eq 0 ] && ! fm_stdin_is_hand_run_channel; then
+    exit 0
+  fi
+  # A hand run is the opposite problem. Exiting 0 and printing nothing looks
+  # exactly like a clean bill of health, so on 2026-07-29 a hand-run of this script
+  # was read as proof that supervision was live while it had in fact checked
+  # nothing at all - the guard's own warnings were true positives the whole time.
+  # Say so unmistakably, and exit 3: distinct from a pass (0) and from the block
+  # this guard uses to stop a blind turn end (2), so no caller can score a hand run
+  # as either verdict.
+  {
+    printf 'fm-turnend-guard: NO HOOK PAYLOAD ON STDIN - NOTHING WAS CHECKED.\n'
+    printf 'fm-turnend-guard: This is NOT a supervision health check and NOT an all-clear.\n'
+    printf 'fm-turnend-guard: Only a real turn-end hook payload exercises this guard.\n'
+    printf 'fm-turnend-guard: To check supervision now, run bin/fm-guard.sh (pull-based alarm)\n'
+    printf 'fm-turnend-guard: or bin/fm-crew-state.sh for current fleet state.\n'
+  } >&2
+  exit 3
+fi
 
 # jq is the repo's established JSON dependency (bin/fm-x-poll.sh uses the same
 # "missing jq -> silent no-op" degrade). Without it we cannot safely read the

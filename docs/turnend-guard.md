@@ -33,7 +33,16 @@ A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
-If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 because it cannot safely read loop-guard fields.
+If `jq` is missing, or a real hook delivers an empty or unreadable payload, the guard fails open and exits 0 in silence because it cannot safely read loop-guard fields.
+
+That silent fail-open is correct for the hook path and wrong for a hand run, so the guard now separates the two.
+The payload read is bounded by `FM_TURNEND_PAYLOAD_TIMEOUT` (2 seconds by default) instead of an unbounded `cat`.
+An empty payload that reached clean end-of-file on a channel that could be a real hook's pipe keeps the old silent exit 0 exactly.
+An empty payload is treated as a hand run only when the shape positively says so: an interactive terminal, a character device such as `/dev/null`, or a channel still held open when the read times out.
+That test is deliberately negative, so an unrecognised channel keeps the silent fail-open rather than becoming noisy on the real hook path.
+A hand run prints a loud `NO HOOK PAYLOAD ON STDIN - NOTHING WAS CHECKED` block on stderr and exits 3, a status deliberately distinct from a pass (0) and from a blocked blind turn end (2).
+No tracked adapter can reach exit 3, because all five write the payload down a pipe and close it, so no adapter needs to interpret that status.
+See the 2026-07-30 section below for the incident that made this necessary.
 
 ## Harness Integrations
 
@@ -144,8 +153,73 @@ So the model was re-invoked solely by the background task's completion while idl
 This matches the harness tool contract that a `run_in_background` task "keeps running across turns and re-invokes you when it exits", and reproduces the 11s latency the task audit measured independently on the same harness version.
 No Herdr command was issued and no fleet state was touched; the experiment wrote only to the session scratchpad, which was discarded.
 
+### 2026-07-30: what stopping a background arm task actually kills, and the hand-run false all-clear
+
+Overnight on 2026-07-29 the captain's primary session lost its watcher dozens of times.
+Tracked background arm tasks (`bin/fm-watch-arm.sh` run as a Claude Code background task) were reported stopped minutes after starting, and each stop took the watcher with it.
+The guard warned `no live watcher holds this home lock` at turn-end each time, and those warnings were true positives.
+Two separate defects were behind the episode, one in the arm and one in this guard.
+
+**The arm defect: a stopped background task is a process-TREE kill, and `setsid` does not survive it.**
+`bin/fm-watch-arm.sh` had forked the watcher with `setsid` since 2026-07-13 (`fix(watcher): keep the supervision watcher alive when its arm is reaped`), verified then against an explicit `SIGTERM` to the arm, a group `SIGHUP`, and a group `SIGKILL`.
+None of those is what the harness does.
+Measured 2026-07-30 on Claude Code 2.1.220 inside a herdr pane (herdr server on `/home/marlon/.config/herdr/herdr.sock`, Fedora/Bazzite, Linux 6.17.7), by launching one probe script as a real tracked background Bash task, then stopping that task with the harness's own stop mechanism:
+
+| launch shape | parent at kill time | own cgroup | survived the task stop |
+| --- | --- | --- | --- |
+| plain background child | the arm | no | no |
+| `setsid` child (own session and process group) | the arm | no | **no** |
+| double-forked orphan (`( setsid cmd & )`) | pid 1749, the systemd `--user` manager | no | **yes** |
+| `systemd-run --user` transient service | pid 1749, the systemd `--user` manager | yes | yes |
+| `systemd-run --user --scope` | the arm (`systemd-run` stays in the foreground) | yes | no |
+
+The discriminator in every reproduced run is parentage, and it is not the cgroup.
+A separate session did not help and a separate cgroup did not help; only leaving the arm's descendant set did, and the surviving orphan sat in the very same cgroup as the arm.
+
+One observation dissents and could not be reproduced.
+An independent adversarial probe run the same day reported that an orphan still sharing the arm's process group was also killed, which would make the stop group-scoped as well as tree-scoped.
+Two further runs of a purpose-built discriminating probe - three orphans with identical parentage, differing only in process group and session - contradicted it: the orphan sharing the arm's process group survived both times with its heartbeat current, alongside the new-group and new-session orphans.
+The disagreement is recorded rather than resolved, because it does not change what to build: the arm keeps BOTH defenses, and neither is decorative.
+The double fork defeats a kill that walks parent links, the `setsid` defeats one scoped to the arm's process group, and `tests/fm-watcher-lock.test.sh` pins each leg with its own kill shape so a future cleanup cannot drop the `setsid` as redundant.
+That also settles the systemd question the task raised: a `--scope` is useless here because `systemd-run --scope` remains a child of the arm, and the transient `--service` form works but is Linux-only and would have to forward `FM_HOME`, `FM_STATE_OVERRIDE`, `PATH`, and every `FM_*` knob by hand.
+The double fork is portable, inherits the environment as before, and survives identically, so that is what shipped.
+
+`bin/fm-watch-arm.sh` now launches the watcher through `( setsid <self> --detach-launch <dir> & )`.
+The intermediate subshell exits immediately, which reparents the launch off the arm before the arm returns.
+The internal `--detach-launch` process records its own pid, forks the watcher, records the watcher pid, waits it, and records the watcher's exit status, because a detached watcher is no longer a wait-able child and the arm has to poll instead.
+The arm's own header owns those mechanics.
+
+End-to-end validation of the new arm on the same runtime, same day, in a throwaway `FM_HOME`:
+
+```
+arm as tracked background task -> "watcher: started pid=96483 (beacon fresh)"
+process layout                 -> arm 96454 (session 96422); launcher 96466 ppid=1749 session leader; watcher 96483 child of 96466
+stop the arm task              -> arm 96454 GONE; launcher 96466 alive; watcher 96483 alive
+                                  beacon advanced 1785365624 -> 1785365644; state/.watch.lock/pid still 96483
+re-arm (new background task)   -> "watcher: attached pid=96483 (beacon 5s)"   (no second watcher, lock untouched)
+fire a wake (a done: status)   -> watcher exits, attached arm exits 0, harness delivered its completion notification
+drain                          -> the signal wake was durably queued and drained normally
+--restart smoke                -> stopped exactly the recorded pid 127788, started 128088, arm1 exited, no stray watcher
+```
+
+So a stopped arm task now costs one cheap re-arm that ATTACHES to the still-live watcher, instead of a restarted supervision cycle and a guard warning.
+Nothing about the emitted supervision protocol changed: the arm is still the harness-visible waiter whose exit is the wake notification, and the singleton lock and liveness beacon are untouched.
+The residual gap is bounded and covered: if the watcher fires in the window between the arm being stopped and the re-arm attaching, the wake is already durable in `state/.wake-queue`, the stop itself notifies the session, and this guard still blocks a turn that would end blind.
+
+**The guard defect: a payload-less hand run proved nothing and looked like a pass.**
+While diagnosing the arm kills, the primary hand-ran `bin/fm-turnend-guard.sh`, got exit 0 and no output, and read that as evidence that supervision was healthy.
+It was not evidence of anything: the guard exited on the empty-payload fail-open before it checked in-flight work or watcher liveness at all.
+Worse, the same hand run can instead hang forever.
+Measured 2026-07-30 on Claude Code 2.1.220: an agent's foreground shell has a harness-held socket on file descriptor 0 (`/proc/<pid>/fd/0 -> socket:[17526952]`, blocked in `do_wait`), so `cat` never sees end-of-file.
+Both shapes occur in practice - one invocation of the same command had `/dev/null` on stdin and returned instantly, another had the socket and hung until killed.
+
+The guard now bounds the read and classifies the channel, as described under "Shared Predicate".
+Observed after the change, in this order: `< /dev/null` prints the loud block and exits 3; a held-open pipe with no data prints the loud block and exits 3 after the timeout instead of hanging; `printf '' | guard` still exits 0 silently; a payload written 1 second late is still read and honoured.
+
 ## Tests
 
 `tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+It also covers the payload-channel split recorded in the 2026-07-30 section: a payload-less hand run is loud and exits 3 whatever the fleet state, a piped-but-empty payload still exits 0 in silence, a held-open channel returns instead of hanging, and a late or oversized payload is still read whole and honoured.
+`tests/fm-watcher-lock.test.sh` owns the arm half, including that a process-tree kill aimed at the arm leaves the watcher alive with an advancing beacon, and that the next arm attaches to that survivor instead of starting a second watcher.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.
