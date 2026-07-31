@@ -2,6 +2,10 @@
 # Firstmate watcher.
 # Classifies supervision wakes in bash. In normal mode it absorbs benign wakes
 # and keeps blocking; it queues and exits only for actionable wakes.
+# On an actionable-wake exit it also hands the singleton to a fresh successor
+# watcher, so supervision outlives a re-arm the agent never sends; see the
+# SELF-RENEWAL block at wake() for the rules, the away-mode exemption, and the
+# rapid-cycle budget.
 # The no-verb signal and stale path is absorb-only-when-provably-working: a wake
 # is absorbed only when the crew shows POSITIVE evidence it is still working (an
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
@@ -267,15 +271,126 @@ recorded_windows() {
   done
 }
 
+# SELF-RENEWAL: hand the singleton to a fresh successor watcher on the way out.
+#
+# WHY. This watcher exits whenever it has an actionable wake, and the arm's exit
+# is what notifies the agent. Until 2026-07-31 nothing else restarted it, so the
+# fleet was watched only for as long as the AGENT remembered to re-arm - and a
+# supervision loop whose liveness depends on an agent remembering something will
+# eventually fail, for any agent. It did: five lapses in 27 hours, 15 minutes to
+# 4.8 hours each (docs/turnend-guard.md).
+# Renewal splits the two jobs that were wrongly welded together. DETECTION now
+# survives a missed re-arm, because a successor is already watching before this
+# process is gone. DELIVERY still rides the arm's exit exactly as before - the
+# wake reason is printed and durable in state/.wake-queue first, and this changes
+# neither. A missed re-arm therefore degrades from "nothing is watching" to
+# "watching, notification deferred", which is the difference between losing the
+# fleet and delaying one wake.
+#
+# The successor is spawned only AFTER this watcher has released the singleton
+# lock and dropped its EXIT trap, so the handoff can never leave two live
+# watchers or a lock owned by a dead pid.
+#
+# RENEWAL IS OPT-IN, AND bin/fm-watch-arm.sh IS WHAT OPTS IN.
+# It is off by default because a successor is only ever correct when an ARM is
+# the thing driving supervision: the arm is what a later re-arm attaches to, and
+# what carries the wake to the agent. Every other caller runs this watcher as a
+# deliberate one-shot and would be broken by a survivor:
+#   - bin/fm-watch-checkpoint.sh (codex) runs it in the FOREGROUND for a bounded
+#     window and runs it again next checkpoint. A surviving successor would hold
+#     the singleton, so the next checkpoint would print "already running" and
+#     return no wake at all - supervision silently dead for that harness.
+#   - bin/fm-supervise-daemon.sh (away mode) owns triage itself and re-runs the
+#     watcher per wake.
+#   - direct and test invocations expect exactly one cycle.
+#
+# WHEN AN OPTED-IN WATCHER STILL MUST NOT RENEW:
+#   - state/.afk exists. The away-mode daemon owns triage and requires this
+#     watcher to stay strictly one-shot; renewing would put a second classifier
+#     on the same wakes. Non-negotiable, and checked here as well as at the
+#     launch site so neither one alone is load-bearing.
+#   - The rapid-cycle budget is spent (see below).
+FM_WATCH_RENEW=${FM_WATCH_RENEW:-0}
+# A wake that re-fires instantly would make renewal a fork bomb: exit, respawn,
+# wake, exit. Cycles shorter than MIN_CYCLE seconds count as rapid; MAX_RAPID
+# consecutive rapid cycles spends the budget. Any cycle at or above MIN_CYCLE
+# resets it, so ordinary busy supervision never accumulates.
+FM_WATCH_RENEW_MIN_CYCLE=${FM_WATCH_RENEW_MIN_CYCLE:-5}
+FM_WATCH_RENEW_MAX_RAPID=${FM_WATCH_RENEW_MAX_RAPID:-20}
+RENEW_RAPID_COUNTER="$STATE/.watch-renew-rapid"
+WATCHER_STARTED_AT=${WATCHER_STARTED_AT:-$(date +%s)}
+
+# Refuse to renew, LOUDLY. Spending the budget means renewal itself is the
+# problem, so the correct response is to stop and be impossible to ignore - not
+# to keep respawning quietly. Declining leaves the beacon to go stale, which
+# fires fm-guard.sh's full banner on the next fleet command and blocks the next
+# turn end. The failure mode this whole change exists to kill is a component that
+# stops working while everything still looks fine; a silent give-up here would
+# rebuild exactly that.
+renew_refuse_loudly() {  # <reason>
+  {
+    printf 'watcher: SELF-RENEWAL DISABLED - %s\n' "$1"
+    printf 'watcher: supervision will NOT restart itself; re-arm is now mandatory.\n'
+    printf 'watcher: %s consecutive cycles shorter than %ss means a wake is re-firing immediately - find that wake.\n' \
+      "$FM_WATCH_RENEW_MAX_RAPID" "$FM_WATCH_RENEW_MIN_CYCLE"
+  } >&2
+  triage_log "REFUSED self-renewal: $1"
+}
+
+# Decide and, if renewing, perform the handoff. Called only from wake(), so only
+# an actionable-wake exit can renew; a self-eviction or a failed enqueue exits
+# without a successor, which is what those paths intend.
+maybe_renew_watcher() {
+  local lifetime rapid
+  [ "$FM_WATCH_RENEW" = 0 ] && return 0
+  afk_present && return 0
+  # Only the process that actually holds the singleton may hand it on, and only
+  # from the main shell. Both checks matter: fm_lock_release compares BASHPID, so
+  # a wake() reached from inside a subshell could drop the EXIT trap and spawn a
+  # successor while the lock was still held - the successor would stand down and
+  # renewal would silently do nothing. Refusing here degrades to plain
+  # exit-without-renewal, which the guards then report honestly.
+  [ "${BASHPID:-$$}" = "${WATCHER_PID:-}" ] || return 0
+  [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ] || return 0
+
+  lifetime=$(( $(date +%s) - WATCHER_STARTED_AT ))
+  rapid=$(cat "$RENEW_RAPID_COUNTER" 2>/dev/null || echo 0)
+  case "$rapid" in ''|*[!0-9]*) rapid=0 ;; esac
+  if [ "$lifetime" -lt "$FM_WATCH_RENEW_MIN_CYCLE" ]; then
+    rapid=$((rapid + 1))
+  else
+    rapid=0
+  fi
+  printf '%s\n' "$rapid" > "$RENEW_RAPID_COUNTER" 2>/dev/null || true
+  if [ "$rapid" -ge "$FM_WATCH_RENEW_MAX_RAPID" ]; then
+    renew_refuse_loudly "rapid-cycle budget spent ($rapid cycles under ${FM_WATCH_RENEW_MIN_CYCLE}s)"
+    return 0
+  fi
+
+  # Release the singleton BEFORE the successor exists, and drop the EXIT trap so
+  # it cannot release a lock the successor now owns.
+  fm_custom_check_snapshot_cleanup
+  fm_lock_release "$WATCH_LOCK"
+  trap - EXIT
+  # Same detach shape as bin/fm-watch-arm.sh's launch: the intermediate subshell
+  # exits immediately so the successor is reparented away, and setsid puts it in
+  # its own session. Environment (FM_HOME and the *_OVERRIDE vars) is inherited,
+  # so the successor watches this same home.
+  ( setsid "$WATCH_PATH" >/dev/null 2>&1 </dev/null & )
+}
+
 # Exit reporting a wake. Consecutive heartbeats with no other wake in between
 # mean an idle fleet, so the heartbeat interval backs off exponentially
 # (base * 2^streak, capped at HEARTBEAT_MAX); any real wake resets the cadence.
+# The wake reason is printed BEFORE the renewal handoff, so the arm's captured
+# output carries the reason first no matter what renewal decides.
 wake() {
   case "$1" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
   echo "$1"
+  maybe_renew_watcher
   exit 0
 }
 
@@ -816,6 +931,9 @@ fm_custom_check_sweep_temporaries "$STATE"
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
 WATCHER_PID=${BASHPID:-$$}
+# Start of THIS cycle, for the self-renewal rapid-cycle budget. Set after the
+# lock is held so it measures the supervising lifetime, not startup contention.
+WATCHER_STARTED_AT=$(date +%s)
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true

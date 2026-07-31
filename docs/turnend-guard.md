@@ -26,10 +26,27 @@ It also requires `AGENTS.md`, `bin/`, and the effective state directory to exist
 
 For an in-scope primary checkout, it counts in-flight work from `state/*.meta`.
 If no task is in flight, it exits silently.
-If work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
-That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
+If work is in flight, it requires all three parts of the supervision contract, and blocks naming whichever one is missing:
+
+| Part | Question | Source |
+| --- | --- | --- |
+| Detection | is a watcher running now? | `fm_watcher_healthy` (identity-matched live lock plus fresh beacon) |
+| Delivery | is an arm waiting, so the next wake reaches the agent? | `fm_waiter_alive` (`state/.watch-waiter`) |
+| Backlog | is the durable wake queue drained? | `state/.wake-queue` |
+
+Away mode is exempt from the DELIVERY check alone.
+While `state/.afk` exists the sub-supervisor daemon runs the watcher itself and delivers by injecting into the session, so no arm exists and `AGENTS.md` forbids the session from starting one; demanding a waiter there would block every turn on something the session may not fix.
+A dead watcher and an undrained queue still block under away mode.
+
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
+The delivery check exists because `bin/fm-watch.sh` self-renews: since 2026-07-31 a live watcher no longer implies anyone is listening, so a home can see everything and tell nobody.
+The backlog check exists because ending a turn on an already-queued wake buries it.
+
+`bin/fm-supervision-lib.sh` is the single owner of that liveness verdict, and both guards read it.
+It answers from the LOCK, never from the beacon alone: the beacon records when a watcher last ran, not whether one is running.
+A caller that has not sourced `bin/fm-wake-lib.sh` cannot read the lock, so it degrades to the beacon and says so through `FM_SUP_LIVENESS_BASIS`, rather than passing a weaker answer off as the strong one.
+See the 2026-07-30/31 incident below for what the two disagreeing definitions cost.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
@@ -216,10 +233,72 @@ Both shapes occur in practice - one invocation of the same command had `/dev/nul
 The guard now bounds the read and classifies the channel, as described under "Shared Predicate".
 Observed after the change, in this order: `< /dev/null` prints the loud block and exits 3; a held-open pipe with no data prints the loud block and exits 3 after the timeout instead of hanging; `printf '' | guard` still exits 0 silently; a payload written 1 second late is still read and honoured.
 
+### 2026-07-31: the silent-lapse incident - two definitions of "is supervision live?"
+
+Measured 2026-07-31 from the primary home's own Claude Code transcript (`ac429ffc-...jsonl`, 28 MB, covering 2026-07-27 to 2026-07-31) and `state/.watch-triage.log`.
+The primary home fast-forwarded to #35 (`d0d0998`) at 2026-07-30 10:04:02 +1000, which is the exact cutover for every comparison below.
+It had not yet taken #36, so #35 is the only variable in the window.
+
+**The reported symptom.** Supervision was lapsing silently, with gaps of roughly 16 minutes, 40 minutes, and 2500 seconds observed on 2026-07-31, after a day or so of near-continuous coverage.
+
+**#35 is correct and is not the defect.** Across the whole post-#35 window there were 22 `watcher: started` arm results, 1 `attached`, and zero `watcher: FAILED`.
+Every `started` result carried a wake reason, so every observed watcher exit was the designed exit-after-enqueue, not a crash.
+No evidence of a detached watcher dying unexpectedly appears anywhere in the window.
+
+**What #35 did change is the prompt volume, exactly as predicted.**
+
+| | arm invocations | arm task notifications | of those, `killed` | median gap between arms |
+| --- | --- | --- | --- | --- |
+| 24 h before cutover | 447 (18.7/h) | 443 (18.5/h) | 132 (5.5/h) | 58 s |
+| 26.5 h after cutover | 29 (1.1/h) | 31 (1.2/h) | 4 (0.15/h) | 453 s |
+
+Before #35 the harness stopped the arm task every few minutes and the watcher died with it; each stop produced a task notification that incidentally functioned as a re-arm prompt.
+After #35 the watcher survives, so arms are stopped 37 times less often and those incidental prompts largely stopped.
+
+**But the agent did not simply forget.** The turn-end guard fired correctly and on time every single time: 22 blind-turn blocks post-cutover, median beacon age at firing 75 seconds.
+Seven of those were not followed by a re-arm within ten minutes.
+Reconstructing five of them from the transcript gives one identical causal chain:
+
+```
+21:56:11  Stop hook blocks: TURN WOULD END BLIND - SUPERVISION IS OFF (3 in flight, beat 59s)
+21:56:18  agent verifies:   bin/fm-guard.sh 2>&1 | tail -3; ls -la state/.last-watcher-beat
+21:56:18  result:           beacon: 31 07:55 | 07:56:18          <- fm-guard.sh printed NOTHING
+21:56:26  agent concludes:  "Supervision healthy, captain - guard silent, beacon a minute fresh."
+                            ... supervision then stayed dark for 3 hours 12 minutes
+```
+
+Three of the five wrote the conclusion out explicitly, in the form "the turn-end warning read a stale beat during the cycle handoff" - the agent reasoned that the correct guard was the false positive.
+
+**Root cause: liveness had two definitions that disagreed, and the weaker one was silent.**
+`bin/fm-turnend-guard.sh` asked the singleton lock and got the truth.
+`bin/fm-guard.sh` asked `fm_supervision_status`, which answered from the beacon age against `FM_GUARD_GRACE` (300 s), so a watcher that had exited seconds ago still read as fresh and the script printed nothing at all.
+Silence from an alarm is indistinguishable from a clean bill of health.
+
+#35 did not introduce that defect, but it moved the system into the regime where it fires every time.
+Before #35 the watcher died at arbitrary moments, so a check usually landed well past the 300-second grace and `fm-guard.sh`'s alarm was true and loud.
+After #35 the watcher exits cleanly the instant it has a wake, the agent handles that wake in 60 to 90 seconds, and the verification therefore always lands inside the false-all-clear window.
+Measured beacon age at the five reconstructed lapses (2026-07-30 21:56, 03:20, 06:00 and 2026-07-31 01:21, 02:19 UTC): 59, 62, 62, 67, and 72 seconds - all inside the 300-second grace, none of them a live watcher.
+
+Cost, from the same transcript: unrepaired lapses of 909 s, 816 s, 1854 s, 2472 s, 9563 s, 11482 s, and 17250 s.
+Independently corroborated by `state/.watch-triage.log`, which records a line per absorbed wake and at minimum one per `FM_HEARTBEAT_MAX` (2 h) while a watcher lives: it holds zero entries between 2026-07-31 00:00 and 11:07 local.
+
+**What changed.**
+
+1. `bin/fm-supervision-lib.sh` is now the single owner of the liveness verdict and answers it from the lock. A caller without `bin/fm-wake-lib.sh` degrades to the beacon and declares that through `FM_SUP_LIVENESS_BASIS`.
+2. `bin/fm-guard.sh` is never silent while supervision is off. The grace window became a severity distinction: a watcher gone for less than the grace prints a one-line wake-handoff warning naming the repair, and one gone longer still gets the full banner.
+3. `bin/fm-watch.sh` self-renews. On an actionable-wake exit it releases the singleton and hands off to a detached successor, so detection no longer depends on an agent re-arming; delivery still rides the arm's exit, unchanged. Suppressed while `state/.afk` exists (the daemon owns triage and needs a one-shot watcher), by `FM_WATCH_RENEW=0`, and by a rapid-cycle budget that refuses loudly rather than fork-looping.
+4. `state/.watch-waiter` makes the delivery half observable, because a self-renewing watcher can outlive the arm that would deliver its wakes.
+5. The turn-end guard blocks on a missing waiter and on undrained queued wakes, not only on a missing watcher.
+
+**The lesson worth keeping.** The prompt was never missing; the verification was wrong.
+An agent told to repair supervision will check whether it is really broken, so any surface that answers that question has to answer it the same way, and silence must never be one of the answers.
+
+
 ## Tests
 
 `tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
 It also covers the payload-channel split recorded in the 2026-07-30 section: a payload-less hand run is loud and exits 3 whatever the fleet state, a piped-but-empty payload still exits 0 in silence, a held-open channel returns instead of hanging, and a late or oversized payload is still read whole and honoured.
 `tests/fm-watcher-lock.test.sh` owns the arm half, including that a process-tree kill aimed at the arm leaves the watcher alive with an advancing beacon, and that the next arm attaches to that survivor instead of starting a second watcher.
+`tests/fm-supervision-selfsustaining.test.sh` owns the 2026-07-31 incident: that `fm-guard.sh` is never silent in the wake-handoff window, that the lock is the liveness basis, that a real watcher hands off to a live successor with no re-arm, that away mode keeps it one-shot, that a spent rapid-cycle budget refuses loudly, and that an attached arm still exits on handoff so the wake is delivered rather than swallowed.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.

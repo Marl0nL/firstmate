@@ -117,6 +117,60 @@ fm_watcher_healthy() {
   return 0
 }
 
+# --- the waiter half of the supervision contract -----------------------------
+# Supervision is two jobs, and a guard that checks only one cannot tell a healthy
+# home from a deaf one:
+#   DETECT  - the watcher, proven live by fm_watcher_healthy above.
+#   DELIVER - the ARM, the harness-tracked background task whose EXIT is the only
+#             thing that can wake the agent. Nothing else in this system can.
+# Since fm-watch.sh self-renews, a home can have a perfectly live watcher and no
+# arm at all: it sees everything and can tell nobody. That state used to be
+# invisible to every guard, which is how a missed re-arm went unnoticed for hours.
+# The arm records itself here for exactly as long as it is waiting, so both halves
+# can be checked. The record is a pid plus the same lstart+command identity the
+# watcher lock uses, so a recycled pid cannot pass for a live waiter, and an arm
+# killed outright (no chance to clean up) simply fails the liveness test.
+fm_waiter_record() {  # <state-dir> <pid>
+  local pid=$2 dir="$1/.watch-waiter"
+  mkdir -p "$dir" 2>/dev/null || return 1
+  printf '%s\n' "$pid" > "$dir/pid" 2>/dev/null || return 1
+  fm_pid_identity "$pid" > "$dir/pid-identity" 2>/dev/null || true
+  printf '%s\n' "${FM_HOME:-}" > "$dir/fm-home" 2>/dev/null || true
+  return 0
+}
+
+fm_waiter_clear() {  # <state-dir> [pid]
+  local state=$1 only=${2:-} recorded
+  if [ -n "$only" ]; then
+    # Clear only OUR own record: a later arm may already have replaced it, and
+    # deleting that would report the live waiter as missing.
+    recorded=$(cat "$state/.watch-waiter/pid" 2>/dev/null || true)
+    [ "$recorded" = "$only" ] || return 0
+  fi
+  rm -rf "$state/.watch-waiter" 2>/dev/null || true
+  return 0
+}
+
+FM_WAITER_ALIVE_PID=
+fm_waiter_alive() {  # <state-dir> [home]
+  local state=$1 home=${2:-${FM_HOME:-}} dir="$1/.watch-waiter" pid identity current lock_home
+  FM_WAITER_ALIVE_PID=
+  pid=$(cat "$dir/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" || return 1
+  lock_home=$(cat "$dir/fm-home" 2>/dev/null || true)
+  if [ -n "$lock_home" ] && [ -n "$home" ]; then
+    fm_same_path "$lock_home" "$home" || return 1
+  fi
+  identity=$(cat "$dir/pid-identity" 2>/dev/null || true)
+  if [ -n "$identity" ]; then
+    current=$(fm_pid_identity "$pid") || return 1
+    [ "$current" = "$identity" ] || return 1
+  fi
+  # shellcheck disable=SC2034 # Read by callers after fm_waiter_alive returns.
+  FM_WAITER_ALIVE_PID=$pid
+  return 0
+}
+
 fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \

@@ -264,6 +264,8 @@ Never broadly kill watchers, especially never `pkill -f bin/fm-watch.sh`, becaus
 A forced repair must use the home-scoped owner path emitted by supervision instructions.
 
 Guard warnings do not replace the contract.
+A guard that prints nothing has certified nothing, so never treat one tool's silence as grounds to dismiss another's blocking warning; repair the cycle and let the next guard run confirm it.
+The watcher restarts itself after a wake, but only a live arm delivers wakes to you, so a running watcher is never on its own proof that supervision is whole.
 Queued wakes must be drained before other action, stale liveness must be repaired through the emitted protocol, and the worktree-tangle warning must be resolved without touching unlanded work.
 The spawn assertion and generated ship brief must both enforce that project work starts in an isolated disposable worktree, never the primary checkout.
 Harness-aware turn-end guards are structural backstops, not permission to omit the live cycle.

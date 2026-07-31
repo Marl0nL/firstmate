@@ -687,7 +687,11 @@ new_world() {
   local name=$1 dispatch_ignore=${2:-yes} w
   w="$TMP_ROOT/$name"
   mkdir -p "$w/home/state" "$w/home/data" "$w/home/config"
-  touch "$w/home/state/.last-watcher-beat"
+  # Pose a watcher that is genuinely RUNNING, not just a fresh beacon: fm-guard.sh
+  # (which every fleet-mutating script calls) answers liveness from the singleton
+  # lock since 2026-07-31, so a beacon-only home reads as a lapse in progress and
+  # writes the warning these suites assert is absent. See docs/turnend-guard.md.
+  fm_test_pose_live_watcher "$w/home/state" "$w/home"
   git init -q -b main "$w/main"
   {
     printf 'projects/\nstate/\ndata/\n.no-mistakes/\n'

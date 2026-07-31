@@ -22,3 +22,7 @@ Claude Code's background task completion is the wake mechanism.
 The watcher itself remains `bin/fm-watch.sh`, and `bin/fm-watch-arm.sh` is only the verified background arm wrapper.
 Re-arm attaches to an existing healthy cycle when one is already present, so the background task stays live until that cycle ends.
 Stopping a background task kills the launching shell's process tree, so the arm deliberately keeps the watcher out of both that tree and the arm's process group; `docs/turnend-guard.md` records those measurements.
+
+The watcher restarts itself after a wake, so a re-arm now normally prints `attached` rather than `started`; both mean one live cycle exists.
+Re-arming is still mandatory, because the watcher only DETECTS - the arm's exit is the only thing that DELIVERS a wake to you, so a running watcher with no arm sees everything and tells nobody.
+Silence from `bin/fm-guard.sh` is the absence of an alarm, not a certification that supervision is live, and it never overrides a turn-end block.

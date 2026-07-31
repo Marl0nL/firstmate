@@ -12,3 +12,7 @@ When this session owns supervision and away mode is not active:
 
 OpenCode's persistent TUI plugin runtime is the wake mechanism.
 The plugin applies in the main primary checkout and a secondmate's own home, and stays silent only in child crewmate and scout worktrees.
+
+The watcher restarts itself after a wake, so a re-arm now normally prints `attached` rather than `started`; both mean one live cycle exists.
+Re-arming is still mandatory, because the watcher only DETECTS - the arm's exit is the only thing that DELIVERS a wake to you, so a running watcher with no arm sees everything and tells nobody.
+Silence from `bin/fm-guard.sh` is the absence of an alarm, not a certification that supervision is live, and it never overrides a turn-end block.

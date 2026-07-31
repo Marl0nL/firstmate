@@ -126,6 +126,8 @@ if [ -z "$PAYLOAD" ]; then
     printf 'fm-turnend-guard: Only a real turn-end hook payload exercises this guard.\n'
     printf 'fm-turnend-guard: To check supervision now, run bin/fm-guard.sh (pull-based alarm)\n'
     printf 'fm-turnend-guard: or bin/fm-crew-state.sh for current fleet state.\n'
+    printf 'fm-turnend-guard: A SILENT fm-guard.sh means no alarm fired, which is not the same\n'
+    printf 'fm-turnend-guard: claim as "supervision is live" - it never contradicts a block above.\n'
   } >&2
   exit 3
 fi
@@ -189,12 +191,38 @@ fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
-fm_supervision_status "$STATE" "$GRACE"
+fm_supervision_status "$STATE" "$GRACE" "$WATCH" "$FM_HOME"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
-fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
 
+# Ending a turn is safe only when BOTH halves of supervision hold and nothing is
+# already waiting to be handled:
+#   watcher live   - something is detecting fleet events (lock-based; the beacon
+#                    alone was never a liveness test - see fm-supervision-lib.sh)
+#   waiter alive   - an arm is waiting, so the next wake has a path to the agent.
+#                    Since fm-watch.sh self-renews, a live watcher no longer
+#                    implies anyone is listening, and a turn that ends with no
+#                    arm goes deaf until the captain next speaks.
+#   queue empty    - a wake already enqueued and undrained is an unhandled
+#                    supervision event; ending the turn on one buries it.
+# AWAY MODE EXEMPTS THE WAITER CHECK, and only that one.
+# While state/.afk exists the sub-supervisor daemon runs the watcher itself and
+# delivers by INJECTING into the session, so there is legitimately no arm and
+# never will be one. Requiring a waiter there would block every single turn of an
+# away-mode session on a condition the session is forbidden to fix - AGENTS.md
+# bars arming a separate watcher while the daemon owns supervision.
 afk=0
 [ -e "$STATE/.afk" ] && afk=1
+
+BLIND_REASON=
+if [ "$FM_SUP_WATCHER_FRESH" != true ]; then
+  BLIND_REASON="no live watcher holds this home lock (last beat: $FM_SUP_BEACON_DESC)"
+elif [ "$FM_SUP_WAITER_ALIVE" != true ] && [ "$afk" -eq 0 ]; then
+  BLIND_REASON="a watcher is running but no arm is waiting on it, so its next wake reaches nobody"
+elif [ "$FM_SUP_QUEUE_PENDING" = true ]; then
+  BLIND_REASON="wakes are queued and undrained - handle them with bin/fm-wake-drain.sh"
+fi
+[ -n "$BLIND_REASON" ] || exit 0
+
 x_mode=0
 [ -f "$CONFIG/x-mode.env" ] && x_mode=1
 REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
@@ -203,7 +231,7 @@ rule='━━━━━━━━━━━━━━━━━━━━━━━━�
 {
   printf '●%s\n' "$rule"
   printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
-  printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
+  printf '●  %s task(s) in flight, but %s.\n' "$FM_SUP_IN_FLIGHT" "$BLIND_REASON"
   printf '●  %s\n' "$REASON"
   printf '●%s\n' "$rule"
 } >&2

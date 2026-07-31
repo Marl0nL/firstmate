@@ -323,10 +323,14 @@ test_guard_warnings() {
   state="$dir/state"
   err="$dir/guard.err"
   printf 'project=x\n' > "$state/task.meta"
-  touch "$state/.last-watcher-beat"
+  # A genuinely RUNNING watcher, not just a fresh beacon: liveness is answered
+  # from the singleton lock, so a beacon-only fixture is the wake-handoff window
+  # and warns on purpose (tests/fm-supervision-selfsustaining.test.sh).
+  fm_test_pose_live_watcher "$state" "$dir"
   # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
   # total silence" stays a pure assertion about watcher state.
   FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  fm_test_stop_posed_watcher
   [ ! -s "$err" ] || fail "guard warned with a fresh watcher and no queued wakes: $(cat "$err")"
   pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when fresh"
 }

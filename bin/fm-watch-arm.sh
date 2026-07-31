@@ -68,6 +68,14 @@
 # a killed arm now costs only a cheap re-arm that ATTACHES to the still-live
 # watcher instead of restarting supervision.
 #
+# WAITER RECORD (state/.watch-waiter):
+# For as long as this arm is waiting - started or attached - it records itself as
+# the home's live waiter (bin/fm-wake-lib.sh owns the record and its liveness
+# test). The arm's exit is the ONLY path a wake has to the agent, and since
+# fm-watch.sh self-renews, a home can now have a live watcher and no arm at all:
+# seeing everything, able to tell nobody. The record is what lets the guards
+# notice that, instead of reading a live watcher as a healthy home.
+#
 # --detach-launch <dir>: INTERNAL re-exec of this script, never called by hand.
 # It is the small process that owns the watcher: it records its own pid, forks the
 # watcher, records the watcher pid, and records the watcher's exit status in <dir>
@@ -124,6 +132,15 @@ healthy_watcher() {
   HEALTHY_PID=$FM_WATCHER_HEALTHY_PID
 }
 
+# Register/unregister this arm as the home's live WAITER - the harness-tracked
+# task whose exit is the only path a wake has to the agent. See the waiter block
+# in bin/fm-wake-lib.sh for why both halves have to be observable.
+# Registered on every path where this arm settles in to wait (started or
+# attached), cleared on every path where it stops waiting, including signals.
+ARM_PID=$$
+register_waiter() { fm_waiter_record "$STATE" "$ARM_PID" >/dev/null 2>&1 || true; }
+release_waiter()  { fm_waiter_clear "$STATE" "$ARM_PID" >/dev/null 2>&1 || true; }
+
 report_attached() {
   local age
   age=$(fm_path_age "$BEAT")
@@ -137,21 +154,43 @@ report_healthy() {
 }
 
 # Stay alive until the attached identity-matched healthy holder is gone.
-# If a different healthy watcher appears mid-attach (rare steal), re-attach.
 # Does not reprint the starter arm's wake reason line; exit 0 lets the harness
 # notify, and firstmate drains state/.wake-queue on background completion.
+#
+# THE PID-CHANGED CASE IS A FORK, and getting it wrong silently swallows wakes.
+# Two different events both present as "the lock now names a different pid":
+#   1. The attached watcher EXITED and a successor took over - the ordinary shape
+#      since fm-watch.sh gained self-renewal. Its cycle ENDED, which is precisely
+#      the event this arm exists to report, so it must exit and let the harness
+#      notify. Re-attaching here would leave the arm waiting forever while
+#      successor after successor enqueued wakes nobody was told about - the arm
+#      would look perfectly healthy the whole time.
+#   2. A live peer STOLE the singleton while the attached watcher is still
+#      running (rare, racy arms). Nothing ended, so re-attach and keep waiting.
+# The discriminator is whether the pid this arm attached to is still ALIVE.
 attach_and_wait() {
   local attached_pid=$1
+  register_waiter
+  trap 'release_waiter; exit 143' TERM INT
+  trap 'release_waiter; exit 129' HUP
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
-        attached_pid=$HEALTHY_PID
-        report_attached
+        if fm_pid_alive "$attached_pid"; then
+          # Case 2: genuine steal from a still-running holder.
+          attached_pid=$HEALTHY_PID
+          report_attached
+        else
+          # Case 1: the attached cycle ended. Report it by exiting.
+          release_waiter
+          exit 0
+        fi
       fi
       sleep "$ATTACH_POLL"
       continue
     fi
     # Attached cycle ended (pid gone, identity mismatch, or beacon no longer fresh).
+    release_waiter
     exit 0
   done
 }
@@ -185,6 +224,12 @@ if [ "$mode" = detach-launch ]; then
     exit 2
   }
   printf '%s\n' "$$" > "$launch_dir/launcher.pid"
+  # Opt this watcher into self-renewal (bin/fm-watch.sh owns the rules). Only an
+  # ARM-driven watcher may renew: a successor is useful precisely because a later
+  # re-arm ATTACHES to it, and harmful to the callers that run the watcher as a
+  # deliberate one-shot. The watcher re-checks state/.afk itself, so away mode is
+  # covered whether or not this flag is set.
+  export FM_WATCH_RENEW=${FM_WATCH_RENEW:-1}
   "$WATCH" > "$launch_dir/out" 2>&1 </dev/null &
   detached_watcher=$!
   printf '%s\n' "$detached_watcher" > "$launch_dir/watcher.pid"
@@ -322,8 +367,8 @@ kill_child() {
     fi
   fi
 }
-trap 'rm_launch_dir; exit 129' HUP
-trap 'rm_launch_dir; exit 143' TERM INT
+trap 'release_waiter; rm_launch_dir; exit 129' HUP
+trap 'release_waiter; rm_launch_dir; exit 143' TERM INT
 
 # The recorded status of a detached watcher that has already exited. The launcher
 # writes it right after the watcher exits, so a short poll covers that ordering.
@@ -422,9 +467,11 @@ while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then
       echo "watcher: started pid=$child (beacon fresh)"
+      register_waiter
       detached_wait
       rc=$(detached_status)
       print_watch_output "$child_out"
+      release_waiter
       rm_launch_dir
       exit "$rc"
     fi
@@ -441,6 +488,7 @@ while :; do
     fi
     report_healthy
     wait_for_child_exit 50
+    release_waiter
     rm_launch_dir
     exit 0
   fi
@@ -449,6 +497,7 @@ while :; do
     child_done=1
     if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
       print_watch_output "$child_out"
+      release_waiter
       rm_launch_dir
       exit 0
     fi
@@ -461,5 +510,6 @@ trap - HUP TERM INT
 echo "watcher: FAILED - no live watcher with a fresh beacon"
 kill_child
 wait_for_child_exit 20
+release_waiter
 rm_launch_dir
 exit 1

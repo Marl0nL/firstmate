@@ -75,6 +75,60 @@ if [ -z "${FM_TEST_TMP_GUARD_DONE:-}" ]; then
   unset fm_test_tmp_dir fm_test_tmp_min_kb fm_test_tmp_avail_kb
 fi
 
+# --- supervision-liveness fixtures ------------------------------------------
+#
+# Touching state/.last-watcher-beat used to be enough to make a fixture look
+# supervised, because fm-guard.sh judged liveness by beacon age. Since 2026-07-31
+# liveness is answered from the singleton LOCK (bin/fm-supervision-lib.sh), after
+# a beacon-only "healthy" fixture turned out to be the shape that hid a real
+# 4.8-hour supervision lapse. A fixture that wants a guard to stay silent must now
+# pose a watcher that is genuinely running.
+#
+# fm_test_pose_live_watcher <state-dir> [home] [watch-path]
+# Starts a real placeholder process, records it in the watcher lock exactly as
+# bin/fm-watch.sh does, and freshens the beacon. Sets FM_TEST_POSED_WATCHER_PID.
+# Register fm_test_stop_posed_watcher for cleanup, or call it when done.
+# Posed placeholders are tracked in a FILE, not just a shell array, and their
+# stdio is fully redirected. Both details are load-bearing:
+#   - Fixture builders are routinely called as `w=$(new_world ...)`. A background
+#     job started inside a command substitution INHERITS its stdout, so the
+#     substitution cannot close and the caller hangs until the placeholder exits.
+#     Full redirection is what keeps `$( )` from blocking.
+#   - That same subshell discards any array append, so an on-disk list keyed to
+#     the test process is the only record that survives back to the EXIT trap.
+# Reaping is always by EXACT recorded pid, never a pattern kill: every firstmate
+# home on this machine runs a process whose command line matches fm-watch.sh.
+FM_TEST_POSED_WATCHER_PID=
+FM_TEST_POSED_PIDFILE="${TMPDIR:-/tmp}/fm-test-posed-watchers.$$"
+
+fm_test_pose_live_watcher() {  # <state-dir> [home] [watch-path]
+  local state=$1 home=${2:-} watch=${3:-"$ROOT/bin/fm-watch.sh"} lock="$1/.watch.lock"
+  [ -n "$home" ] || home=$(cd "$state/.." && pwd)
+  mkdir -p "$lock"
+  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ] && [ ! -e "$FM_TEST_POSED_PIDFILE" ]; then
+    trap fm_test_cleanup EXIT
+  fi
+  # stdout AND stderr, because either one left attached to a command
+  # substitution keeps it from closing. stdin needs no redirect - sleep never
+  # reads it - and adding one only trips SC2217.
+  sleep 300 >/dev/null 2>&1 &
+  FM_TEST_POSED_WATCHER_PID=$!
+  printf '%s\n' "$FM_TEST_POSED_WATCHER_PID" >> "$FM_TEST_POSED_PIDFILE"
+  printf '%s\n' "$FM_TEST_POSED_WATCHER_PID" > "$lock/pid"
+  printf '%s\n' "$home" > "$lock/fm-home"
+  printf '%s\n' "$watch" > "$lock/watcher-path"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$FM_TEST_POSED_WATCHER_PID" > "$lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+}
+
+fm_test_stop_posed_watcher() {
+  [ -n "$FM_TEST_POSED_WATCHER_PID" ] || return 0
+  kill -TERM "$FM_TEST_POSED_WATCHER_PID" 2>/dev/null || true
+  wait "$FM_TEST_POSED_WATCHER_PID" 2>/dev/null || true
+  FM_TEST_POSED_WATCHER_PID=
+}
+
 # --- reporters --------------------------------------------------------------
 
 fail() {
@@ -104,7 +158,14 @@ pass() {
 FM_TEST_CLEANUP_DIRS=()
 
 fm_test_cleanup() {
-  local d
+  local d pid
+  if [ -n "${FM_TEST_POSED_PIDFILE:-}" ] && [ -e "$FM_TEST_POSED_PIDFILE" ]; then
+    while read -r pid; do
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      kill -TERM "$pid" 2>/dev/null || true
+    done < "$FM_TEST_POSED_PIDFILE"
+    rm -f "$FM_TEST_POSED_PIDFILE"
+  fi
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done

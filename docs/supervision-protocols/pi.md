@@ -26,3 +26,7 @@ Command run for the complete interactive regression: `FM_PI_LIVE_E2E=1 tests/fm-
 Observed output: `ok - Pi 0.80.5 live E2E rendered the tool, guarded once, woke, re-armed, and cleaned up on exit`.
 Command run for the installed-type contract: `tests/fm-pi-primary-types.test.sh`.
 Observed output: `ok - Pi primary extensions pass strict no-emit typecheck against Pi 0.80.5`.
+
+The watcher restarts itself after a wake, so a re-arm now normally prints `attached` rather than `started`; both mean one live cycle exists.
+Re-arming is still mandatory, because the watcher only DETECTS - the arm's exit is the only thing that DELIVERS a wake to you, so a running watcher with no arm sees everything and tells nobody.
+Silence from `bin/fm-guard.sh` is the absence of an alarm, not a certification that supervision is live, and it never overrides a turn-end block.
