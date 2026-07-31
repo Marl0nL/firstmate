@@ -311,31 +311,36 @@ work_is_landed() {
   content_in_default
 }
 
+# The emitted commands are run by hand from whatever directory the reader's shell
+# is already in, so they carry this home's backlog explicitly (--file, after the
+# command). Without it a reminder acted on from inside a project clone reads an
+# empty backlog and writes a stray one there; bin/fm-tasks-axi-lib.sh owns why.
 backlog_refresh_reminder() {
-  local pr done_cmd report_path
+  local pr done_cmd report_path backlog
   [ "$KIND" = secondmate ] && return 0
+  backlog=$(fm_backlog_file "$DATA")
   if fm_tasks_axi_backend_available "$CONFIG"; then
     case "$KIND" in
       scout)
         report_path="data/$ID/report.md"
-        done_cmd="tasks-axi done $ID --report $report_path"
+        done_cmd="tasks-axi done --file $backlog $ID --report $report_path"
         ;;
       *)
         if [ "$MODE" = local-only ]; then
-          done_cmd="tasks-axi done $ID --note \"local main\""
+          done_cmd="tasks-axi done --file $backlog $ID --note \"local main\""
         else
           pr=$PR_URL
           if [ -n "$pr" ]; then
-            done_cmd="tasks-axi done $ID --pr $pr"
+            done_cmd="tasks-axi done --file $backlog $ID --pr $pr"
           else
-            done_cmd="tasks-axi done $ID --pr PR_URL"
+            done_cmd="tasks-axi done --file $backlog $ID --pr PR_URL"
           fi
         fi
         ;;
     esac
-    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready --file $backlog for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
   else
-    printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
+    printf '%s\n' "Backlog: $ID just finished. Update $backlog - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
   fi
 }
 

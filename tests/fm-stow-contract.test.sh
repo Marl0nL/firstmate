@@ -8,8 +8,14 @@ set -u
 test_stow_skill_task_note_contract() {
   local stow="$ROOT/.agents/skills/stow/SKILL.md"
 
-  assert_grep 'tasks-axi show <id> --full' "$stow" "stow skill does not require inspecting task notes first"
-  assert_grep 'tasks-axi update <id> --body-file <path>' "$stow" "stow skill does not require task body replacement"
+  # The commands stow prints are hand-run from whatever directory the session is
+  # standing in, so each names the home backlog explicitly (AGENTS.md section 10).
+  # shellcheck disable=SC2016 # The literal $FM_HOME the skill prints, not this shell's.
+  assert_grep 'tasks-axi show --file "$FM_HOME/data/backlog.md" <id> --full' "$stow" \
+    "stow skill does not require inspecting task notes first, home-scoped"
+  # shellcheck disable=SC2016 # The literal $FM_HOME the skill prints, not this shell's.
+  assert_grep 'tasks-axi update --file "$FM_HOME/data/backlog.md" <id> --body-file <path>' "$stow" \
+    "stow skill does not require task body replacement, home-scoped"
   assert_grep '--archive-body' "$stow" "stow skill does not document recoverable task body archival"
   assert_grep 'Never append.' "$stow" "stow skill does not forbid append-first task notes"
   assert_no_grep 'carry that context into the replacement body' "$stow" "stow skill still preserves archive-only context in the replacement body"

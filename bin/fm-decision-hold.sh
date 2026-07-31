@@ -115,8 +115,11 @@ hold_id() {  # <origin-id> <decision-key>
   printf '%s-decision-%s\n' "$1" "$2"
 }
 
-tasks_axi() {
-  (cd "$FM_HOME" && tasks-axi "$@")
+# Every backlog call names this home's file explicitly, so a hold recorded or read
+# from a shell standing inside a project clone still lands in - and is read from -
+# this home's backlog. bin/fm-tasks-axi-lib.sh owns that resolution.
+tasks_axi() {  # <command> [args...]
+  fm_tasks_axi_run "$FM_HOME" "$DATA" "$@"
 }
 
 # 0 when this home can actually STORE a durable captain hold: its configured backlog
@@ -241,7 +244,7 @@ origin_open_decisions() {  # <origin-id>
 
 verify_hold_active() {  # <hold-id>
   local id=$1 show state held kind hold_kind
-  show=$(task_show "$id") || fail "captain hold $id is absent from $FM_HOME/data/backlog.md"
+  show=$(task_show "$id") || fail "captain hold $id is absent from $(fm_backlog_file "$DATA")"
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -273,7 +276,7 @@ verify_hold_durable() {  # <hold-id>
     # retention prunes a CLOSED record into the archive. Accept only an archived
     # record that still proves resolution, and otherwise keep refusing.
     archive_has_resolved_hold "$id" && return 0
-    fail "captain decision $id is absent from $FM_HOME/data/backlog.md and has no resolved record in $(archive_path)"
+    fail "captain decision $id is absent from $(fm_backlog_file "$DATA") and has no resolved record in $(archive_path)"
   fi
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
