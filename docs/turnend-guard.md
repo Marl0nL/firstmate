@@ -277,7 +277,7 @@ Silence from an alarm is indistinguishable from a clean bill of health.
 #35 did not introduce that defect, but it moved the system into the regime where it fires every time.
 Before #35 the watcher died at arbitrary moments, so a check usually landed well past the 300-second grace and `fm-guard.sh`'s alarm was true and loud.
 After #35 the watcher exits cleanly the instant it has a wake, the agent handles that wake in 60 to 90 seconds, and the verification therefore always lands inside the false-all-clear window.
-Measured beacon age at the five reconstructed lapses: 59, 62, 67, 70, and 72 seconds - all of them inside the 300-second grace, none of them a live watcher.
+Measured beacon age at the five reconstructed lapses (2026-07-30 21:56, 03:20, 06:00 and 2026-07-31 01:21, 02:19 UTC): 59, 62, 62, 67, and 72 seconds - all inside the 300-second grace, none of them a live watcher.
 
 Cost, from the same transcript: unrepaired lapses of 909 s, 816 s, 1854 s, 2472 s, 9563 s, 11482 s, and 17250 s.
 Independently corroborated by `state/.watch-triage.log`, which records a line per absorbed wake and at minimum one per `FM_HEARTBEAT_MAX` (2 h) while a watcher lives: it holds zero entries between 2026-07-31 00:00 and 11:07 local.
