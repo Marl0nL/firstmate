@@ -25,8 +25,18 @@ cat > "$FAKEBIN/herdr" <<'SH'
 set -eu
 # Record argv verbatim, one argument per unit-separator-delimited field, so the
 # boundary tests can assert exactly where --session landed.
-printf '%s\x1f' "$@" >> "$FM_FAKE_HERDR_ARGV_LOG"
-printf '\n' >> "$FM_FAKE_HERDR_ARGV_LOG"
+#
+# ONE append per invocation, composed first and written once. This used to be two
+# appends (fields, then the newline), which raced: fm_herdr_lab_provision
+# backgrounds `herdr --session <name> server` and polls `herdr --session <name>
+# status --json` concurrently, so the two writers could interleave as
+# fieldsA-fieldsB-newline-newline. That split one record across two lines and left
+# a BLANK line, which the boundary loop below reads as a Herdr call with no argv at
+# all and reports with an empty value. It passed locally and failed on loaded CI
+# runners, because losing the race needs the poll to start inside the background
+# call's window between its two writes.
+argv_record=$(printf '%s\x1f' "$@")
+printf '%s\n' "$argv_record" >> "$FM_FAKE_HERDR_ARGV_LOG"
 state=$FM_FAKE_HERDR_STATE
 # Resolve --session the way the real client does: it is a GLOBAL option, and
 # global scanning stops at a `--` separator - everything past it belongs to the
