@@ -290,6 +290,56 @@ test_turnend_blocks_on_undrained_wakes() {
   pass "turn-end: blocks on a wake already queued and unhandled"
 }
 
+# AWAY MODE has no arm and never will: the sub-supervisor daemon runs the watcher
+# itself and delivers by injecting into the session. Requiring a waiter there
+# would block every turn of an away-mode session on something AGENTS.md forbids it
+# from fixing, so the waiter check - and only the waiter check - is exempt.
+test_turnend_does_not_demand_an_arm_under_away_mode() {
+  local home out rc
+  home=$(make_turnend_home turnend-afk)
+  pose_live_watcher "$home"
+  : > "$home/state/.afk"
+
+  out=$(run_turnend "$home") && rc=0 || rc=$?
+  kill "$POSED_WATCHER_PID" 2>/dev/null || true
+
+  [ "$rc" -eq 0 ] \
+    || fail "AWAY-MODE WEDGE: the turn-end guard demanded an arm while the daemon owns supervision (rc=$rc). An away-mode session cannot arm one. Output: $out"
+  pass "turn-end: away mode is exempt from the waiter check the daemon can never satisfy"
+}
+
+# A dead watcher still blocks under away mode - only the WAITER check is exempt.
+test_turnend_still_blocks_a_dead_watcher_under_away_mode() {
+  local home out rc
+  home=$(make_turnend_home turnend-afk-dead)
+  pose_exited_watcher "$home" 60
+  : > "$home/state/.afk"
+
+  out=$(run_turnend "$home") && rc=0 || rc=$?
+  [ "$rc" -eq 2 ] || fail "away mode must not exempt a genuinely dead watcher, got rc=$rc: $out"
+  pass "turn-end: away mode still blocks when no watcher is running at all"
+}
+
+# The repair line must not tell an away-mode session to arm a second watcher.
+test_guard_away_mode_does_not_advise_arming() {
+  local home out
+  home=$(make_home guard-afk)
+  pose_exited_watcher "$home" 60
+  : > "$home/state/.afk"
+
+  out=$(run_guard "$home")
+  [ -n "$out" ] || fail "guard must still report a watcher-down away-mode gap"
+  case "$out" in
+    *"fm-watch-arm.sh"*)
+      fail "guard told an away-mode session to arm a watcher, which AGENTS.md forbids while the daemon owns supervision: $out" ;;
+  esac
+  case "$out" in
+    *"daemon owns the watcher"*) ;;
+    *) fail "away-mode warning must name the daemon as the owner, got: $out" ;;
+  esac
+  pass "guard: the away-mode repair line points at the daemon, never at arming a second watcher"
+}
+
 test_turnend_allows_a_whole_supervision_contract() {
   local home out rc
   home=$(make_turnend_home turnend-healthy)
@@ -529,6 +579,9 @@ test_guard_leaves_the_missing_arm_to_turn_end
 test_turnend_blocks_a_live_but_unattended_watcher
 test_turnend_blocks_on_undrained_wakes
 test_turnend_allows_a_whole_supervision_contract
+test_turnend_does_not_demand_an_arm_under_away_mode
+test_turnend_still_blocks_a_dead_watcher_under_away_mode
+test_guard_away_mode_does_not_advise_arming
 test_watcher_hands_off_to_a_successor
 test_successor_owns_the_lock_alone
 test_no_renewal_under_away_mode

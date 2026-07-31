@@ -204,18 +204,25 @@ fm_supervision_status "$STATE" "$GRACE" "$WATCH" "$FM_HOME"
 #                    arm goes deaf until the captain next speaks.
 #   queue empty    - a wake already enqueued and undrained is an unhandled
 #                    supervision event; ending the turn on one buries it.
+# AWAY MODE EXEMPTS THE WAITER CHECK, and only that one.
+# While state/.afk exists the sub-supervisor daemon runs the watcher itself and
+# delivers by INJECTING into the session, so there is legitimately no arm and
+# never will be one. Requiring a waiter there would block every single turn of an
+# away-mode session on a condition the session is forbidden to fix - AGENTS.md
+# bars arming a separate watcher while the daemon owns supervision.
+afk=0
+[ -e "$STATE/.afk" ] && afk=1
+
 BLIND_REASON=
 if [ "$FM_SUP_WATCHER_FRESH" != true ]; then
   BLIND_REASON="no live watcher holds this home lock (last beat: $FM_SUP_BEACON_DESC)"
-elif [ "$FM_SUP_WAITER_ALIVE" != true ]; then
+elif [ "$FM_SUP_WAITER_ALIVE" != true ] && [ "$afk" -eq 0 ]; then
   BLIND_REASON="a watcher is running but no arm is waiting on it, so its next wake reaches nobody"
 elif [ "$FM_SUP_QUEUE_PENDING" = true ]; then
   BLIND_REASON="wakes are queued and undrained - handle them with bin/fm-wake-drain.sh"
 fi
 [ -n "$BLIND_REASON" ] || exit 0
 
-afk=0
-[ -e "$STATE/.afk" ] && afk=1
 x_mode=0
 [ -f "$CONFIG/x-mode.env" ] && x_mode=1
 REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \

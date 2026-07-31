@@ -34,6 +34,10 @@ If work is in flight, it requires all three parts of the supervision contract, a
 | Delivery | is an arm waiting, so the next wake reaches the agent? | `fm_waiter_alive` (`state/.watch-waiter`) |
 | Backlog | is the durable wake queue drained? | `state/.wake-queue` |
 
+Away mode is exempt from the DELIVERY check alone.
+While `state/.afk` exists the sub-supervisor daemon runs the watcher itself and delivers by injecting into the session, so no arm exists and `AGENTS.md` forbids the session from starting one; demanding a waiter there would block every turn on something the session may not fix.
+A dead watcher and an undrained queue still block under away mode.
+
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
 The delivery check exists because `bin/fm-watch.sh` self-renews: since 2026-07-31 a live watcher no longer implies anyone is listening, so a home can see everything and tell nobody.

@@ -179,7 +179,15 @@ if [ "$watcher_fresh" = false ] && [ "$beacon_fresh" = true ]; then
   # but it is NOT healthy, and it is the single most dangerous moment to be told
   # nothing, because a re-arm that never comes looks exactly like this forever.
   # One unmissable line, every time, naming the repair.
-  echo "WATCHER DOWN (wake handoff, last beat: $beacon_desc) - $in_flight task(s) in flight and NOTHING is watching them. This is NOT an all-clear: re-arm now with bin/fm-watch-arm.sh as its own tracked background task." >&2
+  # The repair differs under away mode: the sub-supervisor daemon owns the watcher
+  # and restarts it per wake, and AGENTS.md forbids the session from arming a
+  # second one, so pointing at the arm there would be telling it to break the
+  # ownership rule.
+  if [ -e "$STATE/.afk" ]; then
+    echo "WATCHER DOWN (away-mode gap, last beat: $beacon_desc) - $in_flight task(s) in flight and no watcher is running. This is NOT an all-clear. The away-mode daemon owns the watcher; do NOT arm a second one. If this persists, the daemon has stopped." >&2
+  else
+    echo "WATCHER DOWN (wake handoff, last beat: $beacon_desc) - $in_flight task(s) in flight and NOTHING is watching them. This is NOT an all-clear: re-arm now with bin/fm-watch-arm.sh as its own tracked background task." >&2
+  fi
 elif [ "$watcher_fresh" = false ]; then
   episode_key=$(fm_guard_stale_episode_key "$STATE")
   episode_key=${episode_key%$'\n'}
