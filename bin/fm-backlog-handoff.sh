@@ -50,9 +50,12 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/secondmates.md"
-MAIN_BACKLOG="$DATA/backlog.md"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# Both endpoints of the move are resolved to absolute paths by the one owner, so
+# a handoff run from a shell standing inside a project clone still moves the item
+# out of THIS home and into THAT secondmate's home - never into the clone.
+MAIN_BACKLOG=$(fm_backlog_file "$DATA")
 
 [ $# -ge 2 ] || { echo "usage: fm-backlog-handoff.sh <secondmate-id> <item-key>..." >&2; exit 1; }
 ID=$1
@@ -232,7 +235,7 @@ backlog_key_noncanonical_body_lines() {
 RAW_HOME=$(secondmate_home "$ID") || exit 1
 [ -n "$RAW_HOME" ] || { echo "error: secondmate $ID has no home in $REG" >&2; exit 1; }
 SUB_HOME=$(validate_secondmate_home "$ID" "$RAW_HOME") || exit 1
-SUB_BACKLOG="$SUB_HOME/data/backlog.md"
+SUB_BACKLOG=$(fm_backlog_file "$SUB_HOME/data")
 validate_backlog_file "main backlog" "$MAIN_BACKLOG" || exit 1
 validate_backlog_file "secondmate backlog" "$SUB_BACKLOG" || exit 1
 
@@ -320,7 +323,7 @@ fi
 # together and, on any failure, neither backlog's content changes - the only
 # cleanup is a scaffold we just created. tasks-axi writes both its success and
 # error output to stdout, so capture it and surface it only on failure.
-if ! MV_OUT=$(tasks-axi mv "${TO_MOVE[@]}" --file "$MAIN_BACKLOG" --to "$SUB_BACKLOG" 2>&1); then
+if ! MV_OUT=$(fm_tasks_axi_run "$FM_HOME" "$DATA" mv "${TO_MOVE[@]}" --to "$SUB_BACKLOG" 2>&1); then
   if [ "$SUB_CREATED" -eq 1 ]; then
     rm -f "$SUB_BACKLOG"
   fi

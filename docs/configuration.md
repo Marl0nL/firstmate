@@ -27,6 +27,12 @@ Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, whil
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
 When the default backend is selected and compatible `tasks-axi` is on `PATH`, firstmate uses its verbs for routine backlog mutations.
+
+`tasks-axi` resolves both that `.tasks.toml` and the relative path it names from the process working directory, so a call issued from a shell standing anywhere inside a project clone reads the clone's absent backlog as an empty one and writes a stray `backlog.md` into the project - a write to a project, which `AGENTS.md` section 1 forbids.
+The false-empty read is the more dangerous half, because it returns a confident wrong answer that gets acted on, while a stray write eventually shows up as an untracked file in a dirty clone.
+`bin/fm-cd-pretool-check.sh` is a separate and still-required layer: it guards the directory *change*, so it cannot see a working directory inherited from a spawn or left behind by an allowed scoped change, which is exactly when this bites.
+`bin/fm-tasks-axi-lib.sh` is the single owner of the fix and its header owns the mechanics: `fm_backlog_file` resolves a home's backlog to an absolute path, and `fm_tasks_axi_run` runs one command with that path passed as `--file` (after the command) and the home as the working directory, so the file is pinned explicitly and the home's `.tasks.toml` still supplies the archive path and Done retention.
+Every `tasks-axi` invocation under `bin/` goes through it, including the two-home `tasks-axi mv` in `fm-backlog-handoff.sh`, and `AGENTS.md` section 10 carries the same rule for calls an agent runs by hand.
 Secondmate handoffs are separate and unconditional: `fm-backlog-handoff.sh` keeps only its own fleet-level validation and always delegates the item move to `tasks-axi mv`, the single owner of the backlog format.
 It moves in-scope `## Queued` items only and refuses `## In flight` and historical `## Done` records, which stay with their home for pruning or archiving.
 Handoff item bodies must use at least two leading spaces, and the helper refuses a selected item with a single-space or tab-indented continuation rather than risk orphaning it.

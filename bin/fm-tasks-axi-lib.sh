@@ -1,6 +1,7 @@
 # shellcheck shell=bash
-# Shared tasks-axi backend selection and compatibility probe for bootstrap,
-# teardown, and secondmate backlog handoff.
+# Shared tasks-axi backend selection, home-scoped path resolution, and
+# compatibility probe for bootstrap, teardown, decision holds, and secondmate
+# backlog handoff.
 # Usage: . bin/fm-tasks-axi-lib.sh
 # Compatible means tasks-axi --version reports 0.1.1 or newer,
 # `tasks-axi update --help` exposes --archive-body for recoverable note rewrites,
@@ -10,6 +11,45 @@
 # backlog mutations, but validated secondmate handoffs always use `tasks-axi mv`.
 # Absent or any other value keeps the default tasks-axi backend path, falling
 # back to manual mutation when the tool is not compatible.
+#
+# Home-scoped resolution (fm_backlog_file / fm_tasks_axi_run) is the single owner
+# of "which backlog file does this call mean". tasks-axi resolves BOTH its
+# .tasks.toml config and the backlog path that config names from the PROCESS
+# WORKING DIRECTORY, so a shell standing anywhere inside a project clone reads an
+# absent backlog as an empty one and writes a stray backlog.md into the clone -
+# a write to a project, which AGENTS.md forbids outright. The false-empty READ is
+# the worse half: it returns a confident wrong answer that gets acted on, where a
+# stray write at least announces itself as an untracked file in a dirty clone.
+# bin/fm-cd-pretool-check.sh guards the directory CHANGE and is unaffected by
+# this; it cannot see a cwd that was inherited from a spawn or left behind by an
+# allowed scoped change, which is exactly when this bites. Every tasks-axi call
+# in bin/ therefore names its file explicitly and absolutely.
+
+# Absolute path of the backlog file inside <data-dir>. Purely lexical: neither
+# the file nor its directory need exist yet, which is what callers that seed a
+# fresh destination backlog require.
+fm_backlog_file() {  # <data-dir>
+  local data=$1
+  case "$data" in
+    /*) ;;
+    *) data="$PWD/$data" ;;
+  esac
+  while [ "$data" != "/" ] && [ "${data%/}" != "$data" ]; do
+    data=${data%/}
+  done
+  printf '%s/backlog.md\n' "$data"
+}
+
+# Run one tasks-axi command against a home's backlog, wherever the caller's shell
+# happens to be standing. `--file` goes after the command, per `tasks-axi --help`.
+# Both halves are deliberate: --file pins the file itself, and the cd pins which
+# .tasks.toml supplies the archive path and Done retention for that same call.
+fm_tasks_axi_run() {  # <home> <data-dir> <command> [args...]
+  local home=$1 data=$2 cmd=$3 file
+  shift 3
+  file=$(fm_backlog_file "$data")
+  (cd "$home" && tasks-axi "$cmd" --file "$file" "$@")
+}
 
 fm_tasks_axi_version_parts() {
   local output

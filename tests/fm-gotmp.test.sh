@@ -75,9 +75,12 @@ SH
 exit 0
 SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
-  # fm-tasks-axi-lib.sh: stub (teardown sources it). Report no backend so
-  # backlog_refresh_reminder takes the plain-message path; no tasks-axi here.
-  cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
+  # fm-tasks-axi-lib.sh: the REAL shared library, so teardown gets the genuine
+  # home-scoped path owner (fm_backlog_file) that backlog_refresh_reminder uses
+  # to name this home's backlog explicitly. Only the backend probe is forced, so
+  # the reminder deterministically takes the plain-message path.
+  cat > "$fake/bin/fm-tasks-axi-lib.sh" <<SH
+. "$ROOT/bin/fm-tasks-axi-lib.sh"
 fm_tasks_axi_backend_available() { return 1; }
 SH
   # Meta with a nonexistent worktree so the dirty/treehouse blocks skip.
@@ -171,7 +174,8 @@ SH
 exit 0
 SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
-  cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
+  cat > "$fake/bin/fm-tasks-axi-lib.sh" <<SH
+. "$ROOT/bin/fm-tasks-axi-lib.sh"
 fm_tasks_axi_backend_available() { return 1; }
 SH
   # No tasktmp= line at all.

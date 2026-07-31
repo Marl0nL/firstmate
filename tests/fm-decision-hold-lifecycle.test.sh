@@ -212,10 +212,14 @@ EOF
   tasks_in "$home" add sample-route-followup "Check the selected sample route" \
     --kind ship --repo sample --blocked-by "$route_hold" >/dev/null \
     || fail "could not create second dependent work fixture"
+  # Match the target id anywhere in the argument list, not at a fixed position:
+  # home-scoped calls carry `--file <path>` between the command and the id
+  # (bin/fm-tasks-axi-lib.sh), so a positional match would silently stop injecting
+  # the failure this case depends on.
   cat > "$home/fakebin/tasks-axi" <<'EOF'
 #!/usr/bin/env bash
-if [ "${1:-}" = unblock ] && [ "${2:-}" = sample-route-implementation ] \
-  && [ ! -f "$FM_HOME/unblock-failed-once" ]; then
+if [ "${1:-}" = unblock ] && [ ! -f "$FM_HOME/unblock-failed-once" ] \
+  && printf '%s\n' "$@" | grep -Fxq sample-route-implementation; then
   : > "$FM_HOME/unblock-failed-once"
   exit 1
 fi
