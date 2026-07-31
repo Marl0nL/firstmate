@@ -13,3 +13,6 @@ When this session owns supervision and away mode is not active:
 
 Codex cannot reason while a foreground tool call is running.
 The bounded checkpoint returns control regularly so user messages and queued wakes can be handled without relying on background-task wake semantics.
+
+`bin/fm-watch-checkpoint.sh` runs the watcher as a deliberate one-shot: it does NOT self-renew, so each checkpoint starts a fresh cycle and the singleton is free between them.
+Silence from `bin/fm-guard.sh` is the absence of an alarm, not a certification that supervision is live, and it never overrides a turn-end block.

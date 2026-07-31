@@ -254,6 +254,17 @@ record_watcher_lock() {
   printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
 }
 
+# Record a live ARM as the home's waiter. Since 2026-07-31 a live watcher is only
+# half of supervision: the guard also requires an arm to deliver its wakes, so a
+# fixture that wants a HEALTHY home has to provide both. See the waiter block in
+# bin/fm-wake-lib.sh and tests/fm-supervision-selfsustaining.test.sh.
+record_watcher_waiter() {  # <dir> <pid>
+  local dir=$1 pid=$2 root
+  root=$(cd "$dir" && pwd)
+  FM_HOME="$root" bash -c '. "$1"; fm_waiter_record "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$root/state" "$pid" >/dev/null
+}
+
 test_hook_silent_when_no_work_in_flight() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-idle")
@@ -299,6 +310,7 @@ test_hook_silent_with_live_lock_and_fresh_beacon() {
     fail "could not identify live watcher holder"
   }
   record_watcher_lock "$dir" "$pid" "$identity"
+  record_watcher_waiter "$dir" "$$"
   touch "$dir/state/.last-watcher-beat"
   out=$(run_hook "$dir" false); status=$?
   kill "$pid" 2>/dev/null || true
@@ -331,6 +343,9 @@ assert_hook_silent_across_spellings() {  # <case> <lock-spelling> <hook-spelling
     fail "$label: could not identify live watcher holder"
   }
   record_watcher_lock "$lock_dir" "$pid" "$identity"
+  # Recorded through the SAME spelling as the lock, so this also exercises the
+  # waiter record across the two spellings of one home.
+  record_watcher_waiter "$lock_dir" "$$"
   touch "$lock_dir/state/.last-watcher-beat"
   out=$(run_hook_via "$hook_dir" "$hook_dir" false); status=$?
   kill "$pid" 2>/dev/null || true
@@ -534,6 +549,7 @@ test_hook_secondmate_reinvoke_recovery_loop() {
     fail "could not identify live watcher holder"
   }
   record_watcher_lock "$dir" "$pid" "$identity"
+  record_watcher_waiter "$dir" "$$"
   touch "$dir/state/.last-watcher-beat"
   out=$(run_hook "$dir" false); status=$?
   expect_code 0 "$status" "secondmate turn must end silently while its watcher is live (Stop #1)"

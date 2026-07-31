@@ -26,6 +26,38 @@ case_home() {
   printf '%s/home\n' "$1"
 }
 
+# Pose a genuinely RECOVERED home. Since 2026-07-31 fm-guard.sh answers watcher
+# liveness from the singleton lock and also checks that an arm is waiting, so
+# touching the beacon no longer simulates recovery - it simulates the wake-handoff
+# window, which now warns on purpose. A fixture that wants silence has to provide
+# both halves of the contract. See tests/fm-supervision-selfsustaining.test.sh.
+RECOVERED_WATCHER_PID=
+pose_recovered() {  # <case-dir>
+  local dir=$1 home lock
+  home=$(case_home "$dir")
+  lock="$home/state/.watch.lock"
+  mkdir -p "$lock"
+  sleep 120 &
+  RECOVERED_WATCHER_PID=$!
+  printf '%s\n' "$RECOVERED_WATCHER_PID" > "$lock/pid"
+  printf '%s\n' "$home" > "$lock/fm-home"
+  printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$lock/watcher-path"
+  FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pid_identity "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$RECOVERED_WATCHER_PID" > "$lock/pid-identity"
+  FM_HOME="$home" bash -c '. "$1"; fm_waiter_record "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$$" >/dev/null
+  touch "$home/state/.last-watcher-beat"
+}
+
+# Undo pose_recovered: the watcher is gone again, beacon left behind or not.
+pose_watcher_gone() {  # <case-dir>
+  local home
+  home=$(case_home "$1")
+  [ -n "$RECOVERED_WATCHER_PID" ] && kill -TERM "$RECOVERED_WATCHER_PID" 2>/dev/null
+  RECOVERED_WATCHER_PID=
+  rm -rf "$home/state/.watch.lock" "$home/state/.watch-waiter"
+}
+
 case_root() {
   printf '%s/root\n' "$1"
 }
@@ -93,12 +125,13 @@ test_healthy_recovery_rearms_next_stale_episode() {
   [ "$(count_text "$out1" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "first stale episode did not print the full banner: $out1"
 
-  touch "$home/state/.last-watcher-beat"
+  pose_recovered "$dir"
   healthy=$(run_guard_case "$dir")
   [ -z "$healthy" ] || fail "guard should be silent after watcher recovery, got: $healthy"
   assert_absent "$home/state/.guard-watcher-stale-banner" \
     "healthy recovery must clear the stale-banner marker"
 
+  pose_watcher_gone "$dir"
   rm -f "$home/state/.last-watcher-beat"
   out2=$(run_guard_case "$dir")
   [ "$(count_text "$out2" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
@@ -207,11 +240,12 @@ test_healthy_read_only_does_not_clear_marker() {
 
   run_guard_case "$dir" >/dev/null
   before=$(cat "$marker")
-  touch "$home/state/.last-watcher-beat"
+  pose_recovered "$dir"
   healthy=$(run_guard_case_read_only "$dir")
   [ -z "$healthy" ] || fail "healthy read-only guard should stay silent, got: $healthy"
   assert_present "$marker" "healthy read-only guard must not clear the stale-banner marker"
   after=$(cat "$marker")
+  pose_watcher_gone "$dir"
   [ "$after" = "$before" ] || fail "healthy read-only guard must not update the marker"
   pass "fm-guard stale banner: healthy read-only does not clear marker"
 }

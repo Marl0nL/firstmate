@@ -213,8 +213,13 @@ test_drain_dedupes_obvious_duplicates() {
 # The drain runs at the top of every wake-handling turn, so it also asserts
 # watcher liveness via fm-guard.sh: a lapsed re-arm chain then surfaces even on a
 # plain drain-and-handle turn that runs no other supervision script. It must warn
-# when work is in flight with no live watcher, and stay silent right after a
-# normal fire (a fresh beacon within grace), so it never false-alarms every wake.
+# whenever work is in flight with no watcher RUNNING, and stay silent once one
+# genuinely is.
+# A fresh beacon alone is explicitly NOT silence any more. That used to be the
+# rule - "stay quiet right after a normal fire" - and it is what let a real
+# 4.8-hour lapse read as healthy on 2026-07-30/31, because minute one of a lapse
+# is indistinguishable from minute one of a handoff. Silence now requires a live
+# singleton holder. See docs/turnend-guard.md.
 test_drain_asserts_watcher_liveness() {
   local dir state err
   dir=$(make_case drain-liveness)
@@ -223,13 +228,26 @@ test_drain_asserts_watcher_liveness() {
   printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || fail "drain failed while asserting liveness"
   grep -F 'WATCHER DOWN' "$err" >/dev/null || fail "drain did not surface the watcher-down banner with work in flight and no live watcher"
+  # A leftover beacon with no live holder is a lapse in progress, not an
+  # all-clear, and must still be surfaced.
   : > "$err"
   touch "$state/.last-watcher-beat"
   FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$DRAIN" >/dev/null 2> "$err" || fail "drain failed with a fresh beacon"
+  grep -F 'WATCHER DOWN' "$err" >/dev/null \
+    || fail "drain stayed silent on a fresh beacon with no live watcher - the exact false all-clear that hid the 2026-07-30/31 lapses"
+
+  # A watcher genuinely running is the only thing that buys silence.
+  : > "$err"
+  # The drain resolves FM_HOME from FM_ROOT_OVERRIDE here (wake-helpers.sh exports
+  # one), and the lock records the home it was armed from, so pose it under the
+  # same value or the identity match correctly rejects it.
+  fm_test_pose_live_watcher "$state" "$FM_ROOT_OVERRIDE"
+  FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$DRAIN" >/dev/null 2> "$err" || fail "drain failed with a live watcher"
+  fm_test_stop_posed_watcher
   if grep -F 'WATCHER DOWN' "$err" >/dev/null; then
-    fail "drain false-alarmed right after a normal fire (fresh beacon within grace)"
+    fail "drain false-alarmed with a watcher actually running: $(cat "$err")"
   fi
-  pass "drain asserts watcher liveness: warns on a lapse, stays silent right after a fire"
+  pass "drain asserts watcher liveness: warns on a lapse and on a leftover beacon, silent only for a live watcher"
 }
 
 test_concurrent_append_and_drain

@@ -5,18 +5,27 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
-# Then, if any task is in flight (a state/<id>.meta exists) and the watcher's
-# liveness beacon (state/.last-watcher-beat, touched every poll cycle) is
-# missing or older than FM_GUARD_GRACE seconds, prints a loud, clearly delimited
-# banner so the agent cannot skim past it in the tool output of whatever it was
-# doing - the one channel every harness has. The full banner is emitted once per
-# distinct staleness episode in this FM_HOME (keyed to beacon mtime or absence);
-# later guarded commands in the same episode print a one-line reminder instead.
+# Then, if any task is in flight (a state/<id>.meta exists) and NO WATCHER IS
+# RUNNING (bin/fm-supervision-lib.sh owns that verdict and answers it from the
+# singleton lock, not the beacon), prints a loud, clearly delimited banner so the
+# agent cannot skim past it in the tool output of whatever it was doing - the one
+# channel every harness has. The full banner is emitted once per distinct
+# staleness episode in this FM_HOME (keyed to beacon mtime or absence); later
+# guarded commands in the same episode print a one-line reminder instead.
 # Episode state lives only under state/.guard-watcher-stale-banner (volatile,
 # bounded). Independent alarms (queued wakes, worktree tangle) are never
-# suppressed by that dedup. Normal wake handling (watcher briefly down between a
-# wake and the next supervision resume) stays inside the grace window and stays
-# silent. Always exits 0: the guard warns, it never blocks.
+# suppressed by that dedup. Always exits 0: the guard warns, it never blocks.
+#
+# THIS SCRIPT MUST NEVER BE SILENT WHILE SUPERVISION IS OFF.
+# It used to be. A watcher that had just exited left a beacon inside the grace
+# window, this guard treated that as healthy and printed nothing, and an agent
+# that ran it to VERIFY a correct turn-end block read the silence as an
+# all-clear and stood down. Five times in 27 hours on 2026-07-30/31; see
+# docs/turnend-guard.md. The grace window is now a SEVERITY distinction only:
+# a watcher gone for less than the grace is reported as the ordinary wake handoff
+# (one line, "re-arm now"), and one gone longer gets the full banner. Neither is
+# silence, because "no watcher is running" is never good news while work is in
+# flight, and silence here is indistinguishable from a clean bill of health.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -140,13 +149,14 @@ if [ -n "$tangle_branch" ]; then
   } >&2
 fi
 
-# Compute in-flight count and watcher-beacon freshness via the shared
-# grace-based predicate (bin/fm-supervision-lib.sh). Only act with tasks in
-# flight; count them so the banner can say how much is riding on an absent
-# watcher.
-fm_supervision_status "$STATE" "$GRACE"
+# Compute in-flight count and watcher liveness via the shared predicate
+# (bin/fm-supervision-lib.sh), which answers liveness from the singleton lock.
+# Only act with tasks in flight; count them so the banner can say how much is
+# riding on an absent watcher.
+fm_supervision_status "$STATE" "$GRACE" "$SCRIPT_DIR/fm-watch.sh" "$FM_HOME"
 in_flight=$FM_SUP_IN_FLIGHT
 watcher_fresh=$FM_SUP_WATCHER_FRESH
+beacon_fresh=$FM_SUP_BEACON_FRESH
 beacon_desc=$FM_SUP_BEACON_DESC
 if [ "$in_flight" -eq 0 ]; then
   # Leave the unhealthy state (no work riding on the watcher): clear so a later
@@ -161,7 +171,16 @@ fi
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line. Later
 # calls in the same episode get a one-line reminder only.
-if [ "$watcher_fresh" = false ]; then
+if [ "$watcher_fresh" = false ] && [ "$beacon_fresh" = true ]; then
+  # THE WAKE-HANDOFF WINDOW, and the exact state that used to be silent.
+  # A watcher ran recently and is gone now: the ordinary shape of this is the
+  # watcher exiting after enqueuing a wake, with the re-arm still to come. That
+  # is expected, so it does not burn the stale episode or print the full banner -
+  # but it is NOT healthy, and it is the single most dangerous moment to be told
+  # nothing, because a re-arm that never comes looks exactly like this forever.
+  # One unmissable line, every time, naming the repair.
+  echo "WATCHER DOWN (wake handoff, last beat: $beacon_desc) - $in_flight task(s) in flight and NOTHING is watching them. This is NOT an all-clear: re-arm now with bin/fm-watch-arm.sh as its own tracked background task." >&2
+elif [ "$watcher_fresh" = false ]; then
   episode_key=$(fm_guard_stale_episode_key "$STATE")
   episode_key=${episode_key%$'\n'}
   print_full_banner=0
@@ -187,7 +206,7 @@ if [ "$watcher_fresh" = false ]; then
     {
       printf '●%s\n' "$rule"
       printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-      printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+      printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
       if [ "$READ_ONLY" -eq 1 ]; then
         printf '●  This read-only session should report the lapse, not repair it.\n'
       else
@@ -205,6 +224,15 @@ else
   # Healthy again while work is still in flight: end the episode so a later
   # restale re-prints the full banner.
   [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
+  # A live watcher is only HALF of supervision - the arm is what delivers wakes,
+  # and a self-renewing watcher can outlive it. That missing half is deliberately
+  # NOT warned about here. This guard runs from the wake drain at the top of every
+  # wake-handling turn, and at that moment the arm has necessarily just exited
+  # (its exit is how the wake arrived) with the re-arm still seconds away, so
+  # warning here would fire on every single wake and become wallpaper - and a
+  # guard nobody reads is the failure this whole change exists to prevent.
+  # bin/fm-turnend-guard.sh owns it instead, at the one moment a missing arm stops
+  # being a handoff and becomes a lapse: the turn actually ending without one.
 fi
 
 # Queued wakes are an independent hazard; warn whenever they are pending, even if
