@@ -346,6 +346,14 @@ Like X mode, the locked session-start bootstrap step only wires or unwires the l
 Copy `docs/examples/crowsnest.env` to `config/crowsnest.env`, then run `bin/fm-crowsnest.sh enable` (add `--autostart` to also start the backend).
 The config keys (`CROWSNEST_ENABLED`, `CROWSNEST_AGENT_NAME`, `CROWSNEST_ACK`, `CROWSNEST_LA_CLI`, `CROWSNEST_LA_CONFIG`, `CROWSNEST_PYTHON`, `CROWSNEST_DRY_RUN`), the full mechanism, wire shapes, and verification live in [docs/crowsnest.md](crowsnest.md).
 
+## Wake-resident secondmates (config/wake-resident.conf)
+
+Most secondmates are always-resident.
+A wake-resident one is dormant between conversations: a message in its chat inbox raises it through the ordinary `bin/fm-spawn.sh <name> --secondmate` launch, and it stands down again after a quiet stretch, with its home, treehouse lease, backlog, status and metadata all preserved.
+The lifecycle is off unless this home's gitignored `config/wake-resident.conf` holds at least one record, and a home with no records behaves exactly as it does today.
+Opt one in with `bin/fm-wake-resident.sh enable <name>`; the locked session-start bootstrap step then converges the two watcher check shims each session (the `WAKE_RESIDENT:` digest line reports only a shim it could not wire).
+The record format, the dormancy record, the refusal table, the race analysis, and the consumed inbox contract live in [docs/wake-resident.md](wake-resident.md); `bin/fm-wake-resident-lib.sh`'s header owns the exact fields.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):

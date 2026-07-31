@@ -186,6 +186,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/architecture.md](docs/architecture.md) - how the crew, supervision, worktrees, secondmates, and project modes work.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional X mode, the files you set, and harness support.
 - [docs/crowsnest.md](docs/crowsnest.md) - the opt-in two-way Google Chat bridge (the Crowsnest): reply model, components, runtime state, enabling, config keys, and verification.
+- [docs/wake-resident.md](docs/wake-resident.md) - the opt-in wake-resident secondmate lifecycle: dormant by default, raised by a message through the ordinary spawn, stood down after a quiet stretch with its home and lease intact.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for a wedged away-mode escalation delivery.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - setup guide for the tmux reference backend: prerequisites, attaching, and watching crew windows.
 - [docs/herdr-backend.md](docs/herdr-backend.md) - setup guide for the experimental herdr backend, plus its verification notes and known gaps.
