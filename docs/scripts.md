@@ -88,3 +88,6 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-crowsnest-context.sh` | Best-effort thread-context enrichment of a pending inbox entry, no-op on any failure |
 | `fm-crowsnest-context.py` | Read half of enrichment: list a thread's recent messages and print bounded enrichment JSON |
 | `fm_crowsnest_chat.py`   | Shared Chat transport helper imported by the Crowsnest post and context tools        |
+| `fm-wake-resident.sh`    | Operate the wake-resident secondmate lifecycle: enable, disable, sync, status, raise, guarded stand-down |
+| `fm-wake-resident-lib.sh` | Shared wake-resident record format, residency and idle predicates, and check-shim wiring |
+| `fm-wake-resident-poll.sh` | The watcher check shim: detect a raise, a stalled delivery, or a stand-down, and never act on one |

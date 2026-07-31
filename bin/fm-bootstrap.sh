@@ -17,7 +17,8 @@
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
 #                 "USAGE: monitor on ..." or "USAGE: monitor off ...",
-#                 "CROWSNEST: on ..." or "CROWSNEST: off ...".
+#                 "CROWSNEST: on ..." or "CROWSNEST: off ...",
+#                 "WAKE_RESIDENT: <what could not be wired>".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
 #          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
@@ -104,6 +105,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-check-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-wake-resident-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-wake-resident-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -408,6 +411,16 @@ secondmate_liveness_sweep() {
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
     id=$(basename "$meta" .meta)
+    # A WAKE-RESIDENT secondmate is exempt, and this exemption is load-bearing.
+    # Its dormant state is EXACTLY the "dead agent behind a live shell" shape this
+    # sweep exists to repair, so without this line every session start would
+    # resurrect an agent that is deliberately asleep - defeating the whole
+    # lifecycle and burning quota on an unasked-for supervisor. Raising one is
+    # driven by an inbox message through bin/fm-wake-resident.sh (docs/wake-resident.md),
+    # never by liveness alone.
+    if fm_wr_load "$CONFIG" "$id"; then
+      continue
+    fi
     window=$(fm_meta_get "$meta" window)
     [ -n "$window" ] || continue
     harness=$(fm_meta_get "$meta" harness)
@@ -656,6 +669,21 @@ crowsnest_setup() {
   fi
 }
 
+# Wake-resident secondmates (opt-in): converge the lifecycle check shims with
+# config/wake-resident.conf, mirroring crowsnest_setup. Completely silent when no
+# home opts in and when everything is already wired; prints a WAKE_RESIDENT: line
+# only for a shim it could not write or register, which is actionable because an
+# unwired shim means a message can no longer raise a dormant secondmate.
+# bin/fm-wake-resident.sh owns the convergence itself.
+wake_resident_setup() {
+  # Never opted in and nothing left over: a complete no-op, not even a fork.
+  [ -f "$CONFIG/wake-resident.conf" ] || [ -e "$STATE/wake-resident.check.sh" ] || return 0
+  # SCRIPT_DIR, not FM_ROOT/bin: the converger is this script's own sibling, and
+  # FM_ROOT can legitimately be an operational home that holds no bin/.
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-wake-resident.sh" sync || true
+}
+
 # Usage monitor (opt-in): when config/usage-monitor.env sets FM_USAGE_ENABLED
 # truthy, wire the token-usage poll into the EXISTING watcher check mechanism,
 # mirroring x_mode_setup and touching no watcher-backbone file. Drops one
@@ -870,6 +898,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   x_mode_setup
   usage_mode_setup
   crowsnest_setup
+  wake_resident_setup
   fleet_sync
 fi
 exit 0
