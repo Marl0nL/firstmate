@@ -131,7 +131,7 @@ fm_watcher_healthy() {
 # watcher lock uses, so a recycled pid cannot pass for a live waiter, and an arm
 # killed outright (no chance to clean up) simply fails the liveness test.
 fm_waiter_record() {  # <state-dir> <pid>
-  local state=$1 pid=$2 dir="$1/.watch-waiter"
+  local pid=$2 dir="$1/.watch-waiter"
   mkdir -p "$dir" 2>/dev/null || return 1
   printf '%s\n' "$pid" > "$dir/pid" 2>/dev/null || return 1
   fm_pid_identity "$pid" > "$dir/pid-identity" 2>/dev/null || true
