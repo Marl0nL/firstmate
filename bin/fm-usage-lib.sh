@@ -27,6 +27,10 @@
 #   fm_usage_oauth_token            - print the fresh access token (never logged)
 #   fm_usage_severity_rank <sev>    - map a severity string to 0|1|2
 #   fm_usage_signal_level <file>    - the alert level (0|1|2) of a signal JSON
+#   fm_usage_alarm_confirm          - samples a severity must hold before a wake
+#   fm_usage_severity_history_max   - max lines kept in the severity history
+#   fm_usage_confirmed_level <n> <levels...> - debounced level (min of last n)
+#   fm_usage_record_severity <lvl>  - log a sample + decide if a wake surfaces
 #   fm_usage_decision <file> <model> <priority> <captain> - allow/hold rule
 # Callers set FM_HOME (and may set the FM_*_OVERRIDE vars) before sourcing.
 set -u
@@ -52,6 +56,11 @@ FM_USAGE_ATTRIBUTION="$FM_USAGE_DIR/attribution.json"
 FM_USAGE_QUOTA_CACHE="$FM_USAGE_DIR/quota.json"
 # shellcheck disable=SC2034
 FM_USAGE_WATERMARK="$FM_USAGE_DIR/severity-watermark"
+# The append-only, inspectable trail of recent quota-severity samples that the
+# wake decision is debounced against (one TSV line per sample); never a single
+# overwritten value, so a caller can see WHY a wake did or did not fire.
+# shellcheck disable=SC2034
+FM_USAGE_SEVERITY_HISTORY="$FM_USAGE_DIR/severity-history"
 # The config knobs live in one sourced-style env file (never executed - parsed
 # key by key like the .env), and the transcript tree defaults to the standard
 # Claude Code location. Both are override-friendly so tests stay hermetic.
@@ -142,6 +151,33 @@ fm_usage_poll_min_interval() {
   iv=$(fm_usage_config FM_USAGE_POLL_MIN_INTERVAL 60)
   case "$iv" in ''|*[!0-9]*) iv=60 ;; esac
   printf '%s' "$iv"
+}
+
+# Number of consecutive quota samples a severity must hold before the wake
+# surfaces it. This debounces the wake DECISION, not the source: a lone extreme
+# reading between normal reads (the rare, intermittent /api/oauth/usage +
+# burn-rate false-critical that cried wolf 9 times in one away period) never
+# confirms, while a genuine sustained crossing still alarms on the Nth sample -
+# automating the "two bracketing reads" rule firstmate applied by hand. Clamped
+# to a floor of 2: 1 would be no debounce (the original bug), so a config typo can
+# never silently restore the cry-wolf behavior.
+fm_usage_alarm_confirm() {
+  local n
+  n=$(fm_usage_config FM_USAGE_ALARM_CONFIRM 2)
+  case "$n" in ''|*[!0-9]*) n=2 ;; esac
+  [ "$n" -ge 2 ] 2>/dev/null || n=2
+  printf '%s' "$n"
+}
+
+# Maximum lines retained in the append-only severity history before the oldest
+# are aged out. Bounds disk (mirrors the ledger's growth discipline) while keeping
+# enough recent samples to inspect. Clamped to a sane positive integer.
+fm_usage_severity_history_max() {
+  local m
+  m=$(fm_usage_config FM_USAGE_SEVERITY_HISTORY_MAX 500)
+  case "$m" in ''|*[!0-9]*) m=500 ;; esac
+  [ "$m" -ge 1 ] 2>/dev/null || m=500
+  printf '%s' "$m"
 }
 
 # Relative report weight for a token class. The defaults are a rough API-parity
@@ -351,6 +387,103 @@ fm_usage_signal_level() {
        ( (.windows.scoped // []) | map(select(.is_active == true) | scopedLvl(.)) | (max // 0) )
      ] | max) // 0
   ' "$file" 2>/dev/null || printf '0'
+}
+
+# --- quota-severity wake debounce -------------------------------------------
+# The quota SOURCE is undocumented/best-effort (a live /api/oauth/usage read that
+# degrades to a burn-rate estimate); it RARELY emits a lone sample that maps to a
+# high severity between otherwise-normal reads. Waking on any single such sample
+# cried wolf 9 times in one away period while the session window sat at ~1%. The
+# remedy is to debounce the DECISION (not the source, and not by weakening what
+# counts as critical): a severity must hold across the last N samples before it is
+# surfaced. See fm-usage-poll.sh and docs/usage-monitor.md.
+
+# The confirmed (debounced) severity level given the raw sample levels oldest..
+# newest: the highest level the last N samples ALL reach, i.e. the MIN of the last
+# N. A lone extreme is bracketed by a normal read and min-ed back down, so it never
+# confirms; a level confirms only once N consecutive samples agree. Fewer than N
+# samples so far (cold start) count the absent ones as level 0, so a fresh spike
+# cannot confirm until N real readings agree. Pure (no I/O): unit-tested directly.
+fm_usage_confirmed_level() {
+  local n=$1; shift
+  case "$n" in ''|*[!0-9]*) n=2 ;; esac
+  [ "$n" -ge 1 ] 2>/dev/null || n=1
+  # Keep only the last n arguments (the most recent n samples).
+  while [ "$#" -gt "$n" ]; do shift; done
+  local kept=$# min='' v
+  for v in "$@"; do
+    case "$v" in ''|*[!0-9]*) v=0 ;; esac
+    if [ -z "$min" ] || [ "$v" -lt "$min" ] 2>/dev/null; then min=$v; fi
+  done
+  [ -n "$min" ] || min=0
+  # Not yet N real samples: the absent ones are level 0, so nothing confirms.
+  [ "$kept" -ge "$n" ] 2>/dev/null || min=0
+  printf '%s' "$min"
+}
+
+# Record one quota-severity sample and decide whether a wake should surface. It
+# appends the sample to the append-only, inspectable history, computes the
+# confirmed level over the last N samples, and applies a high-water crossing
+# against the last SURFACED confirmed level held in FM_USAGE_WATERMARK - so a
+# sustained level surfaces exactly once and a drop RE-ARMS it for a later genuine
+# crossing. Prints the confirmed level (0|1|2) on stdout and returns 0 iff a wake
+# should surface now (a NEW upward crossing to >= warning), 1 otherwise. Uses the
+# FM_USAGE_* paths; the caller (fm-usage-poll.sh) holds the single-writer lock.
+fm_usage_record_severity() {
+  local level=$1 n hist recent confirmed prev should_emit emitted_flag
+  local epoch iso cap lines tmp
+  case "$level" in ''|*[!0-9]*) level=0 ;; esac
+  n=$(fm_usage_alarm_confirm)
+  hist=$FM_USAGE_SEVERITY_HISTORY
+  mkdir -p "$(dirname "$hist")" 2>/dev/null || true
+
+  # The last N-1 raw levels already recorded (field 3), oldest..newest.
+  recent=""
+  if [ -s "$hist" ] && [ "$n" -gt 1 ]; then
+    recent=$(tail -n "$((n - 1))" "$hist" 2>/dev/null | awk -F'\t' 'NF>=3 {printf "%s ", $3}')
+  fi
+  # $recent is a space-separated list of single-digit levels: intentional split.
+  # shellcheck disable=SC2086
+  confirmed=$(fm_usage_confirmed_level "$n" $recent "$level")
+  case "$confirmed" in ''|*[!0-9]*) confirmed=0 ;; esac
+
+  prev=0
+  [ -f "$FM_USAGE_WATERMARK" ] && prev=$(cat "$FM_USAGE_WATERMARK" 2>/dev/null)
+  case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
+
+  should_emit=1
+  emitted_flag=0
+  if [ "$confirmed" -gt "$prev" ] 2>/dev/null && [ "$confirmed" -ge 1 ] 2>/dev/null; then
+    should_emit=0; emitted_flag=1
+  fi
+
+  epoch=$(date +%s 2>/dev/null || echo 0)
+  iso=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '')
+  # One TSV line per sample: epoch, iso, raw level, confirmed level, emitted flag.
+  printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$iso" "$level" "$confirmed" "$emitted_flag" \
+    >> "$hist" 2>/dev/null || true
+
+  # Age out only the oldest lines past the cap; new samples still only append.
+  cap=$(fm_usage_severity_history_max)
+  lines=$(grep -c . "$hist" 2>/dev/null || printf '0')
+  case "$lines" in ''|*[!0-9]*) lines=0 ;; esac
+  if [ "$lines" -gt "$cap" ] 2>/dev/null; then
+    tmp=$(mktemp "${TMPDIR:-/tmp}/fm-usage-hist.XXXXXX" 2>/dev/null) || tmp=
+    if [ -n "$tmp" ]; then
+      if tail -n "$cap" "$hist" > "$tmp" 2>/dev/null; then
+        mv -f "$tmp" "$hist" 2>/dev/null || rm -f "$tmp"
+      else
+        rm -f "$tmp"
+      fi
+    fi
+  fi
+
+  # The watermark now tracks the last surfaced CONFIRMED level: it rises on a new
+  # crossing and FALLS when the confirmed level eases, re-arming a later crossing.
+  printf '%s' "$confirmed" > "$FM_USAGE_WATERMARK" 2>/dev/null || true
+
+  printf '%s' "$confirmed"
+  return "$should_emit"
 }
 
 # The advisory hold/allow decision. Prints one line - "allow: <reason>" or
