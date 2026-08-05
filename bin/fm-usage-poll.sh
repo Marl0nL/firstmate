@@ -385,29 +385,34 @@ fi
 
 # --- quota-severity wake (opt-in) -------------------------------------------
 # The ledger update above is a silent side effect on every cycle. A wake line is
-# printed ONLY when the quota severity FIRST crosses up into warning/critical,
-# so the watcher's check sweep never spams firstmate: the watermark records the
-# last-surfaced level, and only an increase surfaces.
+# printed ONLY when the quota severity crosses up into warning/critical AND that
+# severity is CONFIRMED across consecutive samples - so the watcher's check sweep
+# never spams firstmate. The debounce lives in fm_usage_record_severity: it logs
+# this sample to the append-only severity history, and surfaces a wake only when a
+# level has been sustained (not a lone intermittent extreme between normal reads,
+# which is what cried wolf 9 times in one away period). A sustained crossing still
+# alarms on the Nth consecutive sample, and a drop back down re-arms the alarm.
 [ "$QUIET" -eq 1 ] && exit 0
 fm_usage_enabled || exit 0
 fm_usage_guard_enabled || exit 0
-[ -x "$SCRIPT_DIR/fm-usage-quota.sh" ] || exit 0
+
+# The signal command is override-friendly for tests (mirrors fm-usage-guard.sh),
+# so the debounce can be exercised without the network or real credentials.
+QUOTA_CMD=${FM_USAGE_QUOTA_CMD:-$SCRIPT_DIR/fm-usage-quota.sh}
 
 SIGNAL=$(mktemp "${TMPDIR:-/tmp}/fm-usage-sig.XXXXXX") || exit 0
-if ! "$SCRIPT_DIR/fm-usage-quota.sh" --signal > "$SIGNAL" 2>/dev/null; then
+if ! "$QUOTA_CMD" --signal > "$SIGNAL" 2>/dev/null || [ ! -s "$SIGNAL" ]; then
   rm -f "$SIGNAL"; exit 0
 fi
 level=$(fm_usage_signal_level "$SIGNAL")
 rm -f "$SIGNAL"
 case "$level" in ''|*[!0-9]*) level=0 ;; esac
 
-prev=0
-[ -f "$FM_USAGE_WATERMARK" ] && prev=$(cat "$FM_USAGE_WATERMARK" 2>/dev/null)
-case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
-printf '%s' "$level" > "$FM_USAGE_WATERMARK" 2>/dev/null || true
-
-if [ "$level" -gt "$prev" ] && [ "$level" -ge 1 ]; then
-  if [ "$level" -ge 2 ]; then
+# Record the sample and decide: a successful return means a NEW confirmed crossing
+# should surface now. The printed value is the confirmed (debounced) level.
+if confirmed=$(fm_usage_record_severity "$level"); then
+  case "$confirmed" in ''|*[!0-9]*) confirmed=0 ;; esac
+  if [ "$confirmed" -ge 2 ]; then
     printf 'usage-quota critical: token quota crossed into critical; new large/low-priority dispatch should hold\n'
   else
     printf 'usage-quota warning: token quota crossed the high-water mark; review before large/low-priority dispatch\n'
