@@ -688,7 +688,7 @@ if [ "$KIND" = secondmate ]; then
   # wrong-branch home is left untouched and launches as-is. The agent re-reads
   # AGENTS.md fresh on launch, so no nudge is needed here.
   if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
-    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
+    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes 2>&1 || true)
     case "$sm_ff_out" in
       *': skipped:'*)
         sm_ff_line=$(first_line "$sm_ff_out")

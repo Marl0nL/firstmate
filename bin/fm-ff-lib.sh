@@ -16,10 +16,14 @@
 # it already has the target; otherwise it is skipped until the origin path updates it.
 # A tracked-files fast-forward never touches the gitignored operational dirs
 # (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
-# secondmate's backlog, projects, or in-flight work.
-# The seeded .fm-secondmate-home identity marker is gitignored too; the local
-# sync tolerates only that marker during the one-time upgrade of pre-ignore
-# linked-worktree homes.
+# secondmate's backlog, projects, or in-flight work. For that same reason the
+# dirty-tree gate (dirty_status) treats UNTRACKED-only dirt as sweepable: those
+# operational dirs surface as untracked paths - config/ is gitignored file by
+# file, never as a directory, so a home's live config/ shows up as "?? config/" -
+# as does the seeded .fm-secondmate-home identity marker. None of that can collide
+# with a tracked-files fast-forward, so none of it blocks one. Only a TRACKED
+# modification, staged change, or unmerged path - real local work a fast-forward
+# could interact with - still refuses the sync.
 # Homes are leased at a detached HEAD on the
 # default branch, so the fast-forward advances HEAD only and never moves the
 # shared default branch or any other worktree's checkout.
@@ -282,13 +286,17 @@ instr_surface_drifted() {
   fi
 }
 
+# Echo the first working-tree change on a TRACKED path - a staged, modified,
+# deleted, renamed, copied, or unmerged entry - or nothing when the tree carries
+# no such change. Untracked paths (porcelain "?? " lines) are deliberately NOT
+# dirt: a tracked-files fast-forward never touches them, so the gitignored
+# operational dirs (config/, data/, state/, projects/) and the seeded
+# .fm-secondmate-home marker - all of which surface as untracked - never block a
+# sync. Any tracked change is real local work and still counts. See this file's
+# header for why untracked-only dirt is safe to fast-forward over.
 dirty_status() {
-  local dir=$1 ignore_seed_marker=${2:-no}
-  if [ "$ignore_seed_marker" = yes ]; then
-    git -C "$dir" status --porcelain 2>/dev/null | awk -v marker="?? $SUB_HOME_MARKER" '$0 != marker { print; exit }'
-  else
-    git -C "$dir" status --porcelain 2>/dev/null | head -1
-  fi
+  local dir=$1
+  git -C "$dir" status --porcelain 2>/dev/null | awk 'substr($0, 1, 2) != "??" { print; exit }'
 }
 
 secondmate_registry_field() {
@@ -343,7 +351,7 @@ live_secondmate_meta_records() {
 FF_STATUS=""
 FF_INSTR=""
 ff_target() {
-  local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
+  local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no}
   FF_STATUS="skipped"
   FF_INSTR=""
 
@@ -392,7 +400,7 @@ ff_target() {
     return 0
   fi
 
-  if [ -n "$(dirty_status "$dir" "$ignore_seed_marker")" ]; then
+  if [ -n "$(dirty_status "$dir")" ]; then
     echo "$label: skipped: dirty working tree"
     return 0
   fi
@@ -464,7 +472,7 @@ process_secondmate() {
   esac
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
-  ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
+  ff_target "$home_real" "secondmate $id" "$base_mode" yes
   # Only a home with a live window is a running secondmate that can be nudged.
   [ -n "$window" ] || return 0
 
