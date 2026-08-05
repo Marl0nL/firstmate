@@ -9,8 +9,10 @@
 # The guarantees under test:
 #   - The shared ff helper, driven with a LOCAL commit base, advances a behind
 #     home (updated), is a no-op on an already-current home (current, no nudge),
-#     and refuses - leaving work untouched - on a dirty, diverged, or
-#     in-flight (feature-branch) home.
+#     and refuses - leaving work untouched - on a tracked-dirty, diverged, or
+#     in-flight (feature-branch) home. UNTRACKED-only dirt (the gitignored
+#     operational dirs, e.g. "?? config/") is sweepable: a tracked-files
+#     fast-forward cannot disturb it, so it never blocks the sync.
 #   - No origin fetch happens in the local-HEAD sync path.
 #   - The bootstrap sweep fast-forwards every live secondmate home and sends a
 #     reread nudge ONLY for a running secondmate whose instruction surface
@@ -119,12 +121,12 @@ seed_marked_home() {
 
 # run_ff <dir> <base>: drive the shared ff helper in THIS shell (output to a file,
 # not a subshell, so FF_STATUS / FF_INSTR propagate). Sets FF_OUT to the printed
-# status line. Uses allow_detached=yes, ignore_seed_marker=yes (the secondmate
-# home contract).
+# status line. Uses allow_detached=yes (the secondmate home contract: a home is
+# leased at a detached default-branch HEAD).
 FF_OUT=""
 run_ff() {
   local dir=$1 base=$2 outfile="$TMP_ROOT/ff.out"
-  ff_target "$dir" "secondmate sm" "$base" yes yes >"$outfile" 2>&1
+  ff_target "$dir" "secondmate sm" "$base" yes >"$outfile" 2>&1
   FF_OUT=$(cat "$outfile")
 }
 
@@ -230,6 +232,98 @@ test_ff_inflight_feature_branch() {
     "a home on a feature branch is skipped"
   [ "$(head_of "$w/sm")" = "$before" ] || fail "in-flight home HEAD moved (work at risk)"
   pass "T5 in-flight: a home on a feature branch is skipped, its work preserved"
+}
+
+# --- T5a: untracked-only private dirt (config/) does not block the sweep --------
+# The bug this fixes: config/ is gitignored file by file, never as a directory (see
+# new_world's .gitignore), so a home's live config/ surfaces as an untracked
+# "?? config/" that read as dirt and skipped the home on EVERY sweep - leaving it
+# stuck commits behind main forever. A tracked-files fast-forward cannot touch
+# untracked paths, so untracked-only dirt must be sweepable. Its companion T5b
+# pins the other direction: a tracked edit still refuses.
+test_ff_untracked_only_dir_is_sweepable() {
+  local w c1 base
+  w=$(new_world ff-untracked-only)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  # A live config/ holding a choice the .gitignore does not list by name: git
+  # collapses the whole dir to a single untracked "?? config/", the real-home signal.
+  mkdir -p "$w/sm/config"
+  printf 'claude\n' > "$w/sm/config/backend-choice"
+  [ "$(git -C "$w/sm" status --porcelain)" = "?? config/" ] \
+    || fail "precondition: config/ should surface as one untracked '?? config/' line, got: $(git -C "$w/sm" status --porcelain)"
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = updated ] || fail "untracked-only home must fast-forward, got '$FF_STATUS': $FF_OUT"
+  assert_contains "$FF_OUT" "secondmate sm: updated " "untracked-only home advances"
+  [ "$(head_of "$w/sm")" = "$base" ] || fail "untracked-only home did not advance to the primary HEAD"
+  [ -f "$w/sm/config/backend-choice" ] || fail "the untracked config/ was disturbed by the fast-forward"
+  pass "T5a untracked-only private dirt (config/) is sweepable, its config preserved"
+}
+
+# --- T5b: a tracked edit still refuses, even amid untracked private dirt --------
+# The other half of T5a: the predicate forgives ONLY untracked paths. A real tracked
+# modification (here alongside an untracked config/) is unlanded local work a
+# fast-forward could interact with, so the home must still skip with an honest
+# "dirty working tree" reason and keep its edit untouched.
+test_ff_tracked_edit_refuses_amid_untracked() {
+  local w c1 base before
+  w=$(new_world ff-tracked-amid-untracked)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  mkdir -p "$w/sm/config"
+  printf 'claude\n' > "$w/sm/config/backend-choice"       # untracked private dirt
+  printf 'uncommitted local edit\n' >> "$w/sm/AGENTS.md"  # AND a real tracked edit
+  before=$(head_of "$w/sm")
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = skipped ] || fail "a tracked edit must still skip, got '$FF_STATUS'"
+  assert_contains "$FF_OUT" "secondmate sm: skipped: dirty working tree" \
+    "tracked dirt still refuses with an honest reason"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "home with a tracked edit moved (work at risk)"
+  grep -q 'uncommitted local edit' "$w/sm/AGENTS.md" || fail "tracked edit was discarded"
+  pass "T5b a tracked edit refuses even amid untracked private dirt, its edit preserved"
+}
+
+# --- T5c: dirty_status predicate exercised directly ----------------------------
+# The shared predicate runs at every session start for every live secondmate home,
+# so pin its exact tracked/untracked line in isolation (not only through ff_target):
+# a wrong line here fast-forwards the wrong thing across the whole fleet.
+test_dirty_status_predicate() {
+  local w repo
+  w=$(new_world dirty-status-unit)
+  repo="$w/main"   # a clean tracked repo whose .gitignore mirrors a real home
+
+  # 1. clean tree -> no dirt
+  [ -z "$(dirty_status "$repo")" ] || fail "clean tree read as dirty: '$(dirty_status "$repo")'"
+
+  # 2. untracked-only: an unlisted config/ file collapses to '?? config/' -> no dirt
+  mkdir -p "$repo/config"
+  printf 'x\n' > "$repo/config/backend-choice"
+  [ -z "$(dirty_status "$repo")" ] \
+    || fail "untracked config/ read as dirty: '$(dirty_status "$repo")'"
+
+  # 3. an untracked top-level file too -> still no dirt
+  printf 'scratch\n' > "$repo/notes.tmp"
+  [ -z "$(dirty_status "$repo")" ] || fail "untracked file read as dirty: '$(dirty_status "$repo")'"
+
+  # 4. a tracked modification (alongside the untracked paths) -> dirt
+  printf 'edit\n' >> "$repo/AGENTS.md"
+  [ -n "$(dirty_status "$repo")" ] || fail "a tracked modification was not read as dirty"
+  git -C "$repo" checkout -q -- AGENTS.md   # revert, leaving only the untracked paths
+
+  # 5. a staged change -> dirt
+  printf 'new\n' > "$repo/staged.txt"
+  git -C "$repo" add staged.txt
+  [ -n "$(dirty_status "$repo")" ] || fail "a staged change was not read as dirty"
+
+  pass "T5c dirty_status: untracked-only reads clean; tracked and staged changes are dirt"
 }
 
 # --- T6: no origin fetch happens in the local-HEAD sync path -----------------
@@ -973,8 +1067,8 @@ test_seed_marker_clean_when_gitignored() {
 # --- T13: an existing marker-only-dirty home converges on the next sweep --------
 # The convergence chicken-and-egg: existing homes predate the fix, so their marker
 # is still untracked-and-unignored, and the fix itself only arrives by fast-forward.
-# The marker-tolerant ff-skip (ignore_seed_marker=yes) bridges the gap for
-# linked-worktree homes, which bootstrap/spawn fast-forward from the primary's local HEAD.
+# The untracked-tolerant dirty gate bridges the gap for linked-worktree homes,
+# which bootstrap/spawn fast-forward from the primary's local HEAD.
 # Standalone-clone homes converge through /updatefirstmate's origin fetch instead.
 # Once advanced, the now-ignored marker reads clean with no hand intervention.
 test_seed_marker_converges_existing_home() {
@@ -1034,6 +1128,9 @@ test_ff_current
 test_ff_dirty
 test_ff_diverged
 test_ff_inflight_feature_branch
+test_ff_untracked_only_dir_is_sweepable
+test_ff_tracked_edit_refuses_amid_untracked
+test_dirty_status_predicate
 test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
 test_sweep_nudges_current_home_when_loaded_surface_drifted
