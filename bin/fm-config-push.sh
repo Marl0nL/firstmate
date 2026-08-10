@@ -118,7 +118,7 @@ while IFS='|' read -r id home _window meta; do
   seen_homes="$seen_homes $home_real"
 
   printf 'secondmate %s (%s):\n' "$id" "$home_real"
-  dirty=$(dirty_status "$home_real" yes || true)
+  dirty=$(dirty_status "$home_real" || true)
   if [ -n "$dirty" ]; then
     echo "  home: dirty working tree - config-only push continuing"
   fi

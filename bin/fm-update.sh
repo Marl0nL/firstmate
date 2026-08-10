@@ -62,7 +62,7 @@ fi
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
-ff_target "$FM_ROOT" "firstmate" origin no no
+ff_target "$FM_ROOT" "firstmate" origin no
 # Compare the watched instruction surface at the CURRENT (post-fast-forward) HEAD
 # against the commit this session loaded (state/.instr-base), so a home already
 # fast-forwarded by a teardown fleet-sync - leaving ff_target's own before/after
