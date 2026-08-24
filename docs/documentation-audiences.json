@@ -373,6 +373,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/treehouse-path-contract.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
     },
