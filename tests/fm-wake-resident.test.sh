@@ -631,6 +631,12 @@ test_liveness_sweep_exempts_a_dormant_wake_resident() {
   # With a record, the same dormant shape must be left alone.
   : > "$FM_FAKE_SPAWN_LOG"
   wr "$home" enable advisor >/dev/null
+  # Reset the shared pane-command file the control sub-case's respawn left at
+  # `claude`: without this the exempt sweep would read a LIVE agent and skip it
+  # regardless of the exemption, so the assertions below would pass vacuously.
+  # `bash` restores the dead-agent-behind-a-live-shell shape the exemption exists
+  # for, making the exemption the only reason the sweep leaves it alone.
+  pose_pane bash
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$FAKE_ROOT" FM_STATE_OVERRIDE="$home/state" \
     FM_CONFIG_OVERRIDE="$home/config" FM_DATA_OVERRIDE="$home/data" \
     FM_FAKE_PANE_COMMAND=bash bash -c '
