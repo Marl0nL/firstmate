@@ -310,6 +310,39 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: a restored no-agent tab was replaced create-before-close, while a registered live agent caused refusal.
 
+### Boot autostart reality probe (Herdr 0.7.4, protocol 16)
+
+Measured read-only on the captain's host on 2026-07-20 against Herdr 0.7.4 protocol 16 on Fedora, during the first unattended boots driven by `bin/fm-autostart.sh` and `assets/systemd/firstmate-autostart.service`.
+
+After a machine reboot the server replays its persisted session layout (`~/.config/herdr/session.json`) into the metadata surface, so the metadata surface reports ghosts as live:
+
+```
+$ herdr agent list          # 3 "idle" agents; the box held exactly 1 live claude process, outside herdr
+{"result":{"agents":[
+  {"agent":"claude","agent_status":"idle","cwd":"/var/home/marlon/firstmate","pane_id":"w1:p1",...},
+  {"agent":"claude","agent_status":"idle","cwd":"/var/home/marlon/firstmate","pane_id":"w1:pR",...},
+  {"agent":"claude","agent_status":"idle","cwd":"/var/home/marlon/challenges","pane_id":"w2:p1",...}]}}
+$ herdr pane get w1:p1        # answers in full
+$ herdr agent get w1:p1       # answers in full, agent_status "idle"
+$ herdr pane process-info --pane w1:p1
+{"error":{"code":"pane_not_found","message":"pane not found"},"id":"cli:pane:process_info"}
+```
+
+`pane process-info` returned `pane_not_found` for every ghost and, for the one genuinely live pane, a real `foreground_process_group_id` and argv, so it is the only reality-touching call.
+A genuinely live, registered, `agent start`-created firstmate reported `agent_status: "unknown"` on 0.7.4, with the per-process cwd present in `pane process-info`:
+
+```
+$ herdr agent get w1:p2R
+... "agent_status":"unknown","cwd":"/var/home/marlon/firstmate","name":"firstmate" ...
+$ herdr pane process-info --pane w1:p2R
+... "foreground_processes":[{"argv":["/home/marlon/.local/share/claude/versions/2.1.215",
+    "--dangerously-skip-permissions","--remote-control","--continue"],
+    "cwd":"/var/home/marlon/firstmate","name":"2.1.215","pid":1991}], "shell_pid":1991 ...
+```
+
+So `bin/fm-autostart.sh` consults `pane process-info` (`fm_backend_herdr_pane_process_state`, `fm_backend_herdr_pane_process_cwds`) and never `agent_status` for its duplicate-guard.
+The behavioral contract runs offline against a fake `herdr` in `tests/fm-autostart.test.sh`; the systemd unit and the real boot path cannot run in CI or a worktree, so re-verifying this probe live on the current Herdr floor is a Phase 6 cutover live-smoke item.
+
 ### Launcher workspace placement
 
 Herdr exports its pane identity into every process it manages, checked on 2026-07-30 against Herdr 0.7.5 protocol 17 inside a guarded lab pane:
