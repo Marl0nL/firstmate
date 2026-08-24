@@ -2861,6 +2861,45 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
 fi
+
+# Re-send the launch command once as a race mitigation for the confirmation step
+# below. The first launch (inline) also released the HERDR presentation-order
+# lock; that has already happened by the time this can run, so a re-send only
+# retypes the command and submits it.
+send_launch_command() {
+  spawn_send_literal "$T" "$LAUNCH"
+  sleep 0.3
+  spawn_send_key "$T" Enter
+}
+
+# confirm_agent_started: poll fm_backend_agent_alive until the launched agent is
+# confirmed running, up to a bounded timeout. Prints nothing on stdout; returns
+#   0 - a real agent process is confirmed (alive)
+#   1 - CONFIDENTLY no agent (a bare shell / no-agent pane persisted the whole
+#       window): the launch never produced an agent - the silent-failure case
+#   2 - unverifiable: the probe never reached a confident verdict (only
+#       `unknown`). Never treat this as a failure - fail-safe toward proceeding,
+#       exactly as fm_backend_agent_alive's own `unknown` contract requires.
+# The happy path returns as soon as the first `alive` read lands (a few seconds
+# for a normally-starting crew), so a successful spawn is not appreciably slower;
+# only the dead/unverifiable paths pay the full timeout.
+confirm_agent_started() {  # <timeout-secs> <interval-secs>
+  local timeout=$1 interval=$2 steps n state
+  steps=$(awk -v t="$timeout" -v i="$interval" 'BEGIN{ if(i<=0)i=0.5; s=t/i; if(s<1)s=1; printf "%d", s }')
+  for ((n=0; n<steps; n++)); do
+    state=$(fm_backend_agent_alive "$BACKEND" "$T")
+    [ "$state" = alive ] && return 0
+    sleep "$interval"
+  done
+  # One final authoritative read after the window elapses.
+  state=$(fm_backend_agent_alive "$BACKEND" "$T")
+  case "$state" in
+    alive) return 0 ;;
+    dead) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
@@ -2891,6 +2930,46 @@ if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_delivery; then
     kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
     exit 1
+  fi
+fi
+
+# Post-launch start confirmation: a pane was created and the launch text was
+# sent, but neither proves an agent is actually running (observed live: a herdr
+# spawn whose launch send never landed against a freshly restarted server left
+# the pane at a bare no-agent shell, yet fm-spawn still printed `spawned` and the
+# task went In flight with nothing running - a silent failure, especially
+# dangerous in away mode). AGENTS.md task lifecycle already requires firstmate to
+# confirm the worker is processing the brief after a spawn; do it here, cheaply
+# and automatically, so a dead launch fails LOUDLY instead of masquerading as
+# success. Kimi already confirms its own ready+delivery above, so it is skipped.
+# Only run for a backend+harness whose liveness probe can reach a confident
+# verdict; others keep the pre-confirmation behaviour (the gap is documented).
+# FM_SPAWN_CONFIRM=0 disables the check (firstmate's own test suite sets this in
+# tests/lib.sh - a fake pane has no real agent process to detect).
+CONFIRM=${FM_SPAWN_CONFIRM:-1}
+CONFIRM_TIMEOUT=${FM_SPAWN_CONFIRM_TIMEOUT:-15}
+CONFIRM_INTERVAL=${FM_SPAWN_CONFIRM_INTERVAL:-0.5}
+if [ "$HARNESS" != kimi ] && [ "$CONFIRM" != 0 ] \
+    && fm_backend_agent_probe_verifiable "$BACKEND" "$HARNESS"; then
+  confirm_rc=0
+  confirm_agent_started "$CONFIRM_TIMEOUT" "$CONFIRM_INTERVAL" || confirm_rc=$?
+  if [ "$confirm_rc" -eq 1 ]; then
+    # Confidently no agent after the first window. The observed trigger looked
+    # like a race between pane creation and the launch send against a
+    # freshly-restarted backend server, so re-send the launch once and re-poll.
+    # A retry that ALSO cannot confirm still fails loudly - never a silent
+    # retry-until-the-print-looks-right (AGENTS.md "Report outcomes faithfully").
+    echo "warning: $ID: no agent detected in pane $META_WINDOW after ${CONFIRM_TIMEOUT}s; re-sending launch once" >&2
+    send_launch_command
+    confirm_rc=0
+    confirm_agent_started "$CONFIRM_TIMEOUT" "$CONFIRM_INTERVAL" || confirm_rc=$?
+  fi
+  if [ "$confirm_rc" -eq 1 ]; then
+    echo "error: $ID: agent did not start - pane $META_WINDOW is a bare shell with no agent after two launch attempts (${CONFIRM_TIMEOUT}s each). The launch never produced a running agent; refusing to report success. Inspect/clean the pane before retrying." >&2
+    exit 1
+  fi
+  if [ "$confirm_rc" -eq 2 ]; then
+    echo "warning: $ID: could not confirm agent liveness for pane $META_WINDOW (probe inconclusive); proceeding unconfirmed" >&2
   fi
 fi
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then

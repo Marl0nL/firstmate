@@ -34,6 +34,12 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# fm-spawn's post-launch agent-start confirmation polls the real backend for a
+# live agent process before printing `spawned`. Every spawn test drives a FAKE
+# pane with no real agent to detect, so default the check OFF here; a test that
+# specifically exercises the confirmation sets FM_SPAWN_CONFIRM=1 itself.
+export FM_SPAWN_CONFIRM=0
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
