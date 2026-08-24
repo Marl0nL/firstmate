@@ -14,6 +14,10 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) a bundled short-option cluster carrying -R fails fast the same way,
+#       while a cluster carrying no repo override still reaches gh-axi
+#   (j) --hostname and --hostname=<value> fail fast because the host comes
+#       only from the PR URL, which this script accepts only on github.com
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -239,7 +243,7 @@ test_repo_override_args_refuse_before_recording() {
   set -e
 
   expect_code 1 "$rc" "repo-override: fm-pr-merge should refuse repo override flags"
-  assert_grep 'must not override --repo parsed from PR URL' "$case_dir/stderr" \
+  assert_grep 'must not override --repo or host parsed from PR URL' "$case_dir/stderr" \
     "repo-override: refusal did not explain the repo override"
   assert_no_grep 'pr=https://github.com/right/repo/pull/5' "$case_dir/state/task-x1.meta" \
     "repo-override: PR URL was recorded before rejecting repo override"
@@ -248,6 +252,62 @@ test_repo_override_args_refuse_before_recording() {
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "repo-override: gh-axi pr merge was invoked despite repo override"
   pass "fm-pr-merge refuses repo override args before recording state"
+}
+
+# Runs one bundled-repo-override case: name, then its extra merge args.
+assert_bundled_repo_override_refused() {
+  local case_name=$1 case_dir rc
+  shift
+
+  case_dir=$(make_case "bundled-repo-override-$case_name")
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1111111111111111111111111111111111111111
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/right/repo/pull/5 -- "$@" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "bundled-repo-override ($case_name): fm-pr-merge should refuse"
+  assert_grep 'must not override --repo' "$case_dir/stderr" \
+    "bundled-repo-override ($case_name): refusal did not explain the repo override"
+  assert_no_grep 'pr=https://github.com/right/repo/pull/5' "$case_dir/state/task-x1.meta" \
+    "bundled-repo-override ($case_name): PR URL was recorded before rejecting repo override"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "bundled-repo-override ($case_name): repo override armed a merge poll"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "bundled-repo-override ($case_name): gh-axi pr merge was invoked despite repo override"
+}
+
+test_bundled_repo_override_args_refuse_before_recording() {
+  assert_bundled_repo_override_refused bare-R -R wrong/repo
+  assert_bundled_repo_override_refused attached-R -Rwrong/repo
+  assert_bundled_repo_override_refused bundled-dR -dR wrong/repo
+  assert_bundled_repo_override_refused bundled-xdR -xdR wrong/repo
+  pass "fm-pr-merge refuses -R, -Rvalue, and bundled clusters like -dR/-xdR before recording state"
+}
+
+test_hostname_override_args_refuse_before_recording() {
+  assert_bundled_repo_override_refused hostname-space --hostname ghe.example
+  assert_bundled_repo_override_refused hostname-equals --hostname=ghe.example
+  pass "fm-pr-merge refuses --hostname and --hostname=<value> before recording state"
+}
+
+test_benign_bundled_flags_still_reach_forge() {
+  local case_dir
+  case_dir=$(make_case benign-bundled-flags)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1212121212121212121212121212121212121212
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 -- --delete-branch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "benign-bundled-flags: fm-pr-merge failed"
+
+  grep -qxF 'pr merge 31 --repo example/repo --squash --delete-branch' "$case_dir/gh-axi.log" \
+    || fail "benign-bundled-flags: a legitimate flag with no repo override was not forwarded"
+  pass "fm-pr-merge still forwards a legitimate flag that carries no repository override"
 }
 
 test_explicit_merge_method_not_overridden() {
@@ -302,6 +362,9 @@ test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge
 test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording
+test_bundled_repo_override_args_refuse_before_recording
+test_hostname_override_args_refuse_before_recording
+test_benign_bundled_flags_still_reach_forge
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
