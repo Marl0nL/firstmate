@@ -520,6 +520,54 @@ test_secondmate_no_projects_charter() {
   pass "fm-brief.sh: --no-projects scaffolds a project-less charter and guards misuse"
 }
 
+test_secondmate_wake_resident_charter() {
+  local home brief status
+  home="$TMP_ROOT/wake-resident-home"
+  mkdir -p "$home/data"
+
+  # Default: the always-on residency clause, unchanged.
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='always on' \
+    "$ROOT/bin/fm-brief.sh" alwayson --secondmate --no-projects >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "default secondmate charter should exit 0"
+  brief="$home/data/alwayson/brief.md"
+  assert_grep "You are persistent by default." "$brief" \
+    "the default charter lost its always-on residency clause"
+  assert_no_grep "WAKE-RESIDENT" "$brief" "the default charter must not claim wake-residency"
+
+  # --wake-resident swaps in the dormant-between-conversations clause.
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='advice' \
+    "$ROOT/bin/fm-brief.sh" advisor --secondmate --no-projects --wake-resident >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "--wake-resident secondmate brief should exit 0"
+  brief="$home/data/advisor/brief.md"
+  assert_grep "You are PERSISTENT but WAKE-RESIDENT, and those are not in conflict" "$brief" \
+    "--wake-resident charter lost its two-axis residency clause"
+  assert_grep "Persistent means your IDENTITY and STATE are permanent" "$brief" \
+    "--wake-resident charter dropped the persistent axis, the one that says nothing is lost"
+  assert_grep "Wake-resident means your PROCESS is not permanent" "$brief" \
+    "--wake-resident charter dropped the wake-resident axis"
+  assert_grep "An exit is not a teardown and loses nothing." "$brief" \
+    "--wake-resident charter lost the core distinction of the whole mechanism"
+  assert_grep "but DO exit on the idle window" "$brief" \
+    "--wake-resident charter softened the idle exit"
+  assert_grep "treat waking with no conversational memory as normal" "$brief" \
+    "--wake-resident charter did not tell the agent a fresh start is normal"
+  assert_grep "keep one live supervision cycle even with no crew work of your own" "$brief" \
+    "--wake-resident charter did not require the live cycle a message needs to reach it"
+  assert_grep "do not build a second timer of your own" "$brief" \
+    "--wake-resident charter did not forbid a competing idle timer"
+  assert_no_grep "You are persistent by default." "$brief" \
+    "--wake-resident charter kept the always-on clause that conflates the two axes"
+  assert_grep "blocked: {why}" "$brief" "--wake-resident charter lost the escalation fallback"
+
+  # It applies only to secondmate charters. A ship brief supplies --mode so it
+  # clears the mandatory delivery-mode gate and reaches the --wake-resident guard.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oops-wr somerepo --mode direct-PR --wake-resident >/dev/null 2>&1; status=$?
+  expect_code 1 "$status" "--wake-resident on a ship brief must fail"
+  assert_absent "$home/data/oops-wr/brief.md" "a rejected --wake-resident ship brief still wrote a file"
+
+  pass "fm-brief.sh: --wake-resident swaps the residency clause and guards misuse"
+}
+
 test_secondmate_marked_request_reporting_contract() {
   local home brief
   home="$TMP_ROOT/marked-request-reporting-home"
@@ -763,6 +811,7 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_documented_global_replace_leaves_the_herdr_gate_intact
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
+test_secondmate_wake_resident_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
