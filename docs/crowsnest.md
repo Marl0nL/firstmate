@@ -8,7 +8,7 @@ reuses the `local-agents-chat` backend (the package is being renamed from
 `local-agents`; the Crowsnest resolves the CLI and module name at runtime so it
 works across the rename).
 
-It is the Google Chat analogue of X mode (see `docs/configuration.md` "X mode
+It is the Google Chat analogue of Relay (see `docs/configuration.md` "Relay
 (.env)"): a message becomes a WAKE that the one live firstmate session handles on
 its own turn.
 The single-threaded supervision guarantee is the whole point.
