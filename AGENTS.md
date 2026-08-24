@@ -542,6 +542,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `process-event-sources` - load before arming a long-polling source, before registering a deterministic condition->action watch (do X as soon as Y is true), and on any `procevent <adapter> <source-id> <sequence>` check wake.
   Never run a registered source's blocking command yourself in a conversational turn.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the Relay configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for a Relay-linked task before posting its completion follow-up; relevant only when Relay is on.
+- `fmc-respond` - load on a `chat-mention <id>` `check:` wake to drain the chat inbox and post the real reply back into the thread, and before posting proactively into a chat thread (the reverse channel); relevant only when the Crowsnest is on (section 15).
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 
@@ -559,6 +560,18 @@ For every Relay-linked terminal outcome, load that owner and use the promised-fi
 A promised final public reply is durable state, never conversation memory.
 Load `fmx-respond` before promising one, on a `public-followup ...` check wake, and whenever the session-start digest lists a public commitment awaiting delivery or an open public loop.
 Only the home holding the relay consent and thread binding ever posts it, so never ask a secondmate or crewmate to find the thread or send the reply, and never recover a terminal result by reading a `done:` sentence.
+
+## 15. Crowsnest (Google Chat bridge)
+
+The Crowsnest lets the captain reach this live firstmate session from a Google Chat thread, and lets firstmate post back, through the `local-agents-chat` backend.
+It ships inert and causes no behavior change until the home opts in with a truthy `CROWSNEST_ENABLED` in its gitignored `config/crowsnest.env`.
+Bootstrap only wires or unwires the local check shim (the `CROWSNEST:` digest line); registering the agent and autostarting the backend reach outside this home and stay explicit operator actions via `bin/fm-crowsnest.sh`.
+`docs/crowsnest.md` owns the mechanism, config keys, wire shapes, and verification.
+
+The rule that must never bend is single-threaded supervision: a chat message becomes a `chat-mention <id>` check wake that the one live firstmate handles on its own turn, never a parallel agent spawned in the firstmate home.
+
+On that wake, load `fmc-respond`, which owns draining the inbox, composing the reply from live fleet state in the section 9 captain-facing voice, and posting back.
+The same owner drives the reverse channel for proactive thread posts, under the section 1 and 9 approval and etiquette rules.
 
 ## Captain instruction precedence
 

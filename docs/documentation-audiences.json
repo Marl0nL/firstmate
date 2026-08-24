@@ -153,6 +153,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/fmc-respond/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/fmx-respond/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -253,6 +257,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/crowsnest.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/captain-hold-lifecycle.md",
       "audience": "maintainer-architecture"
     },
@@ -262,6 +270,10 @@
     },
     {
       "path": "docs/examples/crew-dispatch.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/crowsnest.env",
       "audience": "operator-example"
     },
     {
