@@ -1333,28 +1333,17 @@ EOF
 }
 
 # treehouse's OWN spelling of a worktree path, which is the only one it accepts.
-#
-# `treehouse return` matches its argument against the exact string treehouse
-# recorded at `get` time; it does not resolve either side. Firstmate cannot simply
-# keep that string, because it never receives it: a crew worktree is discovered by
-# polling the live pane's cwd, and every backend reports that OS-resolved (tmux's
-# pane_current_path and the herdr/zellij/cmux equivalents read the kernel's
-# physical path). Wherever /home is a symlink to /var/home - the default layout on
-# every ostree/atomic Fedora variant - treehouse records $HOME/.treehouse/... while
-# the pane reports /var/home/<user>/.treehouse/..., one inode spelled two ways, and
-# treehouse rejects the spelling it did not record.
-#
-# So ask treehouse which spelling is its own, matching on physical identity rather
-# than on the string, and do it HERE at the handoff boundary rather than at spawn:
-# this is the single point where a path crosses back into treehouse, so it also
-# repairs metadata written before this fix instead of needing a migration.
-#
-# This is deliberately the INVERSE of fm_same_path's internal-comparison rule. Do
-# not "simplify" it by canonicalizing; that is the bug.
+# `treehouse return` string-matches its recorded argument, but firstmate only ever
+# holds the OS-resolved pane cwd, which differs wherever /home is a symlink to
+# /var/home (ostree/atomic Fedora). So ask treehouse's inventory which spelling is
+# its own, matching on physical identity, at this handoff boundary (which also
+# repairs metas written before this fix). This is the deliberate INVERSE of
+# fm_same_path's internal-comparison rule: do NOT "simplify" it by canonicalizing;
+# that is the bug. Full contract + status output shapes: docs/treehouse-path-contract.md.
 #
 # Degrades to the caller's path whenever treehouse cannot be asked or reports no
-# matching worktree, so an unparseable status or a changed output format is never
-# worse than the old unconditional behavior.
+# matching worktree, so an unparseable or changed status is never worse than the
+# old unconditional behavior.
 treehouse_recorded_path() {  # <path> <pool-dir>
   local path=$1 pool_dir=$2 target listed candidate candidate_real
   [ -n "$path" ] || { printf '%s\n' "$path"; return 0; }

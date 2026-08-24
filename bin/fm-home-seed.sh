@@ -29,8 +29,8 @@
 #       summary field is always short (deterministically truncated to
 #       REGISTRY_SUMMARY_CAP characters, no model call): set
 #       FM_SECONDMATE_SUMMARY='<short summary>' to supply it directly, or let it
-#       derive from the charter text/brief. The scope field is never truncated,
-#       since it is the routing input the main firstmate matches work against.
+#       derive from the charter text/brief. The scope field is never truncated
+#       (docs/configuration.md explains why).
 #   fm-home-seed.sh validate
 #       Refuse records that operational consumers cannot parse, unavailable or
 #       unsafe registry files when present, non-absolute or unresolvable homes,

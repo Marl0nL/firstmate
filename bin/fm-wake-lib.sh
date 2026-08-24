@@ -79,11 +79,9 @@ fm_path_age() {
 }
 
 # Physical spelling of a path, for FIRSTMATE-INTERNAL comparison ONLY.
-#
-# NEVER canonicalize a path on its way to an external tool that owns its own
-# spelling: `treehouse return` matches its argument against the exact string
-# treehouse recorded, so resolving it there is what BREAKS the handoff. See
-# bin/fm-teardown.sh's treehouse_recorded_path for that opposite direction.
+# NEVER canonicalize a path handed to a tool that owns its own spelling (e.g.
+# `treehouse return`, which string-matches its recorded argument) - that is the
+# bug, not a simplification. Full contract + its inverse: docs/treehouse-path-contract.md.
 fm_canonical_path() {  # <path>
   local path=$1 dir base
   [ -n "$path" ] || return 1
@@ -98,16 +96,11 @@ fm_canonical_path() {  # <path>
 }
 
 # Do two firstmate-resolved paths name the same place? Identical strings match
-# without touching the filesystem; otherwise compare physical spellings.
-#
-# Both sides must be firstmate's own values. A home reached as $HOME/firstmate
-# and the same home reached as /var/home/<user>/firstmate is ONE directory spelled
-# two ways wherever /home is a symlink to /var/home - the default layout on every
-# ostree/atomic Fedora variant (Silverblue, Kinoite, Bazzite). Scripts derive their
-# root with a logical `pwd`, so the spelling follows the caller's cwd: a watcher
-# armed from one spelling recorded it in the lock, while a turn-end hook invoked
-# through the other spelling compared against the other - same directory, two
-# strings, no match, and the guard cried wolf. Unresolvable paths stay unequal.
+# without touching the filesystem; otherwise compare physical spellings, because
+# $HOME/firstmate and /var/home/<user>/firstmate are one directory spelled two
+# ways wherever /home is a symlink to /var/home (ostree/atomic Fedora) and a
+# script's logical `pwd` follows the caller's cwd. Both sides must be firstmate's
+# own values; unresolvable paths stay unequal. See docs/treehouse-path-contract.md.
 fm_same_path() {  # <a> <b>
   local a=$1 b=$2 ca cb
   [ "$a" = "$b" ] && return 0

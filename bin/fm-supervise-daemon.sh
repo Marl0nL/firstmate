@@ -416,7 +416,7 @@ classify_stale() {  # <window> <state>
     if ! status_is_terminal_verb "$term"; then
       case "$(status_line_verb "$term")" in
         working|resolved|captain-held)
-          printf 'self|transient stale (%s): %s' "$win" "$last"
+          printf 'self|transient stale (%s): %s' "$win" "$term"
           return
           ;;
       esac

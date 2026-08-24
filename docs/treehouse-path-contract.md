@@ -132,7 +132,11 @@ $ treehouse status
 
 ## Audit of other path handoffs
 
-- **Orca** (`bin/backends/orca.sh`) is already immune: it removes by opaque id (`orca worktree rm --worktree "id:<id>"`), and `fm-spawn.sh` records Orca's reported path verbatim rather than canonicalizing it. Its one path comparison (`require_orca_worktree_path_match`) canonicalizes *both* sides, which is the correct internal-comparison rule.
+- **Orca** (`bin/backends/orca.sh`) is already immune: it removes by opaque id (`orca worktree rm --worktree "id:<id>"`), and `fm-spawn.sh` records Orca's reported path verbatim rather than canonicalizing it.
+  Its one path comparison (`require_orca_worktree_path_match`) canonicalizes *both* sides, which is the correct internal-comparison rule.
 - **herdr** (`bin/backends/herdr.sh`) passes a path only as a launch cwd; it closes tabs and workspaces by id, never by matching a recorded path string.
-- **`fm_backend_hometag`** (`bin/fm-backend-hometag-lib.sh`) canonicalizes `FM_ROOT` before hashing it into a label. That is correct: it derives a stable identity for one home, and every consumer derives it through the same function.
-- **`bin/fm-home-seed.sh`** canonicalizes the `treehouse get --lease` path in `verify_firstmate_home`, so a secondmate home's recorded `home=` is the physical spelling rather than treehouse's. This is harmless *today* only because the teardown boundary re-resolves it before the handoff; it is left alone deliberately, since the registered `home=` string is compared elsewhere and changing it carries risk the boundary fix does not need. Worth revisiting if the lease path ever reaches treehouse by a route that bypasses `teardown_treehouse_return`.
+- **`fm_backend_hometag`** (`bin/fm-backend-hometag-lib.sh`) canonicalizes `FM_ROOT` before hashing it into a label.
+  That is correct: it derives a stable identity for one home, and every consumer derives it through the same function.
+- **`bin/fm-home-seed.sh`** canonicalizes the `treehouse get --lease` path in `verify_firstmate_home`, so a secondmate home's recorded `home=` is the physical spelling rather than treehouse's.
+  This is harmless *today* only because the teardown boundary re-resolves it before the handoff; it is left alone deliberately, since the registered `home=` string is compared elsewhere and changing it carries risk the boundary fix does not need.
+  Worth revisiting if the lease path ever reaches treehouse by a route that bypasses `teardown_treehouse_return`.
