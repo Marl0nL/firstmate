@@ -25,8 +25,10 @@
 # absent stops the merge before any state is recorded.
 #
 # Extra args must not include --repo or -R in any form, including a bundled
-# short-option cluster such as -yR, because the repository comes only from the
-# URL, nor --sha on GitLab because the head comes only from the live read.
+# short-option cluster such as -yR, nor --hostname, because the repository and
+# host come only from the URL (which this script accepts only on github.com, and
+# GH_HOST is pinned to github.com around the merge call for the same reason), nor
+# --sha on GitLab because the head comes only from the live read.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
 set -eu
 
@@ -73,13 +75,21 @@ reject_repo_overrides() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --repo|--repo=*)
-        echo "error: extra merge arguments must not override the repository" >&2
+      --repo|--repo=*|--hostname|--hostname=*)
+        # --hostname is a gh-axi/gh global flag that sets GH_HOST for the child
+        # gh, so it would merge the recorded PR against a different GitHub host
+        # while state still records the github.com URL. Both the repository and
+        # the host come only from the PR URL, which this script accepts only on
+        # github.com (GH_HOST is also pinned around the merge call below).
+        echo "error: extra merge arguments must not override the repository or host parsed from the PR URL" >&2
         return 1
         ;;
       --*) ;;
-      # A single-dash argument is a short-option cluster, which both CLIs expand
-      # one character at a time, so -yR carries --repo exactly as a bare -R does.
+      # A single-dash argument is a short-option cluster. Refuse any cluster
+      # carrying R defensively, regardless of whether a given forge CLI expands
+      # it into --repo: gh-axi does not currently forward such a cluster to gh
+      # for pr merge, but this keeps the guard correct if a future CLI (or a raw
+      # gh/glab fallback) does expand it.
       -*R*)
         echo "error: extra merge arguments must not override the repository" >&2
         return 1
@@ -245,7 +255,7 @@ case "$PROVIDER" in
     if ! caller_has_merge_method "$@"; then
       merge_args=(--squash)
     fi
-    gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+    GH_HOST=github.com gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
     ;;
   gitlab)
     gitlab_verify_mergeable || exit 1

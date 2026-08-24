@@ -1116,28 +1116,32 @@ work_is_landed() {
 }
 
 backlog_refresh_reminder() {
-  local pr done_cmd report_path
+  local pr done_cmd report_path bl
   [ "$KIND" = secondmate ] && return 0
+  # A home-scoped command must name this home's backlog explicitly (AGENTS.md
+  # section 10): a hand-run tasks-axi from a project cwd otherwise reads that
+  # clone's absent backlog as empty and writes a stray one into it.
+  bl="--file \"$DATA/backlog.md\""
   if fm_tasks_axi_backend_available "$CONFIG"; then
     case "$KIND" in
       scout)
         report_path="data/$ID/report.md"
-        done_cmd="tasks-axi done $ID --report $report_path"
+        done_cmd="tasks-axi done $ID $bl --report $report_path"
         ;;
       *)
         if [ "$MODE" = local-only ]; then
-          done_cmd="tasks-axi done $ID --note \"local main\""
+          done_cmd="tasks-axi done $ID $bl --note \"local main\""
         else
           pr=$PR_URL
           if [ -n "$pr" ]; then
-            done_cmd="tasks-axi done $ID --pr $pr"
+            done_cmd="tasks-axi done $ID $bl --pr $pr"
           else
-            done_cmd="tasks-axi done $ID --pr PR_URL"
+            done_cmd="tasks-axi done $ID $bl --pr PR_URL"
           fi
         fi
         ;;
     esac
-    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready $bl for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
   else
     printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
   fi
@@ -1279,15 +1283,102 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
+# Expand treehouse's $HOME abbreviation, emitting nothing for a non-path.
+# treehouse abbreviates with the same $HOME it recorded the absolute path under,
+# so expanding ~ here reproduces its stored spelling exactly.
+treehouse_expand_home_abbrev() {  # <path>
+  local path=$1
+  # [~] is a one-character class matching a LITERAL tilde: treehouse prints the
+  # abbreviation as text, so this must never be shell tilde expansion.
+  case "$path" in
+    [~]/*) printf '%s/%s\n' "${HOME%/}" "${path#[~]/}" ;;
+    /*)    printf '%s\n' "$path" ;;
+  esac
+}
+
+# Candidate worktree spellings from one `treehouse status` row; nothing for a
+# line that is not a row (a blank line, or an indented "bash (123), claude (456)"
+# process continuation).
+#
+# A row is "<name>  <state>  <path>", but the path is NOT simply the rest of the
+# line: a `leased` row appends a "  (held by <holder>)" annotation after it, while
+# a path may itself contain spaces. Rather than guess where the path ends, emit
+# both readings. The caller keeps whichever one RESOLVES to the worktree it is
+# looking for, so a wrong candidate is discarded rather than returned - which is
+# what keeps this parse honest as treehouse's output evolves.
+# See docs/treehouse-path-contract.md for the recorded output of both row shapes.
+treehouse_status_path_candidates() {  # <line>
+  local line=$1 rest trimmed
+  case "$line" in
+    ''|[[:space:]]*) return 0 ;;
+  esac
+  read -r _ _ rest <<EOF
+$line
+EOF
+  [ -n "$rest" ] || return 0
+  treehouse_expand_home_abbrev "$rest"
+  # The same row with a trailing "  (...)" annotation dropped.
+  trimmed=${rest%%  (*}
+  [ "$trimmed" = "$rest" ] || treehouse_expand_home_abbrev "$trimmed"
+}
+
+# Every candidate worktree spelling in a `treehouse status` output.
+treehouse_status_paths() {  # <status-output>
+  local listed=$1 line
+  while IFS= read -r line; do
+    treehouse_status_path_candidates "$line"
+  done <<EOF
+$listed
+EOF
+}
+
+# treehouse's OWN spelling of a worktree path, which is the only one it accepts.
+# `treehouse return` string-matches its recorded argument, but firstmate only ever
+# holds the OS-resolved pane cwd, which differs wherever /home is a symlink to
+# /var/home (ostree/atomic Fedora). So ask treehouse's inventory which spelling is
+# its own, matching on physical identity, at this handoff boundary (which also
+# repairs metas written before this fix). This is the deliberate INVERSE of
+# fm_same_path's internal-comparison rule: do NOT "simplify" it by canonicalizing;
+# that is the bug. Full contract + status output shapes: docs/treehouse-path-contract.md.
+#
+# Degrades to the caller's path whenever treehouse cannot be asked or reports no
+# matching worktree, so an unparseable or changed status is never worse than the
+# old unconditional behavior.
+treehouse_recorded_path() {  # <path> <pool-dir>
+  local path=$1 pool_dir=$2 target listed candidate candidate_real
+  [ -n "$path" ] || { printf '%s\n' "$path"; return 0; }
+  command -v treehouse >/dev/null 2>&1 || { printf '%s\n' "$path"; return 0; }
+  target=$(canonical_existing_dir "$path") || { printf '%s\n' "$path"; return 0; }
+  listed=$(cd "$pool_dir" 2>/dev/null && treehouse status 2>/dev/null) || {
+    printf '%s\n' "$path"
+    return 0
+  }
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    candidate_real=$(canonical_existing_dir "$candidate") || continue
+    if [ "$candidate_real" = "$target" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done <<EOF
+$(treehouse_status_paths "$listed")
+EOF
+  printf '%s\n' "$path"
+}
+
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc
+  local out lock attempt=0 max_retries lock_desc return_path
+
+  # Hand treehouse ITS spelling of this worktree; every other use below stays on
+  # the caller's $dir, which git and the lock checks resolve for themselves.
+  return_path=$(treehouse_recorded_path "$dir" "$cd_dir")
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+  if out=$( ( cd "$cd_dir" && treehouse return --force "$return_path" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -1312,7 +1403,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if out=$( ( cd "$cd_dir" && treehouse return --force "$return_path" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -1339,7 +1430,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      if out=$( ( cd "$cd_dir" && treehouse return --force "$return_path" ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0

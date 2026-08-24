@@ -389,8 +389,10 @@ test_herdr_lab_contract_is_explicit_and_complete() {
     "Herdr lab brief missing helper-owned provisioning"
   assert_grep "\"\$HERDR_LAB_HELPER\" teardown \"\$HERDR_LAB_SESSION\"" "$brief" \
     "Herdr lab brief missing helper-owned teardown"
-  assert_grep "required trailing \`--session \"\$HERDR_LAB_SESSION\"\`" "$brief" \
-    "Herdr lab brief missing the per-call trailing session contract"
+  assert_grep "required leading \`--session \"\$HERDR_LAB_SESSION\"\`" "$brief" \
+    "Herdr lab brief missing the per-call leading session contract"
+  assert_grep "Pass no \`--session\` of your own anywhere" "$brief" \
+    "Herdr lab brief missing the fail-closed caller-session refusal"
   assert_grep "direct \`herdr server stop\`" "$brief" \
     "Herdr lab brief missing the forbidden server-global command list"
   assert_grep "records the live default session before provisioning" "$brief" \
@@ -795,6 +797,29 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+test_commit_capable_briefs_forbid_agent_coauthor() {
+  local home id brief
+  home="$TMP_ROOT/coauthor-home"
+  mkdir -p "$home/data"
+
+  id="brief-coauthor-ship"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep 'Co-Authored-By' "$brief" "ship brief missing the no-agent-co-author rule"
+
+  id="brief-coauthor-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep 'Co-Authored-By' "$brief" "scout brief missing the no-agent-co-author rule"
+
+  id="brief-coauthor-secondmate"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='x' "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep 'Co-Authored-By' "$brief" "secondmate charter missing the no-agent-co-author rule"
+
+  pass "fm-brief.sh: every commit-capable brief forbids an agent commit co-author"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -817,3 +842,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_commit_capable_briefs_forbid_agent_coauthor

@@ -25,7 +25,12 @@
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
-#       and scope are derived from the filled charter brief.
+#       and scope are derived from the filled charter brief. The registry
+#       summary field is always short (deterministically truncated to
+#       REGISTRY_SUMMARY_CAP characters, no model call): set
+#       FM_SECONDMATE_SUMMARY='<short summary>' to supply it directly, or let it
+#       derive from the charter text/brief. The scope field is never truncated
+#       (docs/configuration.md explains why).
 #   fm-home-seed.sh validate
 #       Refuse records that operational consumers cannot parse, unavailable or
 #       unsafe registry files when present, non-absolute or unresolvable homes,

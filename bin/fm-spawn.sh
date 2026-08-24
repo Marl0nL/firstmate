@@ -134,6 +134,13 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Every spawn also refuses a worktree that ANOTHER task of this FM_HOME already
+#   records as `worktree=` in its state/<id>.meta, naming the owning task. A
+#   respawn of the SAME task id into its own recorded worktree stays legitimate.
+#   The check is deliberately home-scoped: it reads only $STATE of the current
+#   FM_HOME and never sweeps sibling homes, whose state is not this home's to read
+#   or reason about. See assert_worktree_unleased() below for why it exists and
+#   what it cannot cover.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -1571,6 +1578,57 @@ validate_firstmate_operational_dirs() {
   done
 }
 
+real_path_or_raw() {  # <path>
+  local path=$1 real
+  if real=$(cd "$path" 2>/dev/null && pwd -P); then
+    printf '%s\n' "$real"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
+# Worktree-lease guard. Twice on 2026-07-29 a spawn was handed a worktree a LIVE
+# task was already working in: once in the main home after a herdr-server restart
+# left a task's meta pointing at another task's worktree (the confused crewmate
+# wrote its uncommitted fixes there, where they were reverted as foreign edits and
+# lost), and once in a secondmate home, where `treehouse get` re-leased a live
+# crewmate's worktree and reset it to the default branch. The pool judges a slot
+# free by whether a live PROCESS sits with its cwd inside it, and an agent whose
+# process cwd is the pane's launch dir leaves an owned slot looking free. This
+# home's own state/*.meta is the record that actually knows the slot is taken, so
+# consult it before the new agent touches anything.
+#
+# Scope, deliberately: reads only $STATE of the CURRENT FM_HOME. Sibling homes
+# lease from the same pool but their state is not this home's to read, and each
+# home runs this same guard over its own records. The pool itself is not this
+# script's to fix.
+#
+# Limit, honestly: for a session-provider backend the worktree's identity is only
+# knowable AFTER `treehouse get` has already acquired (and reset) it, so this
+# guard cannot prevent that acquisition-time reset - it converts a silent
+# destruction into a loud abort before the branch, hook, meta, and launch steps,
+# and names the task to reconcile. Orca allocates its own worktree, and a
+# secondmate home is supplied rather than leased, so on those paths the guard
+# fires before anything is written at all.
+assert_worktree_unleased() {  # <source>
+  local source=$1 wt_real meta other_id other_wt other_real
+  wt_real=$(real_path_or_raw "$WT")
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    other_id=$(basename "$meta" .meta)
+    # A deliberate respawn of the SAME task id into its own recorded worktree is
+    # legitimate (recovery, restart, /updatefirstmate) and must stay allowed.
+    [ "$other_id" != "$ID" ] || continue
+    other_wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$other_wt" ] || continue
+    other_real=$(real_path_or_raw "$other_wt")
+    if [ "$other_wt" = "$WT" ] || [ "$other_real" = "$wt_real" ]; then
+      echo "error: $source yielded worktree '$WT', which task '$other_id' already records as its own in $meta; refusing to launch $ID into a worktree another task of this home is using. Reconcile $other_id first (bin/fm-crew-state.sh $other_id), then respawn." >&2
+      exit 1
+    fi
+  done
+}
+
 if [ "$KIND" = secondmate ]; then
   if [ -z "$FIRSTMATE_HOME" ] && [ -f "$STATE/$ID.meta" ]; then
     FIRSTMATE_HOME=$(grep '^home=' "$STATE/$ID.meta" | cut -d= -f2- || true)
@@ -1591,6 +1649,12 @@ if [ "$KIND" = secondmate ]; then
     SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
   fi
   WT="$PROJ_ABS"
+  # A secondmate spawn never reaches validate_spawn_worktree - its home IS the
+  # supplied path, so the isolation assertion (worktree distinct from the project)
+  # cannot apply. The lease guard still does, and it runs HERE, before the
+  # fast-forward and config push below: neither may touch a home this home's own
+  # records say belongs to another task.
+  assert_worktree_unleased "secondmate home"
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
   # PRIMARY checkout's current default-branch commit, so a freshly spawned or
   # recovery-respawned secondmate always runs the primary's version (AGENTS.md
@@ -1692,15 +1756,6 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
-real_path_or_raw() {  # <path>
-  local path=$1 real
-  if real=$(cd "$path" 2>/dev/null && pwd -P); then
-    printf '%s\n' "$real"
-  else
-    printf '%s\n' "$path"
-  fi
-}
-
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -1711,6 +1766,7 @@ real_path_or_raw() {  # <path>
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
   local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  assert_worktree_unleased "$source"
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -2805,6 +2861,45 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
 fi
+
+# Re-send the launch command once as a race mitigation for the confirmation step
+# below. The first launch (inline) also released the HERDR presentation-order
+# lock; that has already happened by the time this can run, so a re-send only
+# retypes the command and submits it.
+send_launch_command() {
+  spawn_send_literal "$T" "$LAUNCH"
+  sleep 0.3
+  spawn_send_key "$T" Enter
+}
+
+# confirm_agent_started: poll fm_backend_agent_alive until the launched agent is
+# confirmed running, up to a bounded timeout. Prints nothing on stdout; returns
+#   0 - a real agent process is confirmed (alive)
+#   1 - CONFIDENTLY no agent (a bare shell / no-agent pane persisted the whole
+#       window): the launch never produced an agent - the silent-failure case
+#   2 - unverifiable: the probe never reached a confident verdict (only
+#       `unknown`). Never treat this as a failure - fail-safe toward proceeding,
+#       exactly as fm_backend_agent_alive's own `unknown` contract requires.
+# The happy path returns as soon as the first `alive` read lands (a few seconds
+# for a normally-starting crew), so a successful spawn is not appreciably slower;
+# only the dead/unverifiable paths pay the full timeout.
+confirm_agent_started() {  # <timeout-secs> <interval-secs>
+  local timeout=$1 interval=$2 steps n state
+  steps=$(awk -v t="$timeout" -v i="$interval" 'BEGIN{ if(i<=0)i=0.5; s=t/i; if(s<1)s=1; printf "%d", s }')
+  for ((n=0; n<steps; n++)); do
+    state=$(fm_backend_agent_alive "$BACKEND" "$T")
+    [ "$state" = alive ] && return 0
+    sleep "$interval"
+  done
+  # One final authoritative read after the window elapses.
+  state=$(fm_backend_agent_alive "$BACKEND" "$T")
+  case "$state" in
+    alive) return 0 ;;
+    dead) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
@@ -2835,6 +2930,46 @@ if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_delivery; then
     kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
     exit 1
+  fi
+fi
+
+# Post-launch start confirmation: a pane was created and the launch text was
+# sent, but neither proves an agent is actually running (observed live: a herdr
+# spawn whose launch send never landed against a freshly restarted server left
+# the pane at a bare no-agent shell, yet fm-spawn still printed `spawned` and the
+# task went In flight with nothing running - a silent failure, especially
+# dangerous in away mode). AGENTS.md task lifecycle already requires firstmate to
+# confirm the worker is processing the brief after a spawn; do it here, cheaply
+# and automatically, so a dead launch fails LOUDLY instead of masquerading as
+# success. Kimi already confirms its own ready+delivery above, so it is skipped.
+# Only run for a backend+harness whose liveness probe can reach a confident
+# verdict; others keep the pre-confirmation behaviour (the gap is documented).
+# FM_SPAWN_CONFIRM=0 disables the check (firstmate's own test suite sets this in
+# tests/lib.sh - a fake pane has no real agent process to detect).
+CONFIRM=${FM_SPAWN_CONFIRM:-1}
+CONFIRM_TIMEOUT=${FM_SPAWN_CONFIRM_TIMEOUT:-15}
+CONFIRM_INTERVAL=${FM_SPAWN_CONFIRM_INTERVAL:-0.5}
+if [ "$HARNESS" != kimi ] && [ "$CONFIRM" != 0 ] \
+    && fm_backend_agent_probe_verifiable "$BACKEND" "$HARNESS"; then
+  confirm_rc=0
+  confirm_agent_started "$CONFIRM_TIMEOUT" "$CONFIRM_INTERVAL" || confirm_rc=$?
+  if [ "$confirm_rc" -eq 1 ]; then
+    # Confidently no agent after the first window. The observed trigger looked
+    # like a race between pane creation and the launch send against a
+    # freshly-restarted backend server, so re-send the launch once and re-poll.
+    # A retry that ALSO cannot confirm still fails loudly - never a silent
+    # retry-until-the-print-looks-right (AGENTS.md "Report outcomes faithfully").
+    echo "warning: $ID: no agent detected in pane $META_WINDOW after ${CONFIRM_TIMEOUT}s; re-sending launch once" >&2
+    send_launch_command
+    confirm_rc=0
+    confirm_agent_started "$CONFIRM_TIMEOUT" "$CONFIRM_INTERVAL" || confirm_rc=$?
+  fi
+  if [ "$confirm_rc" -eq 1 ]; then
+    echo "error: $ID: agent did not start - pane $META_WINDOW is a bare shell with no agent after two launch attempts (${CONFIRM_TIMEOUT}s each). The launch never produced a running agent; refusing to report success. Inspect/clean the pane before retrying." >&2
+    exit 1
+  fi
+  if [ "$confirm_rc" -eq 2 ]; then
+    echo "warning: $ID: could not confirm agent liveness for pane $META_WINDOW (probe inconclusive); proceeding unconfirmed" >&2
   fi
 fi
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then

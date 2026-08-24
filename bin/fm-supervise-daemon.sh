@@ -372,7 +372,7 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen
+  local win=$1 state=$2 task last term seen
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
   if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
@@ -385,16 +385,38 @@ classify_stale() {  # <window> <state>
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
     return
   fi
-  if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+  # Terminal test reads the last REAL STATE line (last_state_status_line skips
+  # trailing `resolved:` bookkeeping), so a crew that finished and then durably
+  # closed its blocker key (done: ... / resolved: ...) is recognized as terminal
+  # instead of false-wedged. Same shared owner the always-on watcher's
+  # stale_is_terminal uses, so both modes agree.
+  term=$(last_state_status_line "$state/$task.status")
+  if [ -n "$term" ] && status_is_captain_relevant "$term"; then
+    # A crew PARKED AWAITING MERGE (reconciled done + armed merge-monitor + idle, via
+    # crew_is_parked_awaiting_merge - the same shared predicate the always-on watcher
+    # uses, so both modes agree) legitimately idles until its PR merges; the
+    # merge-monitor, not a stale poll, is the live signal. Self-handle it so the stale
+    # path never re-escalates the same done: line on each churny idle-pane hash. Its
+    # done: PR-ready still reaches the away digest via the signal path and the
+    # heartbeat catch-all scan (both independent of this stale path and untouched
+    # here, since this branch records no seen marker), so nothing is lost. Returning
+    # `self` routes to handle_wake's self branch, which drops any wedge stale marker
+    # for this captain-relevant (done) crew - no wedge aging survives. Re-read from
+    # CURRENT state every wake, never latched: a re-activated crew fails the predicate
+    # and its stale path returns to full sensitivity.
+    if crew_is_parked_awaiting_merge "$task" "$state"; then
+      printf 'self|parked awaiting merge (merge-monitor is the live signal): %s' "$term"
+      return
+    fi
     # Independent of free-text captain-relevant matching: a nonterminal progress
     # verb (working:) must never take the terminal stale path. Seen-status dedupe
     # must not permanently suppress or clear possible-wedge aging merely because
     # prose once looked captain-relevant. Real terminal verbs and legacy free-text
     # captain lines without those verbs keep the terminal escalate/dedupe path.
-    if ! status_is_terminal_verb "$last"; then
-      case "$(status_line_verb "$last")" in
+    if ! status_is_terminal_verb "$term"; then
+      case "$(status_line_verb "$term")" in
         working|resolved|captain-held)
-          printf 'self|transient stale (%s): %s' "$win" "$last"
+          printf 'self|transient stale (%s): %s' "$win" "$term"
           return
           ;;
       esac
@@ -402,11 +424,11 @@ classify_stale() {  # <window> <state>
     # Dedupe against the signal path: if this status was already escalated
     # (seen marker matches), self-handle to avoid a duplicate in the digest.
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-    if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
-      printf 'self|stale + terminal (already escalated by signal): %s' "$last"
+    if [ "$(cat "$seen" 2>/dev/null || true)" = "$term" ]; then
+      printf 'self|stale + terminal (already escalated by signal): %s' "$term"
       return
     fi
-    printf 'escalate|stale + terminal status: %s' "$last"
+    printf 'escalate|stale + terminal status: %s' "$term"
     return
   fi
   # Non-terminal (or no status): defer to the persistence recheck. The caller
@@ -550,8 +572,11 @@ mark_escalated_seen() {  # <kind> <arg> <state>
         mark_status_seen "$state" "$task" "$last"
       done ;;
     stale)
+      # Match classify_stale's terminal test: the last REAL STATE line, past any
+      # trailing `resolved:` bookkeeping, so the seen marker records the exact
+      # line classify_stale escalated (a finished done: ... / resolved: ... pane).
       task=$(window_to_task "$arg" "$state")
-      last=$(last_status_line "$state/$task.status")
+      last=$(last_state_status_line "$state/$task.status")
       [ -n "$last" ] && status_is_captain_relevant "$last" \
         && mark_status_seen "$state" "$task" "$last" ;;
   esac
@@ -1266,7 +1291,10 @@ handle_wake() {  # <reason> <state>
       # wake, escalates a wedge.
       if [ "$kind" = "stale" ]; then
         task=$(window_to_task "$arg" "$state")
-        last=$(last_status_line "$state/$task.status")
+        # Terminal test on the last REAL STATE line (trailing `resolved:` skipped),
+        # matching classify_stale: a finished done: ... / resolved: ... pane must not
+        # be wedge-aged just because its last line is a resolved: bookkeeping entry.
+        last=$(last_state_status_line "$state/$task.status")
         # Clear wedge aging only for terminal (or legacy free-text) captain lines.
         # Nonterminal progress verbs keep possible-wedge markers even if free text
         # once looked captain-relevant or was written into a seen marker.

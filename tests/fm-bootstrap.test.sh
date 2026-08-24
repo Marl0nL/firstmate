@@ -90,6 +90,29 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# Build a system-bin view of $BASE_PATH that excludes any real `orca` binary
+# (GNOME's screen reader is installed as `orca` on some dev machines). The
+# orca-selected backend case must observe orca as ABSENT to prove the gate
+# requires it, so it must not depend on the ambient system lacking a program
+# named `orca`. Symlinking the standard bin dirs minus orca keeps every other
+# real coreutil bootstrap needs. Echoes the new dir.
+make_orca_free_sysbin() {
+  local dir=$1 sysbin d f base
+  local dirs
+  sysbin="$dir/sysbin"
+  mkdir -p "$sysbin"
+  IFS=: read -ra dirs <<< "$BASE_PATH"
+  for d in "${dirs[@]}"; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*; do
+      base=${f##*/}
+      [ "$base" = orca ] && continue
+      [ -e "$sysbin/$base" ] || ln -s "$f" "$sysbin/$base" 2>/dev/null || true
+    done
+  done
+  printf '%s\n' "$sysbin"
+}
+
 add_quota_axi() {
   local fakebin=$1
   cat > "$fakebin/quota-axi" <<'SH'
@@ -511,7 +534,7 @@ SH
 }
 
 test_orca_backend_gates_orca_tool_only_when_selected() {
-  local case_dir fakebin out missing_orca
+  local case_dir fakebin sysbin out missing_orca
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
 
   case_dir="$TMP_ROOT/orca-backend-selected"
@@ -519,7 +542,10 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  # Use an orca-free system bin so the case does not falsely pass/fail based on
+  # whether the host happens to have an unrelated `orca` binary on PATH.
+  sysbin=$(make_orca_free_sysbin "$case_dir")
+  out=$(PATH="$fakebin:$sysbin" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
 

@@ -78,6 +78,37 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# Physical spelling of a path, for FIRSTMATE-INTERNAL comparison ONLY.
+# NEVER canonicalize a path handed to a tool that owns its own spelling (e.g.
+# `treehouse return`, which string-matches its recorded argument) - that is the
+# bug, not a simplification. Full contract + its inverse: docs/treehouse-path-contract.md.
+fm_canonical_path() {  # <path>
+  local path=$1 dir base
+  [ -n "$path" ] || return 1
+  if [ -d "$path" ]; then
+    ( cd "$path" 2>/dev/null && pwd -P ) || return 1
+    return 0
+  fi
+  dir=$(dirname "$path")
+  base=$(basename "$path")
+  dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$dir" "$base"
+}
+
+# Do two firstmate-resolved paths name the same place? Identical strings match
+# without touching the filesystem; otherwise compare physical spellings, because
+# $HOME/firstmate and /var/home/<user>/firstmate are one directory spelled two
+# ways wherever /home is a symlink to /var/home (ostree/atomic Fedora) and a
+# script's logical `pwd` follows the caller's cwd. Both sides must be firstmate's
+# own values; unresolvable paths stay unequal. See docs/treehouse-path-contract.md.
+fm_same_path() {  # <a> <b>
+  local a=$1 b=$2 ca cb
+  [ "$a" = "$b" ] && return 0
+  ca=$(fm_canonical_path "$a") || return 1
+  cb=$(fm_canonical_path "$b") || return 1
+  [ "$ca" = "$cb" ]
+}
+
 # fm_watcher_lock_unheld <state>
 # True when the watcher lock or its symlinked owner directory is absent, or when
 # the existing lock records no pid at all. Any non-empty pid remains held here;
@@ -99,8 +130,8 @@ fm_watcher_lock_matches_pid() {
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$home" ] || return 1
-  [ "$lock_path" = "$watch_path" ] || return 1
+  fm_same_path "$lock_home" "$home" || return 1
+  fm_same_path "$lock_path" "$watch_path" || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
   [ "$current_identity" = "$lock_identity" ] || return 1

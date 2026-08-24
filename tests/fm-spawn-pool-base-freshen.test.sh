@@ -107,6 +107,11 @@ test_stale_pool_base_refreshes_before_branching() {
   id='pool-current-base-repeat-r1'
   mkdir -p "$HOME_DIR/data/$id"
   printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  # The first task is done being measured; release its worktree lease (as teardown
+  # would) before the idempotent repeat spawns into the same pool base, or
+  # fm-spawn's worktree-lease guard correctly refuses a second live task into a
+  # slot the first still records.
+  rm -f "$HOME_DIR/state/pool-current-base-r1.meta"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "repeating the base refresh should be idempotent"
