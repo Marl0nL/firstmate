@@ -1116,28 +1116,32 @@ work_is_landed() {
 }
 
 backlog_refresh_reminder() {
-  local pr done_cmd report_path
+  local pr done_cmd report_path bl
   [ "$KIND" = secondmate ] && return 0
+  # A home-scoped command must name this home's backlog explicitly (AGENTS.md
+  # section 10): a hand-run tasks-axi from a project cwd otherwise reads that
+  # clone's absent backlog as empty and writes a stray one into it.
+  bl="--file \"$DATA/backlog.md\""
   if fm_tasks_axi_backend_available "$CONFIG"; then
     case "$KIND" in
       scout)
         report_path="data/$ID/report.md"
-        done_cmd="tasks-axi done $ID --report $report_path"
+        done_cmd="tasks-axi done $ID $bl --report $report_path"
         ;;
       *)
         if [ "$MODE" = local-only ]; then
-          done_cmd="tasks-axi done $ID --note \"local main\""
+          done_cmd="tasks-axi done $ID $bl --note \"local main\""
         else
           pr=$PR_URL
           if [ -n "$pr" ]; then
-            done_cmd="tasks-axi done $ID --pr $pr"
+            done_cmd="tasks-axi done $ID $bl --pr $pr"
           else
-            done_cmd="tasks-axi done $ID --pr PR_URL"
+            done_cmd="tasks-axi done $ID $bl --pr PR_URL"
           fi
         fi
         ;;
     esac
-    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready $bl for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
   else
     printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
   fi

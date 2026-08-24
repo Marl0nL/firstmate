@@ -755,10 +755,14 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
   add_compatible_tasks_axi "$case_dir"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with compatible tasks-axi"
-  printf '%s\n' "$out" | grep -F 'tasks-axi done task-x1 --pr https://github.com/example/repo/pull/7' >/dev/null \
-    || fail "teardown did not prompt tasks-axi done: $out"
-  printf '%s\n' "$out" | grep -F 'tasks-axi ready' >/dev/null \
-    || fail "teardown did not prompt tasks-axi ready: $out"
+  # The prompted commands must name this home's backlog explicitly (AGENTS.md
+  # section 10), or a hand-run from a project cwd hits that clone's absent backlog.
+  printf '%s\n' "$out" | grep -F 'tasks-axi done task-x1 --file "' >/dev/null \
+    || fail "teardown did not name the home backlog with --file in the done prompt: $out"
+  printf '%s\n' "$out" | grep -F 'backlog.md" --pr https://github.com/example/repo/pull/7' >/dev/null \
+    || fail "teardown did not prompt tasks-axi done with the PR: $out"
+  printf '%s\n' "$out" | grep -F 'tasks-axi ready --file "' >/dev/null \
+    || fail "teardown did not prompt tasks-axi ready with an explicit backlog file: $out"
   printf '%s\n' "$out" | grep -F 'check date gates' >/dev/null \
     || fail "teardown did not preserve date-gate check: $out"
   printf '%s\n' "$out" | grep -F 'keep Done to the 10 most recent' >/dev/null \
