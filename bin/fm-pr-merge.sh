@@ -21,8 +21,10 @@
 # Merge method: defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. An explicit
 # caller method is never overridden.
-# Extra args must not include --repo or -R in any form, including a bundled
-# short-option cluster such as -dR, because the repo is parsed from the PR URL.
+# Extra args must not include --repo, -R in any form (including a bundled
+# short-option cluster such as -dR), or --hostname, because the repo and host
+# come only from the PR URL, which this script accepts only on github.com.
+# GH_HOST is pinned to github.com around the merge call for the same reason.
 #
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
@@ -67,14 +69,15 @@ reject_repo_overrides() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --repo|--repo=*)
-        echo "error: extra merge args must not override --repo parsed from PR URL (got: $arg)" >&2
+      --repo|--repo=*|--hostname|--hostname=*)
+        echo "error: extra merge args must not override --repo or host parsed from PR URL (got: $arg)" >&2
         return 1
         ;;
       --*) ;;
-      # A single-dash argument is a short-option cluster, which gh-axi expands
-      # one character at a time, so a bundled -dR carries --repo exactly as a
-      # bare -R does.
+      # A single-dash argument is a short-option cluster. gh-axi does not
+      # currently expand or forward one to gh for pr merge, but refusing any
+      # cluster carrying R rather than relying on that behavior keeps the
+      # guard correct if a future gh-axi (or a raw gh fallback) does expand it.
       -*R*)
         echo "error: extra merge args must not override --repo parsed from PR URL (got: $arg)" >&2
         return 1
@@ -95,4 +98,4 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+GH_HOST=github.com gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"

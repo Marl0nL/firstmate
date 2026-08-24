@@ -16,6 +16,8 @@
 #   (h) repo override args fail fast because the repo comes from the URL
 #   (i) a bundled short-option cluster carrying -R fails fast the same way,
 #       while a cluster carrying no repo override still reaches gh-axi
+#   (j) --hostname and --hostname=<value> fail fast because the host comes
+#       only from the PR URL, which this script accepts only on github.com
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -241,7 +243,7 @@ test_repo_override_args_refuse_before_recording() {
   set -e
 
   expect_code 1 "$rc" "repo-override: fm-pr-merge should refuse repo override flags"
-  assert_grep 'must not override --repo parsed from PR URL' "$case_dir/stderr" \
+  assert_grep 'must not override --repo or host parsed from PR URL' "$case_dir/stderr" \
     "repo-override: refusal did not explain the repo override"
   assert_no_grep 'pr=https://github.com/right/repo/pull/5' "$case_dir/state/task-x1.meta" \
     "repo-override: PR URL was recorded before rejecting repo override"
@@ -269,7 +271,7 @@ assert_bundled_repo_override_refused() {
   set -e
 
   expect_code 1 "$rc" "bundled-repo-override ($case_name): fm-pr-merge should refuse"
-  assert_grep 'must not override --repo parsed from PR URL' "$case_dir/stderr" \
+  assert_grep 'must not override --repo' "$case_dir/stderr" \
     "bundled-repo-override ($case_name): refusal did not explain the repo override"
   assert_no_grep 'pr=https://github.com/right/repo/pull/5' "$case_dir/state/task-x1.meta" \
     "bundled-repo-override ($case_name): PR URL was recorded before rejecting repo override"
@@ -285,6 +287,12 @@ test_bundled_repo_override_args_refuse_before_recording() {
   assert_bundled_repo_override_refused bundled-dR -dR wrong/repo
   assert_bundled_repo_override_refused bundled-xdR -xdR wrong/repo
   pass "fm-pr-merge refuses -R, -Rvalue, and bundled clusters like -dR/-xdR before recording state"
+}
+
+test_hostname_override_args_refuse_before_recording() {
+  assert_bundled_repo_override_refused hostname-space --hostname ghe.example
+  assert_bundled_repo_override_refused hostname-equals --hostname=ghe.example
+  pass "fm-pr-merge refuses --hostname and --hostname=<value> before recording state"
 }
 
 test_benign_bundled_flags_still_reach_forge() {
@@ -355,6 +363,7 @@ test_malformed_url_refuses_before_merge
 test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording
 test_bundled_repo_override_args_refuse_before_recording
+test_hostname_override_args_refuse_before_recording
 test_benign_bundled_flags_still_reach_forge
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
