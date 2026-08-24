@@ -99,6 +99,44 @@ last_status_line() {
   grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
 }
 
+# 0 if a status line's leading verb is the decision-closing resolve verb
+# (resolved: <how it was closed>). A pure read of the line's verb, so the
+# terminal-state scan below and any consumer can recognize a bookkeeping line
+# without hardcoding the verb literal. FM_CLASSIFY_RESOLVE_VERB overrides it.
+status_line_is_resolved() {  # <status-line>
+  local line=$1
+  [ -n "$line" ] || return 1
+  [ "$(status_line_verb "$line")" = "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" ]
+}
+
+# Return the last non-blank status line that carries a REAL STATE verb, scanning
+# backward past trailing `resolved:` bookkeeping lines (empty if the file is
+# missing/blank or holds only resolved: lines). This is the terminal-state input:
+# AGENTS.md section 11 tells a crew that OPENED a keyed decision or blocker to
+# durably CLOSE it with a `resolved:` line, so a crew that finished correctly ends
+# its log
+#     done: PR https://.../pull/NN
+#     resolved: <how the blocker cleared> [key=...]
+# A `resolved:` line records that a KEY closed, NOT that the TASK changed state, so
+# reading the raw last line (last_status_line) misreads that finished log as
+# non-terminal and false-wedges an idle-but-done pane. Skipping only resolved:
+# lines recovers the real state verb: `done:` then `resolved:` -> `done:` (terminal);
+# `working:` then `resolved:` -> `working:` (NOT terminal), because a crew can close a
+# blocker MID-TASK and keep working. This is deliberately verb-only, not the keyed
+# fold: it answers "what is the last real state verb", which is exactly the
+# terminal/stale question. Current-crew-state readers that must honor which key a
+# resolve CLOSED use the keyed fold (status_open_decisions) instead.
+last_state_status_line() {  # <status-file>
+  local f=$1 line keep=''
+  [ -e "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    status_line_is_resolved "$line" && continue
+    keep=$line
+  done < "$f"
+  printf '%s' "$keep"
+}
+
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
 # (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
 # callers that need legacy free-text matching use status_is_captain_relevant.
@@ -1229,6 +1267,37 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
+# 0 (absorb: parked-awaiting-merge) iff crew <id> is RIGHT NOW a finished crew
+# idling on its open PR: its authoritative reconciled current state is `done`
+# (bin/fm-crew-state.sh, which folds the no-mistakes run-step, the pane
+# busy-signature, and the status log's last REAL state verb - trailing `resolved:`
+# bookkeeping skipped via last_state_status_line - into one verdict) AND an armed
+# merge-monitor (state/<id>.check.sh) is present. Such a crew legitimately sits idle
+# until its PR merges; its merge-check, not a stale-pane poll, is the live signal,
+# so the stale seam ABSORBS it instead of wedge-escalating each churny idle-pane
+# hash (a redraw-jittered idle pane is not byte-stable, so its captured hash keeps
+# changing and would otherwise re-surface as a fresh possible-wedge every poll).
+#
+# Sibling of crew_is_provably_working, pinned to the SAME escalation seam and re-read
+# from CURRENT state on every evaluation - NEVER a latched "was done once" flag. The
+# instant the crew is re-activated the predicate fails and full stale sensitivity
+# resumes with no manual re-arm, because fm-crew-state reports `working` (not `done`)
+# whenever the crew is put back to work (busy pane, a steer moving the latest verb off
+# done, or a re-triggered no-mistakes run). Fails CLOSED toward supervision: a missing
+# armed check, an unreadable verdict, or any non-`done` state all return non-parked,
+# so the wake surfaces exactly as today. The check.sh test is FIRST so a crew with no
+# armed merge-monitor costs no fm-crew-state.sh read - the same cheap-gate discipline
+# crew_absorb_class relies on. FM_CREW_STATE_BIN lets tests stub the verdict.
+crew_is_parked_awaiting_merge() {  # <id> <state-dir>
+  local id=$1 state=$2 line st
+  [ -n "$id" ] && [ -n "$state" ] || return 1
+  [ -f "$state/$id.check.sh" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  st=${line#state: }; st=${st%% *}
+  [ "$st" = "done" ]
+}
+
 # Directories excluded from the worktree write probe below, and the depth it walks.
 # The excluded set is everything a supervisor read or a package manager can write
 # without the crew doing any work - .git first, so firstmate's own read-only git
@@ -1361,8 +1430,11 @@ signal_crew_provably_working() {  # <file> ...
 # "non-terminal"; the always-on watcher then applies crew_is_provably_working,
 # while the away-mode daemon applies its persistence recheck.
 stale_is_terminal() {  # <window> <state>
+  # Read past trailing `resolved:` bookkeeping (last_state_status_line) to the real
+  # state verb, so a crew that finished and then durably closed its blocker key
+  # (done: ... / resolved: ...) is not misread as non-terminal and false-wedged.
   local win=$1 state=$2 last
-  last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
+  last=$(last_state_status_line "$state/$(window_to_task "$win" "$state").status")
   [ -n "$last" ] && status_is_captain_relevant "$last"
 }
 

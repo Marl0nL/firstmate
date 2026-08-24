@@ -205,6 +205,60 @@ test_stale_terminal_escalates() {
   pass "stale + terminal status escalates immediately"
 }
 
+# A crew PARKED AWAITING MERGE - reconciled done + an armed merge-monitor
+# (state/<id>.check.sh) - is absorbed by the away-mode stale path (self-handle), not
+# re-escalated as a terminal stale on every churny idle-pane hash. Same shared
+# predicate (crew_is_parked_awaiting_merge) the always-on watcher uses, so both modes
+# agree. handle_wake's self branch drops any wedge marker for this captain-relevant
+# crew and never escalates on the wake, and it records NO seen marker, so the done:
+# PR-ready still reaches the digest via the catch-all scan.
+test_stale_parked_awaiting_merge_self_handles() {
+  local dir state fakebin out key
+  dir=$(make_supercase stale-parked-merge)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  printf 'done: PR https://example.test/pr/13\n' > "$state/parked-w11.status"
+  : > "$state/parked-w11.check.sh"   # armed merge-monitor
+  export FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR https://example.test/pr/13'
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    classify_stale "sess:fm-parked-w11" "$state")
+  case "$out" in self\|parked*) ;; *) fail "parked-awaiting-merge stale did not self-handle: $out" ;; esac
+  key=$(printf '%s' "$(window_to_task "sess:fm-parked-w11" "$state")" | tr ':/.' '___')
+  date +%s > "$state/.subsuper-stale-$key"   # a leftover wedge marker must be dropped
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    handle_wake "stale: sess:fm-parked-w11" "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "handle_wake left a wedge marker for a parked-awaiting-merge crew"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a parked-awaiting-merge crew escalated on the wake itself"
+  [ ! -e "$state/.subsuper-seen-status-$key" ] || fail "parked branch recorded a seen marker (would suppress the PR-ready digest)"
+  unset FM_FAKE_CREW_STATE
+  pass "parked-awaiting-merge stale self-handles in the away daemon: no wedge marker, no escalation, seen marker left for the scan"
+}
+
+# The reactivation guard also holds in the daemon: an armed merge-monitor is STILL
+# present but reconciled state moved off done (verb working: after a steer), so the
+# parked exclusion lifts and the terminal/transient stale path behaves at full
+# sensitivity. A crew whose verb is working: is non-terminal, so it self-handles and
+# records a wedge persistence marker exactly as any transient stale would.
+test_stale_parked_reactivated_off_done_full_sensitivity() {
+  local dir state fakebin out key
+  dir=$(make_supercase stale-parked-react)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  printf 'done: PR https://example.test/pr/14\nworking: enhancing the PR per steer\n' > "$state/react-w12.status"
+  : > "$state/react-w12.check.sh"   # STILL armed
+  export FM_FAKE_CREW_STATE='state: working · source: status-log · working: enhancing the PR per steer'
+  out=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    classify_stale "sess:fm-react-w12" "$state")
+  case "$out" in self\|parked*) fail "a re-activated (verb off done) crew was still classed parked: $out" ;; esac
+  case "$out" in self\|*) ;; *) fail "a re-activated non-terminal stale did not self-handle: $out" ;; esac
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    handle_wake "stale: sess:fm-react-w12" "$state"
+  key=$(printf '%s' "$(window_to_task "sess:fm-react-w12" "$state")" | tr ':/.' '___')
+  [ -e "$state/.subsuper-stale-$key" ] || fail "a re-activated non-terminal crew did not record a wedge persistence marker"
+  unset FM_FAKE_CREW_STATE
+  pass "a re-activated crew (verb off done) with an armed check is not parked in the daemon: full wedge sensitivity resumes"
+}
+
 # A DECLARED external-wait pause (paused:) is neither a wedge nor a terminal
 # escalation: classify_stale returns the `pause` action so handle_wake records a
 # pause marker (long re-surface cadence) rather than a wedge stale marker.
@@ -1933,6 +1987,8 @@ test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates
+test_stale_parked_awaiting_merge_self_handles
+test_stale_parked_reactivated_off_done_full_sensitivity
 test_stale_paused_classifies_pause
 test_stale_captain_held_classifies_pause
 test_handle_wake_paused_records_pause_marker
