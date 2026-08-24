@@ -21,8 +21,8 @@
 # Merge method: defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. An explicit
 # caller method is never overridden.
-# Extra args must not include --repo or -R because the repo is parsed from the
-# PR URL.
+# Extra args must not include --repo or -R in any form, including a bundled
+# short-option cluster such as -dR, because the repo is parsed from the PR URL.
 #
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
@@ -67,7 +67,15 @@ reject_repo_overrides() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --repo|--repo=*|-R|-R?*)
+      --repo|--repo=*)
+        echo "error: extra merge args must not override --repo parsed from PR URL (got: $arg)" >&2
+        return 1
+        ;;
+      --*) ;;
+      # A single-dash argument is a short-option cluster, which gh-axi expands
+      # one character at a time, so a bundled -dR carries --repo exactly as a
+      # bare -R does.
+      -*R*)
         echo "error: extra merge args must not override --repo parsed from PR URL (got: $arg)" >&2
         return 1
         ;;
