@@ -18,7 +18,8 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "CROWSNEST: on ..." or "CROWSNEST: off ...".
 #          When a RUNNING local secondmate worktree is fast-forwarded to
 #          firstmate's own current default-branch commit, that update is a
 #          purely local fast-forward and never an origin fetch. Remote routes
@@ -79,16 +80,17 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
-#          printing every read-only detect line
+#          secondmate_handoff_resume, x_mode_setup, crowsnest_setup, fleet_sync)
+#          while still printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
 #          PR-check artifacts, secondmate homes, pending handoff outboxes,
-#          X-mode artifacts, project clones, or repair instructions.
+#          X-mode artifacts, Crowsnest relay shims, project clones, or repair
+#          instructions.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
@@ -148,6 +150,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-crowsnest-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-crowsnest-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
@@ -987,6 +991,39 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+# Crowsnest (opt-in): when this home's config/crowsnest.env sets a truthy
+# CROWSNEST_ENABLED, wire the chat relay poll into the EXISTING authenticated
+# watcher check mechanism without touching fm-watch.sh, mirroring x_mode_setup.
+# It arms one idempotent, gitignored artifact - state/chat-watch.check.sh, a
+# check shim that execs bin/fm-crowsnest-poll.sh - and registers its trusted
+# bytes through bin/fm-check-register.sh so the watcher will run it.
+# On opt-out (absent or falsey) it removes the shim and its trust record so the
+# instance reverts to no-poll behavior. Absent config AND no leftover shim is a
+# complete no-op, so a non-Crowsnest user sees zero change. It never registers
+# the agent or starts the backend - those are explicit operator actions via
+# bin/fm-crowsnest.sh, since both reach outside this home. It never touches the
+# watcher itself.
+crowsnest_setup() {
+  local shim
+  shim="$STATE/chat-watch.check.sh"
+  fmc_load_config
+  if ! fmc_enabled; then
+    if [ -e "$shim" ]; then
+      if fmc_unwire_shim; then
+        echo "CROWSNEST: off - removed chat relay poll shim"
+      else
+        echo "CROWSNEST: off - failed to remove chat relay poll shim"
+      fi
+    fi
+    return 0
+  fi
+  if fmc_wire_shim; then
+    echo "CROWSNEST: on - chat relay poll armed via state/chat-watch.check.sh"
+  else
+    echo "CROWSNEST: on - failed to arm chat relay poll shim"
+  fi
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -1235,6 +1272,8 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup
+  # crowsnest_setup writes only a local Crowsnest relay shim and never leaves the machine.
+  local_phase && crowsnest_setup
   if network_phase && network_sweep_authorized 'project clone refresh'; then
     __fm_timing_stamp=$(fm_timing_now_ms)
     fleet_sync
