@@ -8,7 +8,7 @@
 # of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
-#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects} [--wake-resident]
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -20,6 +20,11 @@
 #   firstmate repo itself (its home is a firstmate worktree, its crews take pooled
 #   worktrees of the same repo). It is mutually exclusive with a project list, and
 #   omitting both still fails loudly so an accidental omission is never silent.
+#   --wake-resident writes the WAKE-RESIDENT residency clause instead of the
+#   always-on one: the secondmate is dormant between conversations, a message
+#   raises it, and standing it down is the main firstmate's action, never its own.
+#   docs/wake-resident.md owns that mechanism; the flag only writes the charter
+#   text the agent needs so a fresh start reads as normal rather than lost context.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
@@ -107,6 +112,7 @@ fi
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+WAKE_RESIDENT=0
 MODE=
 MODE_SET=0
 POS=()
@@ -128,6 +134,7 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --wake-resident) WAKE_RESIDENT=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
@@ -166,6 +173,11 @@ fi
 
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
+  exit 1
+fi
+
+if [ "$WAKE_RESIDENT" -eq 1 ] && [ "$KIND" != secondmate ]; then
+  echo "error: --wake-resident applies only to --secondmate charters" >&2
   exit 1
 fi
 
@@ -215,6 +227,27 @@ if [ "$NO_PROJECTS" -eq 1 ]; then
 else
   PROJECT_CLONES_BODY=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
   PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."
+fi
+# The residency clause. PERSISTENT and WAKE-RESIDENT are different axes: the
+# default clause below runs them together because an always-on secondmate is both,
+# and that conflation is exactly what a wake-resident charter has to undo. Its
+# identity and state are as permanent as any other secondmate's; only its process
+# is not. docs/wake-resident.md owns the mechanism this text describes.
+if [ "$WAKE_RESIDENT" -eq 1 ]; then
+  RESIDENCY_BODY="You are PERSISTENT but WAKE-RESIDENT, and those are not in conflict - the standard secondmate wording assumes always-on, and you are the exception.
+Persistent means your IDENTITY and STATE are permanent: your home, charter, backlog, status and durable records survive everything, and you are never retired without an explicit captain decision.
+Wake-resident means your PROCESS is not permanent: a message wakes you, and you exit after the idle window.
+An exit is not a teardown and loses nothing.
+So: do not exit merely because your queue emptied this minute, but DO exit on the idle window, and treat waking with no conversational memory as normal rather than as something gone wrong.
+That exit is performed for you through the guarded stand-down path, which refuses while you have work in flight or an unanswered message; do not build a second timer of your own.
+On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home.
+While you are up, keep one live supervision cycle even with no crew work of your own, so a new message reaches your turn through this home's own inbox check.
+An empty queue is a healthy resting state, not a cue to invent work: never spawn a survey, audit, or any self-directed \"find work\" task on your own initiative."
+else
+  RESIDENCY_BODY="You are persistent by default. Do not exit just because your queue is empty.
+On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home.
+When you have no assigned or in-flight work after that reconciliation, go idle and wait silently for the main firstmate to route you a task.
+An empty queue is a healthy resting state, not a cue to invent work: never spawn a survey, audit, or any self-directed \"find work\" task on your own initiative."
 fi
 cat > "$BRIEF" <<EOF
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
@@ -270,10 +303,7 @@ The main firstmate's answer normally writes that closing line at answer time; wh
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
 # Definition of done
-You are persistent by default. Do not exit just because your queue is empty.
-On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home.
-When you have no assigned or in-flight work after that reconciliation, go idle and wait silently for the main firstmate to route you a task.
-An empty queue is a healthy resting state, not a cue to invent work: never spawn a survey, audit, or any self-directed "find work" task on your own initiative.
+$RESIDENCY_BODY
 If this charter cannot be carried out, append \`blocked: {why}\` or \`failed: {why}\` to the main status file and stop.
 EOF
 if [ "$SECONDMATE_CHARTER" = "{TASK}" ]; then

@@ -60,3 +60,5 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Inspect the reason, keep the pending marker under `state/.secondmate-nudge-pending/` intact, and rerun session start after the endpoint or metadata issue is fixed so bootstrap can retry the exact same marked send on the same local or remote route.
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local Relay poll artifacts (`docs/configuration.md` "Relay (.env)"); the emitted line still carries Relay's former `X mode` wording.
   Only when a running watcher needs the cadence transition applied immediately, restart the home-scoped watcher through the emitted harness supervision protocol; bootstrap deliberately never restarts the watcher itself.
+- `WAKE_RESIDENT: <what could not be wired>` - the wake-resident lifecycle shim could not be written or registered, so a message can no longer raise a dormant secondmate and that domain has effectively gone unreachable rather than merely idle.
+  Fix the named path, rerun `bin/fm-wake-resident.sh sync`, and confirm with `bin/fm-wake-resident.sh status`; `docs/wake-resident.md` owns the mechanism.

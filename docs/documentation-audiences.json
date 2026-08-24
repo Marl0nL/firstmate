@@ -265,6 +265,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/wake-resident.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/usage-monitor-cutover.md",
       "audience": "operator-current"
     },

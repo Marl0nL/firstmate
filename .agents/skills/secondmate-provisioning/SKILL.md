@@ -2,8 +2,8 @@
 name: secondmate-provisioning
 description: >-
   Agent-only reference for persistent secondmate setup and retirement.
-  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, or when editing data/secondmates.md.
-  Covers local leases, whole-home remote routes, transactional seeding, record intake for an existing or inherited domain, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, and teardown safety.
+  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, when raising or standing down a wake-resident secondmate, or when editing data/secondmates.md.
+  Covers local leases, whole-home remote routes, transactional seeding, record intake for an existing or inherited domain, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, wake-residency, and teardown safety.
 user-invocable: false
 metadata:
   internal: true
@@ -11,7 +11,7 @@ metadata:
 
 # secondmate-provisioning
 
-Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
+Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, before raising or standing down a wake-resident one, and before editing `data/secondmates.md`.
 
 Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
 
@@ -228,6 +228,43 @@ The main firstmate reconciles only direct reports.
 Each secondmate is a firstmate in its own home, so it runs recovery on startup and reconciles its own crewmates.
 A secondmate's recovery reconciles only work that is already its own and then idles.
 It never initiates a survey or audit during recovery.
+
+## Wake-residency
+
+Persistent and wake-resident are DIFFERENT AXES, and conflating them is how a sleeping agent gets destroyed.
+Persistent means the IDENTITY and STATE are permanent: home, seed marker, charter, backlog, status log, the metadata carrying the worktree lease, and the registry route.
+Wake-resident means only the PROCESS is not permanent: a message in its chat inbox raises it, and an idle window exits it.
+A wake-resident secondmate is persistent on the first axis exactly as much as any other secondmate, so an empty queue is still not a reason to retire it, and an exit is not a teardown and loses nothing.
+`docs/wake-resident.md` owns the mechanism, the config format, the refusal table, the checked persistence invariant, and the race analysis; this section owns only what you do about it.
+
+Opting a secondmate in, after its home is seeded and registered:
+
+```sh
+bin/fm-wake-resident.sh enable <id> [--idle-secs <n>] [--inbox <abs-dir>]
+bin/fm-wake-resident.sh status
+```
+
+Its charter must also carry the wake-resident residency clause, or the agent will read every fresh start as lost context and may sit waiting for work that is already answered.
+`bin/fm-brief.sh <id> --secondmate --wake-resident ...` scaffolds that clause for a new home.
+For an already-seeded home, replace the charter's `# Definition of done` section with the same clause rather than re-seeding, and leave every other section as it is.
+
+On a `check:` wake reporting a wake-resident line, act on your own turn and never spawn a parallel agent to service it:
+
+- `... pending message(s), dormant - raise it` - run `bin/fm-wake-resident.sh raise <id>`.
+  It is the ordinary guarded `bin/fm-spawn.sh <id> --secondmate` behind a single-claim guard, so two wakes cannot produce two agents.
+  A refusal saying a raise is already in flight is correct behaviour; do not retry past it.
+- `... unread <s>s while resident - deliver it` - the secondmate is up but has not picked the message up, which usually means its own supervision cycle is down.
+  Steer it with one short `bin/fm-send.sh <id> ...` line, then confirm it drains the inbox.
+- `... quiet <m>m, nothing in flight - stand it down` - run `bin/fm-wake-resident.sh standdown <id>`.
+
+Never substitute `bin/fm-teardown.sh` for a stand-down.
+Teardown retires the secondmate permanently: it removes the home, releases the treehouse lease, drops the meta, and unregisters the route.
+A stand-down only exits the agent, and the home, lease, backlog and status all survive so the next message resumes the same persistent identity.
+A stand-down refusal for work in flight or an unanswered message is a stop-and-leave-it-up result, never an obstacle to force past; `--force` waives only the quiet-time and busy-pane gates and never those two.
+
+Do not treat a dormant wake-resident secondmate as a dead direct report.
+The session-start liveness sweep deliberately exempts it, so its "endpoint alive as a bare shell" shape is healthy, not a recovery trigger.
+Reach for the recovery path above only when it is dormant *and* has pending mail that a raise cannot clear.
 
 ## Retirement and teardown
 

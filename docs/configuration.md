@@ -201,6 +201,14 @@ This does not relax protection for any other untracked file.
 An existing linked-worktree home that predates this rule advances through its marker-only state during its next bootstrap or spawn local sync, after which Git ignores the marker normally.
 A standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate`'s origin refresh instead.
 
+## Wake-resident secondmates (config/wake-resident.conf)
+
+Most secondmates are always-resident.
+A wake-resident one is dormant between conversations: a message in its chat inbox raises it through the ordinary `bin/fm-spawn.sh <name> --secondmate` launch, and it stands down again after a quiet stretch, with its home, treehouse lease, backlog, status and metadata all preserved.
+The lifecycle is off unless this home's gitignored `config/wake-resident.conf` holds at least one record, and a home with no records behaves exactly as it does today.
+Opt one in with `bin/fm-wake-resident.sh enable <name>`; the locked session-start bootstrap step then converges the two watcher check shims each session (the `WAKE_RESIDENT:` digest line reports only a shim it could not wire).
+The record format, the dormancy record, the refusal table, the race analysis, and the consumed inbox contract live in [docs/wake-resident.md](wake-resident.md); `bin/fm-wake-resident-lib.sh`'s header owns the exact fields.
+
 ## FM_HOME
 
 `FM_HOME` selects the operational home for one firstmate instance.

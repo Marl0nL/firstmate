@@ -19,7 +19,8 @@
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
-#                 "CROWSNEST: on ..." or "CROWSNEST: off ...".
+#                 "CROWSNEST: on ..." or "CROWSNEST: off ...",
+#                 "WAKE_RESIDENT: <what could not be wired>".
 #          When a RUNNING local secondmate worktree is fast-forwarded to
 #          firstmate's own current default-branch commit, that update is a
 #          purely local fast-forward and never an origin fetch. Remote routes
@@ -152,6 +153,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-crowsnest-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-crowsnest-lib.sh"
+# shellcheck source=bin/fm-wake-resident-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-wake-resident-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
@@ -598,6 +601,16 @@ secondmate_liveness_sweep() {
     # Identity for the timing record is read here, in the loop, so the per-meta
     # body below keeps its single-exit-per-outcome shape.
     id=$(basename "$meta" .meta)
+    # A WAKE-RESIDENT secondmate is exempt, and this exemption is load-bearing.
+    # Its dormant state is EXACTLY the "dead agent behind a live shell" shape this
+    # sweep exists to repair, so without this line every session start would
+    # resurrect an agent that is deliberately asleep - defeating the whole
+    # lifecycle and burning quota on an unasked-for supervisor. Raising one is
+    # driven by an inbox message through bin/fm-wake-resident.sh (docs/wake-resident.md),
+    # never by liveness alone.
+    if fm_wr_load "$CONFIG" "$id"; then
+      continue
+    fi
     remote_host=$(fm_meta_get "$meta" remote_host)
     label=$id
     [ -z "$remote_host" ] || label="$id@$remote_host"
@@ -1024,6 +1037,21 @@ crowsnest_setup() {
   fi
 }
 
+# Wake-resident secondmates (opt-in): converge the lifecycle check shims with
+# config/wake-resident.conf, mirroring crowsnest_setup. Completely silent when no
+# home opts in and when everything is already wired; prints a WAKE_RESIDENT: line
+# only for a shim it could not write or register, which is actionable because an
+# unwired shim means a message can no longer raise a dormant secondmate.
+# bin/fm-wake-resident.sh owns the convergence itself.
+wake_resident_setup() {
+  # Never opted in and nothing left over: a complete no-op, not even a fork.
+  [ -f "$CONFIG/wake-resident.conf" ] || [ -e "$STATE/wake-resident.check.sh" ] || return 0
+  # SCRIPT_DIR, not FM_ROOT/bin: the converger is this script's own sibling, and
+  # FM_ROOT can legitimately be an operational home that holds no bin/.
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-wake-resident.sh" sync || true
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -1274,6 +1302,8 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   local_phase && x_mode_setup
   # crowsnest_setup writes only a local Crowsnest relay shim and never leaves the machine.
   local_phase && crowsnest_setup
+  # wake_resident_setup writes only local wake-resident check shims and never leaves the machine.
+  local_phase && wake_resident_setup
   if network_phase && network_sweep_authorized 'project clone refresh'; then
     __fm_timing_stamp=$(fm_timing_now_ms)
     fleet_sync
