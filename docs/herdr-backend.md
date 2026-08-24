@@ -271,6 +271,12 @@ Unlike tmux process-name inspection, native registration can classify Pi without
 The session-start sweep uses this probe.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
 
+The classifier above reads the metadata surface (`pane get`, `agent get`), and that surface can outlive the processes it describes: after a machine reboot the server replays its persisted session layout wholesale, so `agent list`, `pane get`, and `agent get` all answer in full for agents that are not running, including an `agent_status` of `idle`, which classifies `live` for a pane with no live process.
+`pane process-info` is the only call in this adapter that reaches a real OS process rather than the persisted layout.
+`fm_backend_herdr_pane_process_state` (is a real process behind the pane) and `fm_backend_herdr_pane_process_cwds` (its kernel-reported working directory) are the reality-touching accessors, and any caller that must not be fooled by a replayed record needs both a metadata verdict and a process verdict.
+`bin/fm-autostart.sh` is the first such caller: its "a firstmate is already running" guard requires a matching entry to be confirmed by `pane process-info`, never `agent list` alone, so a post-reboot ghost record cannot make the boot unit skip starting the real one.
+The dated reboot-ghost evidence, and that a live `agent start` claude reported `agent_status: "unknown"` on Herdr 0.7.4, are recorded under [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr); re-verifying this against the current Herdr floor is a Phase 6 cutover live-smoke item.
+
 ## Push events and polling fallback
 
 Protocol 16 can subscribe to `pane.agent_status_changed` over one bounded Unix-socket reader.

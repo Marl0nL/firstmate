@@ -245,6 +245,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/claude-resume-shim.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/cmux-backend.md",
       "audience": "operator-current"
     },
@@ -275,6 +279,10 @@
     {
       "path": "docs/examples/crew-dispatch.json",
       "audience": "operator-example"
+    },
+    {
+      "path": "docs/firstmate-autostart.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/examples/crowsnest.env",
