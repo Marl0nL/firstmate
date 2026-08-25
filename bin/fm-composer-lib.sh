@@ -584,6 +584,44 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
   return 1
 }
 
+# _fm_composer_titled_separator_row: a horizontal `─` rule that carries an
+# embedded TITLE, the titled analogue of the solid separator above and of the
+# grok titled-bottom-border tolerance (_fm_composer_titled_bottom_ok). Claude
+# draws its composer's TOP rule with the session title inlaid in the rule, e.g.
+# `──────────── Personal-Firstmate ─` (verified live, claude 2.1.246 on herdr
+# 0.8.2, a captain pane with a custom session title). Because that row is not
+# nothing-but-`─`, the solid-separator test above misses it, leaving the plain
+# BOTTOM rule of the very same composer looking like a lone separator below the
+# `❯` - which the cursorless selector then reads as a forming pi composer and
+# defers on (`unknown`). A plain-ruled composer (both rules solid) forms a pair
+# and reads `empty`; a titled top rule must reach the same verdict.
+# The proof is deliberately strict so ordinary prose cannot pass: the trimmed
+# row must open and close with `─`, must NOT be all-`─` (that is the solid rule,
+# owned above), must carry a substantial `─` run (the same 8-column floor), and
+# its non-`─` residue must be an ordinary ASCII title - map `─` and every
+# ASCII-printable to a space and require only whitespace to remain, so any other
+# box-drawing/rule glyph or unusual residue fails the proof. This keeps the
+# widened recognition to the vendor-drawn titled rule and no further.
+_fm_composer_titled_separator_row() {  # <trimmed-row>
+  local row=$1 residue
+  [ -n "$row" ] || return 1
+  case "$row" in
+    '─'*'─') ;;
+    *) return 1 ;;
+  esac
+  [ -n "${row//─/}" ] || return 1
+  case "$row" in
+    *────────*) ;;
+    *) return 1 ;;
+  esac
+  residue=${row//─/ }
+  residue=$(printf '%s' "$residue" | LC_ALL=C sed 's/[!-~]/ /g')
+  case "$residue" in
+    *[![:space:]]*) return 1 ;;
+  esac
+  return 0
+}
+
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
 _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
@@ -630,10 +668,15 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
       '┗'*'┛') kind=bottom; family=heavy ;;
       '+'*'+') kind=ascii; family=ascii ;;
     esac
-    # Pi separator rows: a solid `─` rule at least 8 columns wide. A separator
-    # closes the preceding candidate and immediately opens the next, so an
-    # earlier transcript rule can never outrank the live bottom composer pair.
-    if _fm_composer_pi_separator_row "$trimmed"; then
+    # Pi separator rows: a solid `─` rule at least 8 columns wide, OR a titled
+    # `─` rule (claude's composer top rule carries the session title). Both bound
+    # a composer region identically here; the titled variant is what lets a
+    # claude `❯` sitting between a titled top rule and a plain bottom rule form a
+    # pair and read empty instead of deferring on the lone bottom rule. A
+    # separator closes the preceding candidate and immediately opens the next, so
+    # an earlier transcript rule can never outrank the live bottom composer pair.
+    if _fm_composer_pi_separator_row "$trimmed" \
+       || _fm_composer_titled_separator_row "$trimmed"; then
       FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
       if [ "$pi_open" -ge 0 ]; then
         FM_COMPOSER_SCAN_PI_PAIR_FOUND=1

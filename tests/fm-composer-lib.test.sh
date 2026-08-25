@@ -188,6 +188,33 @@ test_matrix_claude_bare_nbsp_row() {
   pass "matrix: claude's ❯+NBSP row reads empty on every profile in both locales (#1988)"
 }
 
+test_matrix_claude_titled_top_rule_captain_pane() {
+  # The away-mode inject wedge (task afk-daemon-inject-wedge-claude-pane,
+  # captured live from the captain's primary Claude pane, claude 2.1.246 on
+  # herdr 0.8.2 / protocol 20): a Claude session with a custom session title
+  # inlays that title in the composer's TOP rule
+  # (`──────────── Personal-Firstmate ─`). That row is no longer nothing-but-`─`,
+  # so the solid-separator test misses it, leaving the plain BOTTOM rule looking
+  # like a lone separator below the `❯`. The cursorless selector read that as a
+  # forming pi composer and deferred - the genuinely idle composer classified
+  # `unknown`, and the away-mode daemon deferred every escalation for ~8h. The
+  # titled-separator recognition pairs the rules so the `❯` reads empty, exactly
+  # as the all-plain-rules idle pane above already does.
+  local screen typed
+  screen=$'transcript line\n  ✔ Update installed · Restart to update\n───────────────────────────────── Personal-Firstmate ─\n❯'"$NBSP"$'\n──────────────────────────────────────────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents'
+  assert_screen "claude captain-pane idle on herdr" empty "$CAPS_STYLED" "$screen" '' probe-absent
+  assert_screen "claude captain-pane idle on tmux" empty "$CAPS_TMUX" "$screen" 3 probe-absent
+  assert_screen "claude captain-pane idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "claude captain-pane idle on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  # A title in the top rule must not fabricate empty over real typed input:
+  # fail-closed direction preserved.
+  typed=$'───────────────────────────────── Personal-Firstmate ─\n❯ fix the login bug\n──────────────────────────────────────────────────────'
+  assert_screen "claude captain-pane typed on herdr" pending "$CAPS_STYLED" "$typed" '' probe-absent
+  assert_screen "claude captain-pane typed on tmux" pending "$CAPS_TMUX" "$typed" 1 probe-absent
+  assert_screen "claude captain-pane typed on plain backends" unknown "$CAPS_PLAIN" "$typed"
+  pass "matrix: claude's titled composer top rule (captain pane) reads empty idle, pending when typed"
+}
+
 test_matrix_codex_dim_hint_row() {
   # Real idle codex: bold `›`, reset, then an SGR-2 dim hint. Styled captures
   # strip the ghost and prove empty; plain captures must defer as unknown -
@@ -613,6 +640,7 @@ test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
+test_matrix_claude_titled_top_rule_captain_pane
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
