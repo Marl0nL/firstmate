@@ -271,6 +271,84 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### Agent recognition recalibration (2026-08-25, herdr 0.8.2 / protocol 20)
+
+Measured on the captain's host (Fedora) against herdr 0.8.2 / protocol 20 and Claude Code 2.1.245, in isolated `fm-lab-` sessions through `bin/fm-herdr-lab.sh`, default-session tripwire clean.
+This re-runs the design report's registration counterfactuals (`data/design-herdr-interface/report.md`, appendix) and the four-way liveness acceptance table on the re-baselined trunk after the 0.7.5 -> 0.8.2 upgrade.
+The installed claude integration is v7 while herdr 0.8.2 expects v8 (`herdr integration status` reports `claude: outdated (v7 < v8)`); the v7 hook reports pane identity (`pane.report_agent_session`) only, never state.
+Refresh this section with:
+
+```sh
+FM_HERDR_RECAL_LIVE=1 tests/fm-herdr-recalibration-live-e2e.test.sh
+```
+
+The registration defect reproduces exactly as the report described on 0.7.5: a live Claude crew registers no agent record, so `agent list` is empty and `agent get` answers `agent_not_found`, whether or not the integration claimed the pane.
+
+```text
+# live pane-typed Claude crew (fm-spawn style, HERDR_ENV=1 -> integration-claimed)
+agent_status         = unknown
+agent_session        = {"agent":"claude","kind":"id","source":"herdr:claude","value":"..."}
+agent get <pane>     -> {"error":{"code":"agent_not_found"}}
+agent list           -> {"agents":[]}
+fm_backend_herdr_pane_agent_state -> no-agent
+fm_backend_herdr_agent_state      -> dead        # a LIVE crew reads dead
+
+# unclaimed Claude (env HERDR_ENV=0 claude ...): the SessionStart hook is suppressed
+agent_session        = null
+agent get <pane>     -> {"error":{"code":"agent_not_found"}}   # Claude is not auto-registered even unclaimed
+fm_backend_herdr_pane_agent_state -> no-agent -> agent_state dead
+```
+
+`pane report-agent --state` remains the one working state primitive, and only on an UNCLAIMED pane; it is silently ignored on an integration-claimed Claude pane.
+
+```text
+# unclaimed pane / bare shell + report-agent
+report-agent --state working -> agent_status working ; pane_agent_state live ; agent list shows it
++6s (override check)          -> agent_status working            # herdr does not revert it
+report-agent --state blocked -> agent_status blocked ; pane_agent_state live
+
+# integration-claimed Claude pane + report-agent (source firstmate AND herdr:claude, fresh --seq)
+report-agent --state working -> agent_status unknown ; pane_agent_state no-agent   # ignored
+
+# native start path
+agent start probe --kind claude --pane <P> -- --dangerously-skip-permissions
+  -> {"error":{"code":"timeout","message":"timed out waiting for agent startup"}}   # pane left no-agent
+```
+
+The metadata classifier alone cannot separate a live Claude crew from a genuine bare-shell husk - both read `no-agent` / recovery `dead`.
+The reality-touching process probe still separates them, which is the signal a fix must compose back in:
+
+```text
+# live claimed Claude pane                     # genuine bare shell
+pane_agent_state       = no-agent              pane_agent_state       = no-agent
+agent_state (recovery) = dead                  agent_state (recovery) = dead
+pane_process_state     = live                  pane_process_state     = live
+foreground process     = /home/.../claude/versions/2.1.245   foreground process = bash
+```
+
+Four-way liveness acceptance table, herdr 0.8.2 / protocol 20 (verdict of `fm_backend_herdr_agent_state`, which routes `fm_backend_herdr_pane_agent_state` through `dead->missing`, `no-agent->dead`, `live->alive`, else `unreadable`):
+
+| Pane shape | `pane get` | `agent get` | process fg | `pane_agent_state` | `agent_state` | Verdict correct? |
+| --- | --- | --- | --- | --- | --- | --- |
+| Live claimed Claude crew (fm-spawn) | present, `agent_session` set | `agent_not_found` | claude binary | `no-agent` | `dead` | NO - a live crew reads dead |
+| Live unclaimed Claude (`HERDR_ENV=0`) | present, `agent_session` null | `agent_not_found` | claude binary | `no-agent` | `dead` | NO - a live crew reads dead |
+| Genuine bare-shell husk | present, `agent_session` null | `agent_not_found` | shell | `no-agent` | `dead` | yes - reclaimable |
+| `report-agent`-registered pane | present | record (working/idle/blocked) | any | `live` | `alive` | yes |
+| Structurally gone pane | `pane_not_found` | - | - | `dead` | `missing` | yes |
+| `agent start --kind claude` (timed out) | present | `agent_not_found` | claude binary | `no-agent` | `dead` | NO if the launched Claude is live |
+
+The three `NO` rows are the false-negative: because the trunk classifier keys `live` solely on an `agent get` record - which a Claude crew never gets - every genuinely live Claude crew reads `dead`/`missing`.
+That is what makes `bin/fm-spawn.sh`'s start-confirmation report "bare shell with no agent", `bin/fm-control.sh` exit-verification report `already-stopped`, and the session-start liveness sweep treat healthy supervisors as respawn candidates.
+The composition that separated these rows on the fork (`agent_session`-aware classification plus the `pane_process_state` reality probe, local #22) is absent on the re-baselined trunk; the `pane_process_state` and `pane_process_cwds` accessors still exist and still work, so a fix can compose them back in without new machinery.
+
+This 0.8.2 result differs from the recorded 0.8.0 "Native state" row above, where live Claude Code 2.1.236 registered `agent_status=idle`.
+The likely cause is the v7-vs-v8 integration mismatch: the same v7 `report_agent_session` that populated an idle record on 0.8.0 leaves the pane claimed but registry-less on 0.8.2.
+Installing the v8 integration is a global change to the captain's personal claude config, outside this recalibration's scope, so whether v8 restores a registry record is unmeasured; the adapter-side process-probe composition fixes the false-negative regardless of the integration version and needs no global-config change.
+
+The detection feed the reporter design leans on is intact: `pane read --source detection` on an idle Claude renders the prompt box (`❯` above the `⏵⏵ bypass permissions on` footer), and `agent explain --file <cap> --agent claude --json` resolves it to `state: idle` via manifest `2026.08.21.1` (`matched_rule: live_prompt_box`).
+The idle-composer surface itself is unchanged at this Claude version; the full ghost-suggestion, pending, and queued-placeholder composer classification is owned by `bin/fm-composer-lib.sh` and its live guard `tests/fm-composer-matrix-live-e2e.test.sh`, which this recalibration did not re-derive (it is orthogonal to agent recognition, per the design report's coordination note).
+Presentation projection is default-on on this release: `fm_backend_herdr_release_floor_verdict 0.8.2 20` returns supported (floor 0.8.0 / protocol 19 cleared), so an unconfigured home projects each task into its own workspace.
+
 ### Submit confirmation
 
 Measured 2026-08-19 against Herdr 0.8.0 and Claude Code 2.1.236 in an isolated `fm-lab-` session.
