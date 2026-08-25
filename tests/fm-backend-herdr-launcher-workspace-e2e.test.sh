@@ -39,6 +39,15 @@ command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
 
+# Every spawn below launches a deliberate non-agent stand-in command, so
+# fm-spawn.sh's post-launch agent-start confirmation could never observe a
+# registered agent and would fail the spawn after two full poll windows.
+# Disable it exactly as tests/lib.sh does for fake panes; the confirmation has
+# its own dedicated coverage in tests/fm-spawn-agent-confirm.test.sh. The
+# in-pane spawn script below restates this explicitly - a herdr pane's shell
+# does not inherit this suite's environment.
+export FM_SPAWN_CONFIRM=0
+
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
@@ -280,7 +289,7 @@ WS_PRIMARY_TABS_BEFORE=$(tab_labels_of_workspace "$WS_PRIMARY")
 cat > "$TMP_ROOT/spawn-in-pane.sh" <<SPAWN
 #!/usr/bin/env bash
 set -u
-FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \\
+FM_SPAWN_NO_GUARD=1 FM_SPAWN_CONFIRM=0 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \\
   "$ROOT/bin/fm-spawn.sh" dupC "$PROJ" "sh -c 'echo launcher-ws-ok'" --mode no-mistakes --yolo off --backend herdr \\
   > "$TMP_ROOT/dupC.out" 2> "$TMP_ROOT/dupC.err"
 echo \$? > "$TMP_ROOT/dupC.rc"

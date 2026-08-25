@@ -51,6 +51,13 @@ command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
 
+# Every spawn below launches a deliberate non-agent stand-in command, so
+# fm-spawn.sh's post-launch agent-start confirmation could never observe a
+# registered agent and would fail the spawn after two full poll windows.
+# Disable it exactly as tests/lib.sh does for fake panes; the confirmation has
+# its own dedicated coverage in tests/fm-spawn-agent-confirm.test.sh.
+export FM_SPAWN_CONFIRM=0
+
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 

@@ -45,19 +45,29 @@ jobs:
             body="${PR_BODY:-}"
             json=''
             parse_ok=0
-            case "$body" in
-              *"$prefix"*)
-                rest="${body#*"$prefix"}"
-                case "$rest" in
-                  *"$suffix"*)
-                    json="${rest%%"$suffix"*}"
-                    if printf '%s' "$json" | jq -e . >/dev/null 2>&1; then
-                      parse_ok=1
-                    fi
-                    ;;
-                esac
-                ;;
-            esac
+            # The body may QUOTE the attestation prefix before the real comment
+            # (evidence excerpts or review findings citing this workflow's own
+            # source), so first-match extraction can land inside a quotation and
+            # reject a compliant PR. Scan every occurrence and accept the first
+            # whose payload parses as JSON - only the genuine emitted comment
+            # carries a valid JSON payload between prefix and suffix.
+            scan="$body"
+            while [ "$parse_ok" -ne 1 ]; do
+              case "$scan" in
+                *"$prefix"*) ;;
+                *) break ;;
+              esac
+              scan="${scan#*"$prefix"}"
+              case "$scan" in
+                *"$suffix"*)
+                  candidate="${scan%%"$suffix"*}"
+                  if printf '%s' "$candidate" | jq -e . >/dev/null 2>&1; then
+                    json="$candidate"
+                    parse_ok=1
+                  fi
+                  ;;
+              esac
+            done
             if [ "$parse_ok" -ne 1 ]; then
               {
                 echo "::error::This repository requires no-mistakes >= 1.46.0; structured pipeline step attestation is missing or unparseable."

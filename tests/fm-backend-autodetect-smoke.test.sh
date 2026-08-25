@@ -43,6 +43,13 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 
 export FM_GATE_REFUSE_BYPASS=1
 
+# Every spawn below launches a deliberate non-agent stand-in command, so
+# fm-spawn.sh's post-launch agent-start confirmation could never observe a
+# registered agent and would fail the spawn after two full poll windows.
+# Disable it exactly as tests/lib.sh does for fake panes; the confirmation has
+# its own dedicated coverage in tests/fm-spawn-agent-confirm.test.sh.
+export FM_SPAWN_CONFIRM=0
+
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 # This suite asserts that HERDR_ENV=1 alone selects the backend, and it runs

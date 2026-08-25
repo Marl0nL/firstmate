@@ -1,7 +1,7 @@
 # Herdr runtime backend
 
 Herdr is an experimental agent-native terminal backend with native per-pane agent state and push events.
-Firstmate requires Herdr protocol 14 or newer; broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, and 0.8.0, while protocol-16 features remain gated by availability.
+Firstmate requires Herdr protocol 14 or newer; broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, 0.8.0, and 0.8.2, while protocol-16 features remain gated by availability.
 Default-on presentation spaces have a higher floor of Herdr 0.8.0 for the reason given under [Presentation spaces](#presentation-spaces).
 Herdr provides the terminal session while Treehouse continues to provide task worktrees.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
@@ -267,6 +267,11 @@ This prevents closing the workspace's last tab before a replacement exists.
 The generic Herdr agent-liveness probe reuses the same classifier.
 A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
 Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
+
+A Claude crew is the exception that this classifier currently mishandles on Herdr 0.8.2 / protocol 20: Claude registers no agent record (`agent get` answers `agent_not_found`, `agent list` is empty), whether or not the integration claimed the pane, so a genuinely live Claude crew reads `no-agent` and this probe reports it `dead`.
+That false-negative is what makes spawn start-confirmation report a bare shell, `fm-control` exit-verification report an already-stopped agent, and the session-start liveness sweep treat healthy Claude supervisors as respawn candidates.
+The `pane process-info` reality probe still distinguishes a live Claude crew (a Claude binary in the foreground) from a genuine bare-shell husk that reads the same `no-agent`, and the metadata classifier does not yet compose it back in.
+The dated 0.8.2 measurements, the four-way liveness acceptance table, and the `report-agent` fix primitive are recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) "Agent recognition recalibration"; that record's live guard is `FM_HERDR_RECAL_LIVE=1 tests/fm-herdr-recalibration-live-e2e.test.sh`.
 
 The session-start sweep uses this probe.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
