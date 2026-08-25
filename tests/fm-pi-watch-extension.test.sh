@@ -993,8 +993,11 @@ test_pi_session_transition_generation_owner() {
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'watcher: started pid=%s\n' "$$"
-printf '%s\n' "$$" > "${FM_CHILD_PID_FILE:?}"
+# The arm-log row must land before the pid file: the harness gates on the pid
+# file and then reads liveArmPids() from the log, so the reverse order lets a
+# preempted child present a live pid with no log row yet.
 printf 'arm pid=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf '%s\n' "$$" > "${FM_CHILD_PID_FILE:?}"
 trap 'exit 0' TERM INT
 while :; do sleep 0.2; done
 SH
@@ -1157,8 +1160,10 @@ if (liveArmPids().length !== 0) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi session transitions must rearm through an explicit generation owner"
+  # Output check first: on a node throw the captured stderr is the diagnosis,
+  # and expect_code's fail would exit before ever printing it.
   [ -z "$out" ] || fail "Pi session-transition generation owner test printed output: $out"
+  expect_code 0 "$status" "Pi session transitions must rearm through an explicit generation owner"
   pass "Pi session transitions use a generation owner across /new /resume /fork, stale callbacks, and quit"
 }
 
