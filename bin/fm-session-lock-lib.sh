@@ -6,6 +6,11 @@
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
 # lock-owning primary session before it may arm or rewake.
+# fm_harness_process_matches below is also the fleet-wide "is this OS process a
+# verified harness" vocabulary: bin/backends/herdr.sh sources this file to
+# recognize a live-but-unregistered Claude crew from its pane's foreground
+# process, so widening or narrowing the tables below changes Herdr pane
+# recognition too.
 # This file is sourced by scripts and has no side effects on source.
 
 # Cursor process identity is NOT expressible as a command-name pattern and is
