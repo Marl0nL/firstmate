@@ -347,7 +347,7 @@ Installing the v8 integration is a global change to the captain's personal claud
 
 The detection feed the reporter design leans on is intact: `pane read --source detection` on an idle Claude renders the prompt box (`❯` above the `⏵⏵ bypass permissions on` footer), and `agent explain --file <cap> --agent claude --json` resolves it to `state: idle` via manifest `2026.08.21.1` (`matched_rule: live_prompt_box`).
 The idle-composer surface itself is unchanged at this Claude version; the full ghost-suggestion, pending, and queued-placeholder composer classification is owned by `bin/fm-composer-lib.sh` and its live guard `tests/fm-composer-matrix-live-e2e.test.sh`, which this recalibration did not re-derive (it is orthogonal to agent recognition, per the design report's coordination note).
-Presentation projection is default-on on this release: `fm_backend_herdr_release_floor_verdict 0.8.2 20` returns supported (floor 0.8.0 / protocol 19 cleared), so an unconfigured home projects each task into its own workspace.
+Presentation projection is default-on on this release: `fm_backend_herdr_release_floor_verdict 20 0.8.2` returns supported (floor 0.8.0 / protocol 19 cleared), so an unconfigured home projects each task into its own workspace.
 
 ### Submit confirmation
 

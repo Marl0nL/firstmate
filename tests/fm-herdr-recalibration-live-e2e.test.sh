@@ -115,10 +115,10 @@ WS=$(lab workspace create --cwd "$WORK" --label fm-recal --no-focus \
 # 0.8.0/protocol 19 is the default-on floor; 0.8.2/protocol 20 must clear it, so
 # an unconfigured home projects each task into its own workspace.
 FLOOR_VER=$(printf '%s' "$HERDR_VER" | awk '{print $2}')
-FLOOR_PROTO=$(PATH="$ORIGINAL_PATH" herdr status --json 2>/dev/null | jq -r '.server.protocol // empty')
+FLOOR_PROTO=$(lab status --json 2>/dev/null | jq -r '.server.protocol // empty')
 [ -n "$FLOOR_PROTO" ] || fail "could not read the running Herdr server protocol"
 floor_rc=0
-fm_backend_herdr_release_floor_verdict "$FLOOR_VER" "$FLOOR_PROTO" || floor_rc=$?
+fm_backend_herdr_release_floor_verdict "$FLOOR_PROTO" "$FLOOR_VER" || floor_rc=$?
 [ "$floor_rc" = 0 ] \
   || fail "presentation floor: $V (protocol $FLOOR_PROTO) is not classified default-on (verdict rc=$floor_rc); the U0 premise that projection is default-on above 0.8.0 no longer holds - re-measure"
 CHECKED=$((CHECKED + 1))
@@ -165,6 +165,12 @@ wait_claude_ready "$CLAUDE"
 proc_state=$(fm_backend_herdr_pane_process_state "$SESSION" "$CLAUDE")
 [ "$proc_state" = live ] \
   || fail "the live-Claude pane's process probe read '$proc_state', expected live; Claude ($CLAUDE_VER) never came up in the pane on $HERDR_VER"
+claude_fg=$(lab pane process-info --pane "$CLAUDE" 2>/dev/null \
+  | jq -r '.result.process_info.foreground_processes[0].argv[0] // empty')
+case "$claude_fg" in
+  *claude*) : ;;
+  *) fail "the live-Claude pane's foreground process was '$claude_fg', not Claude; Claude ($CLAUDE_VER) never came up in the pane on $HERDR_VER, so the no-agent/dead expectation cannot be trusted" ;;
+esac
 claude_meta=$(fm_backend_herdr_pane_agent_state "$SESSION" "$CLAUDE")
 claude_recovery=$(fm_backend_herdr_agent_state "$SESSION:$CLAUDE")
 if [ "$claude_meta" != no-agent ] || [ "$claude_recovery" != dead ]; then
@@ -178,8 +184,6 @@ pass "registration defect reproduces: a live claimed Claude crew reads metadata 
 # both read no-agent/dead. The process foreground identity CAN: Claude's binary
 # vs a shell. This is the composition the re-baseline dropped and U2 must
 # restore; the guard proves the signal still exists.
-claude_fg=$(lab pane process-info --pane "$CLAUDE" 2>/dev/null \
-  | jq -r '.result.process_info.foreground_processes[0].argv[0] // empty')
 bare_fg=$(lab pane process-info --pane "$BARE" 2>/dev/null \
   | jq -r '.result.process_info.foreground_processes[0].name // empty')
 case "$claude_fg" in
