@@ -1,0 +1,46 @@
+$ gh api repos/Marl0nL/firstmate/branches/main/protection
+{"message":"Branch not protected","documentation_url":"https://docs.github.com/rest/branches/branch-protection#get-branch-protection","status":"404"}gh: Branch not protected (HTTP 404)
+
+$ gh api repos/Marl0nL/firstmate/rules/branches/main  # active rules on main
+[
+    {
+        "type": "deletion",
+        "ruleset_source_type": "Repository",
+        "ruleset_source": "Marl0nL/firstmate",
+        "ruleset_id": 19030697
+    },
+    {
+        "type": "non_fast_forward",
+        "ruleset_source_type": "Repository",
+        "ruleset_source": "Marl0nL/firstmate",
+        "ruleset_id": 19030697
+    },
+    {
+        "type": "creation",
+        "ruleset_source_type": "Repository",
+        "ruleset_source": "Marl0nL/firstmate",
+        "ruleset_id": 19030697
+    },
+    {
+        "type": "pull_request",
+        "parameters": {
+            "required_approving_review_count": 0,
+            "dismiss_stale_reviews_on_push": false,
+            "required_reviewers": [],
+            "require_code_owner_review": false,
+            "require_last_push_approval": false,
+            "required_review_thread_resolution": false,
+            "require_extra_approval_for_unattributed_changes": true,
+            "allowed_merge_methods": [
+                "merge",
+                "squash",
+                "rebase"
+            ]
+        },
+        "ruleset_source_type": "Repository",
+        "ruleset_source": "Marl0nL/firstmate",
+        "ruleset_id": 19030697
+    }
+]
+
+CONCLUSION: no required_status_checks rule exists, so no PR/merge will wait on the now-manual ci.yml check contexts; only the auto workflows (no-mistakes-required, repo-invariants) report on PRs.

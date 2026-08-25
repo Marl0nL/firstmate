@@ -1,0 +1,22 @@
+PASS: ci.yml triggers are exactly {workflow_dispatch} (no push/pull_request)
+PASS: ci.yml workflow_dispatch declares a `ref` input
+PASS: ci.yml `ref` input is optional (required: false)
+PASS: ci.yml `ref` input is a string
+PASS: ci.yml job `lint` checkout consumes the dispatch ref input
+PASS: ci.yml job `test-coverage` checkout consumes the dispatch ref input
+PASS: ci.yml job `tests-portable-parallel-1` checkout consumes the dispatch ref input
+PASS: ci.yml job `tests-portable-parallel-2` checkout consumes the dispatch ref input
+PASS: ci.yml job `tests-portable-serial` checkout consumes the dispatch ref input
+PASS: ci.yml job `tests-herdr` checkout consumes the dispatch ref input
+PASS: ci.yml job `tests-timing-aggregate` checkout consumes the dispatch ref input
+PASS: ci.yml job `macos-stock-bash` checkout consumes the dispatch ref input
+PASS: ci.yml no longer contains the `invariants` job
+PASS: repo-invariants.yml job steps are semantically identical to the invariants job removed from base ci.yml
+PASS: repo-invariants.yml auto-triggers on push to main
+PASS: repo-invariants.yml auto-triggers on pull_request to main
+PASS: no-mistakes-required.yml still auto-triggers on pull_request
+PASS: windows-herdr-spike.yml triggers are exactly {workflow_dispatch}
+PASS: CONTRIBUTING.md documents `gh workflow run ci.yml`
+PASS: every workflow input CONTRIBUTING.md passes (['ref']) is declared by ci.yml (['ref'])
+
+ALL SEMANTIC CHECKS PASSED

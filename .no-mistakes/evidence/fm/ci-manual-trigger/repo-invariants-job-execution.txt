@@ -1,0 +1,7 @@
+-- step 'actions/checkout@v6' (checkout) -- skipped: already checked out
+-- executing step: Compatibility pointers must stay intact
+   exit=0
+-- executing step: Personal fleet paths must not be tracked
+   exit=0
+
+REPO-INVARIANTS JOB: ALL STEPS PASSED
