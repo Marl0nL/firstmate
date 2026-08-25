@@ -1,0 +1,19 @@
+Fail-before / pass-after counterfactual for the herdr 0.8.2 recognition fix.
+
+Identical canned herdr responses fed to the classifier from both trees:
+  1. pane get        -> {"result":{"pane":{"pane_id":"w1:p2"}}}          (pane present)
+  2. agent get       -> {"error":{"code":"agent_not_found", ...}}        (herdr 0.8.2 registers no agent for a live Claude crew)
+  3. pane process-info -> foreground process name "2.1.245",
+     argv[0] "/home/marlon/.local/share/claude/versions/2.1.245"        (a live Claude Code crew)
+
+== BASE (5356e618, pre-fix trunk): live unregistered Claude crew ==
+fm_backend_herdr_pane_agent_state -> no-agent
+fm_backend_herdr_agent_state      -> dead        # the false-negative: a LIVE crew read dead
+
+== TARGET (0a33a007, with the fix): same live unregistered Claude crew ==
+fm_backend_herdr_pane_agent_state -> live
+fm_backend_herdr_agent_state      -> alive
+
+The base tree never issued the pane process-info call (2 calls logged); the
+target tree consulted it on the agent_not_found branch (3 calls logged) and
+recognized the crew from its foreground process.
