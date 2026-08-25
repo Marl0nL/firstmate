@@ -209,7 +209,6 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 ### Captain-pane titled composer rule (2026-08-26, herdr 0.8.2 / protocol 20, Claude Code 2.1.246)
 
-Task afk-daemon-inject-wedge-claude-pane.
 This re-derives the idle-composer classification that the agent-recognition recalibration below deliberately left untouched.
 Measured on the captain's host (Fedora) against herdr 0.8.2 / protocol 20 and Claude Code 2.1.246, in isolated `fm-lab-` sessions through `bin/fm-herdr-lab.sh` with a byte-identical default-session tripwire, plus a read-only `pane read` of the live primary pane.
 
@@ -228,7 +227,9 @@ Cursorless herdr verdict (`styled=1 cursor=0 identity=1`), from live captures, b
 | Captain shape, text typed | titled | pending | pending |
 | Bare dead shell | none | unknown | unknown |
 
-The fix keeps pi separators solid-only and instead recognizes claude's idle composer as a bare agent glyph BOXED between its own top rule (which carries the session title) and its solid bottom rule (`_fm_composer_bare_boxed_by_rules`), suppressing the lone-separator staleness rule for exactly that shape; the pi separated-composer path is left untouched, so a titled divider pasted into a pi composer cannot slice it into a false `empty`. Because the boxed-glyph structure is the proof rather than the title text, a non-ASCII session title reaches the same `empty` verdict. The fail-closed direction is unchanged (typed reads pending, a dead shell reads unknown).
+The fix keeps pi separators solid-only and instead recognizes claude's idle composer as a bare agent glyph BOXED between its own top rule (which carries the session title) and its solid bottom rule (`_fm_composer_bare_boxed_by_rules`), suppressing the lone-separator staleness rule for exactly that shape; the pi separated-composer path is left untouched, so a titled divider pasted into a pi composer cannot slice it into a false `empty`.
+Because the boxed-glyph structure is the proof rather than the title text, a non-ASCII session title reaches the same `empty` verdict.
+The fail-closed direction is unchanged (typed reads pending, a dead shell reads unknown).
 The portable regression is `test_matrix_claude_titled_top_rule_captain_pane` in `tests/fm-composer-lib.test.sh`, built from the live byte capture; it classifies `unknown` without the fix.
 Live end-to-end proof: the away-mode inject guard's own verdict function, run read-only against the live primary pane, returned `empty` (it returned `unknown` before the fix):
 

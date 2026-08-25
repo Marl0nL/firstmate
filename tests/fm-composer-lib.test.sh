@@ -353,6 +353,13 @@ test_matrix_pi_separated_needs_identity() {
   assert_screen "absent identity cannot prove blank pi pair" unknown "$CAPS_TMUX" "$screen" 2 probe-absent
   typed=$'────────────────────────\nfix the flaky test\n────────────────────────'
   assert_screen "pi typed" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
+  # A dash-bounded TITLED divider pasted as the last line of unsubmitted pi
+  # content must not close the pair and slice the region into a blank final
+  # sub-pair (a titled-rule-as-separator design reads this false empty, and
+  # the away-mode injector would type over the real input): pi pair
+  # separators stay solid-only, so the whole pasted region reads pending.
+  typed=$'transcript\n────────────────────────\npasted meeting notes\n──────── Notes ────────\n────────────────────────\n footer'
+  assert_screen "pi pasted titled divider stays pending" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
   typed=$'────────────────────────\n❯\n────────────────────────'
   assert_screen "pi lone-glyph draft with identity" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
   assert_screen "pi lone-glyph draft on tmux" pending "$CAPS_TMUX" "$typed" 1 "$pi_idle"
