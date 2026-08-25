@@ -228,7 +228,7 @@ Cursorless herdr verdict (`styled=1 cursor=0 identity=1`), from live captures, b
 | Captain shape, text typed | titled | pending | pending |
 | Bare dead shell | none | unknown | unknown |
 
-The fix recognizes a titled horizontal rule as a composer separator (`_fm_composer_titled_separator_row`), the direct analogue of grok's titled-bottom-border tolerance, so the titled-top plus `❯` plus plain-bottom forms a rule pair and reads `empty` exactly as the all-plain-rules idle pane already does; the fail-closed direction is unchanged (typed reads pending, a dead shell reads unknown).
+The fix keeps pi separators solid-only and instead recognizes claude's idle composer as a bare agent glyph BOXED between its own top rule (which carries the session title) and its solid bottom rule (`_fm_composer_bare_boxed_by_rules`), suppressing the lone-separator staleness rule for exactly that shape; the pi separated-composer path is left untouched, so a titled divider pasted into a pi composer cannot slice it into a false `empty`. Because the boxed-glyph structure is the proof rather than the title text, a non-ASCII session title reaches the same `empty` verdict. The fail-closed direction is unchanged (typed reads pending, a dead shell reads unknown).
 The portable regression is `test_matrix_claude_titled_top_rule_captain_pane` in `tests/fm-composer-lib.test.sh`, built from the live byte capture; it classifies `unknown` without the fix.
 Live end-to-end proof: the away-mode inject guard's own verdict function, run read-only against the live primary pane, returned `empty` (it returned `unknown` before the fix):
 

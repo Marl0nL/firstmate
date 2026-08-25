@@ -198,9 +198,13 @@ test_matrix_claude_titled_top_rule_captain_pane() {
   # like a lone separator below the `❯`. The cursorless selector read that as a
   # forming pi composer and deferred - the genuinely idle composer classified
   # `unknown`, and the away-mode daemon deferred every escalation for ~8h. The
-  # titled-separator recognition pairs the rules so the `❯` reads empty, exactly
-  # as the all-plain-rules idle pane above already does.
-  local screen typed
+  # fix does NOT treat a titled rule as a pi separator (that would let a titled
+  # divider pasted into a pi composer slice it into a false-empty pair);
+  # instead the bare `❯` glyph boxed between its titled top rule and its solid
+  # bottom rule (_fm_composer_bare_boxed_by_rules) suppresses the
+  # lone-separator staleness rule, so the boxed glyph reads empty exactly as
+  # the all-plain-rules idle pane above already does.
+  local screen typed cjk
   screen=$'transcript line\n  ✔ Update installed · Restart to update\n───────────────────────────────── Personal-Firstmate ─\n❯'"$NBSP"$'\n──────────────────────────────────────────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents'
   assert_screen "claude captain-pane idle on herdr" empty "$CAPS_STYLED" "$screen" '' probe-absent
   assert_screen "claude captain-pane idle on tmux" empty "$CAPS_TMUX" "$screen" 3 probe-absent
@@ -212,7 +216,11 @@ test_matrix_claude_titled_top_rule_captain_pane() {
   assert_screen "claude captain-pane typed on herdr" pending "$CAPS_STYLED" "$typed" '' probe-absent
   assert_screen "claude captain-pane typed on tmux" pending "$CAPS_TMUX" "$typed" 1 probe-absent
   assert_screen "claude captain-pane typed on plain backends" unknown "$CAPS_PLAIN" "$typed"
-  pass "matrix: claude's titled composer top rule (captain pane) reads empty idle, pending when typed"
+  # The boxed-glyph structure is the proof, not the title text: a non-ASCII
+  # session title reaches the same empty verdict.
+  cjk=$'transcript line\n──────────────────────── 個人ファーストメイト ─\n❯'"$NBSP"$'\n──────────────────────────────────────────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents'
+  assert_screen "claude captain-pane non-ASCII title on herdr" empty "$CAPS_STYLED" "$cjk" '' probe-absent
+  pass "matrix: claude's titled composer top rule (captain pane) reads empty idle (any title charset), pending when typed"
 }
 
 test_matrix_codex_dim_hint_row() {

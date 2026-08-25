@@ -584,41 +584,50 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
   return 1
 }
 
-# _fm_composer_titled_separator_row: a horizontal `─` rule that carries an
-# embedded TITLE, the titled analogue of the solid separator above and of the
-# grok titled-bottom-border tolerance (_fm_composer_titled_bottom_ok). Claude
-# draws its composer's TOP rule with the session title inlaid in the rule, e.g.
-# `──────────── Personal-Firstmate ─` (verified live, claude 2.1.246 on herdr
-# 0.8.2, a captain pane with a custom session title). Because that row is not
-# nothing-but-`─`, the solid-separator test above misses it, leaving the plain
-# BOTTOM rule of the very same composer looking like a lone separator below the
-# `❯` - which the cursorless selector then reads as a forming pi composer and
-# defers on (`unknown`). A plain-ruled composer (both rules solid) forms a pair
-# and reads `empty`; a titled top rule must reach the same verdict.
-# The proof is deliberately strict so ordinary prose cannot pass: the trimmed
-# row must open and close with `─`, must NOT be all-`─` (that is the solid rule,
-# owned above), must carry a substantial `─` run (the same 8-column floor), and
-# its non-`─` residue must be an ordinary ASCII title - map `─` and every
-# ASCII-printable to a space and require only whitespace to remain, so any other
-# box-drawing/rule glyph or unusual residue fails the proof. This keeps the
-# widened recognition to the vendor-drawn titled rule and no further.
-_fm_composer_titled_separator_row() {  # <trimmed-row>
-  local row=$1 residue
-  [ -n "$row" ] || return 1
+# _fm_composer_horizontal_rule_row: a `─`-drawn horizontal composer rule - a
+# solid `─` separator, OR a `─`-bounded rule carrying an embedded title (claude
+# draws its composer's TOP rule with the session title inlaid, e.g.
+# `──────────── Personal-Firstmate ─`; verified live, claude 2.1.246 on herdr
+# 0.8.2). Used ONLY by _fm_composer_bare_boxed_by_rules to confirm a bare
+# agent-glyph composer is boxed between its own top and bottom rules; it never
+# bounds a pi composer pair (pi draws solid rules only, and letting a titled row
+# bound a pi pair would slice pasted composer content into a false-empty
+# sub-region). The title may be any charset here because the boxed-bare context
+# - a bare agent glyph immediately between two such rules - is itself the proof,
+# which is also why a non-ASCII session title reaches the same empty verdict.
+_fm_composer_horizontal_rule_row() {  # <trimmed-row>
+  local row=$1
+  _fm_composer_pi_separator_row "$row" && return 0
   case "$row" in
     '─'*'─') ;;
     *) return 1 ;;
   esac
-  [ -n "${row//─/}" ] || return 1
   case "$row" in
-    *────────*) ;;
-    *) return 1 ;;
+    *────────*) return 0 ;;
   esac
-  residue=${row//─/ }
-  residue=$(printf '%s' "$residue" | LC_ALL=C sed 's/[!-~]/ /g')
-  case "$residue" in
-    *[![:space:]]*) return 1 ;;
-  esac
+  return 1
+}
+
+# _fm_composer_bare_boxed_by_rules: 0 when the selected shape is a bare
+# agent-glyph composer boxed between two horizontal rules - a horizontal rule
+# immediately above the glyph row and its own solid bottom rule immediately
+# below (which is exactly the lone separator the staleness rule tripped on).
+# This is claude's idle composer when the TOP rule carries a session title: the
+# titled top rule is not a solid separator, so no pi pair forms and the plain
+# bottom rule looks like a lone forming-pi separator below the glyph. A genuine
+# stale-composer-above-a-forming-pi has no glyph boxed this way, and a lower
+# separator would push PI_LAST_SEPARATOR past glyph+1, so the check stays tight.
+_fm_composer_bare_boxed_by_rules() {  # <plain-screen>
+  local plain=$1 g=$FM_COMPOSER_SCAN_BARE_ROW above below atrim btrim
+  [ "$FM_COMPOSER_SELECTED_KIND" = bare ] || return 1
+  [ "$g" -ge 1 ] || return 1
+  [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -eq "$((g + 1))" ] || return 1
+  above=$(_fm_composer_screen_row "$((g - 1))" "$plain"); atrim=$above
+  fm_composer_normalize_trim_var atrim
+  below=$(_fm_composer_screen_row "$((g + 1))" "$plain"); btrim=$below
+  fm_composer_normalize_trim_var btrim
+  _fm_composer_horizontal_rule_row "$atrim" || return 1
+  _fm_composer_horizontal_rule_row "$btrim" || return 1
   return 0
 }
 
@@ -668,15 +677,15 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
       '┗'*'┛') kind=bottom; family=heavy ;;
       '+'*'+') kind=ascii; family=ascii ;;
     esac
-    # Pi separator rows: a solid `─` rule at least 8 columns wide, OR a titled
-    # `─` rule (claude's composer top rule carries the session title). Both bound
-    # a composer region identically here; the titled variant is what lets a
-    # claude `❯` sitting between a titled top rule and a plain bottom rule form a
-    # pair and read empty instead of deferring on the lone bottom rule. A
-    # separator closes the preceding candidate and immediately opens the next, so
-    # an earlier transcript rule can never outrank the live bottom composer pair.
-    if _fm_composer_pi_separator_row "$trimmed" \
-       || _fm_composer_titled_separator_row "$trimmed"; then
+    # Pi separator rows: a solid `─` rule at least 8 columns wide. A separator
+    # closes the preceding candidate and immediately opens the next, so an
+    # earlier transcript rule can never outrank the live bottom composer pair.
+    # ONLY solid rules bound a pi pair: a titled `─` rule (claude's session-title
+    # top rule) must not be able to CLOSE a pi pair, or a titled divider pasted
+    # into an idle pi composer would slice it into a blank final pair and read a
+    # false `empty`. The claude titled-top composer is handled by
+    # _fm_composer_bare_boxed_by_rules in the cursorless selector instead.
+    if _fm_composer_pi_separator_row "$trimmed"; then
       FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
       if [ "$pi_open" -ge 0 ]; then
         FM_COMPOSER_SCAN_PI_PAIR_FOUND=1
@@ -1103,8 +1112,14 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_FIRST=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
     FM_COMPOSER_SELECTED_LAST=$((FM_COMPOSER_SCAN_PI_CLOSE - 1))
   fi
+  # A lone separator below the selected shape usually means a forming pi
+  # composer, so defer. EXCEPTION: a bare agent-glyph composer boxed between its
+  # own top rule (titled or solid) and its solid bottom rule is not stale - that
+  # separator is its OWN bottom rule. This is claude's idle composer whose top
+  # rule carries a session title (so no solid pair formed).
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
-     && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ]; then
+     && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ] \
+     && ! _fm_composer_bare_boxed_by_rules "$plain"; then
     FM_COMPOSER_SELECTED_KIND=
     return 1
   fi
