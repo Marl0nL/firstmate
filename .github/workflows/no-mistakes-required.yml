@@ -44,9 +44,11 @@ jobs:
             suffix=' -->'
             body="${PR_BODY:-}"
             json=''
+            attest_present=0
             parse_ok=0
             case "$body" in
               *"$prefix"*)
+                attest_present=1
                 rest="${body#*"$prefix"}"
                 case "$rest" in
                   *"$suffix"*)
@@ -58,25 +60,68 @@ jobs:
                 esac
                 ;;
             esac
-            if [ "$parse_ok" -ne 1 ]; then
+            if [ "$attest_present" -eq 1 ] && [ "$parse_ok" -ne 1 ]; then
               {
-                echo "::error::This repository requires no-mistakes >= 1.46.0; structured pipeline step attestation is missing or unparseable."
+                echo "::error::The no-mistakes pipeline step attestation comment is present but unparseable."
                 echo
-                echo "The no-mistakes signature was found, but this check also requires one"
-                echo "HTML comment in the PR body:"
-                echo
-                echo '    <!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"...","steps":[...]} -->'
-                echo
-                echo "That comment is emitted by no-mistakes >= 1.46.0 (the release that started"
-                echo "emitting structured step attestation; see https://github.com/kunchenguid/no-mistakes/pull/670)."
-                echo "An older no-mistakes that writes only the signature line is not enough."
-                echo
-                echo "Re-run the pipeline with 'git push no-mistakes' using no-mistakes >= 1.46.0."
+                echo "The PR body contains the attestation prefix but not a valid"
+                echo "'<!-- no-mistakes-pipeline-attestation:v1 {...} -->' comment."
+                echo "A corrupt attestation is never accepted; re-run the pipeline with"
+                echo "'git push no-mistakes' so it is rewritten."
                 echo "See CONTRIBUTING.md for setup and the full workflow."
                 echo
                 echo "PR author: ${PR_AUTHOR}"
               } >&2
               exit 1
+            fi
+            if [ "$attest_present" -ne 1 ]; then
+              # Structured attestation is only emitted by no-mistakes >= 1.46.0
+              # (https://github.com/kunchenguid/no-mistakes/pull/670), but this
+              # repository supports the older releases CONTRIBUTING.md pins
+              # (v1.31.2+). Those still write a deterministic '## Pipeline'
+              # section with one status summary per step, so hold the same
+              # line there: Review, Test, and Document must each be present
+              # and not skipped. Signature-only bodies that hide those steps
+              # still fail.
+              for required in Review Test Document; do
+                step_line=$(printf '%s\n' "$body" | grep -E "<summary>.*\*\*${required}\*\*" | head -n 1)
+                if [ -z "$step_line" ]; then
+                  {
+                    echo "::error::Required no-mistakes pipeline step '${required}' is missing from the PR body."
+                    echo
+                    echo "No structured step attestation comment was found (emitted by"
+                    echo "no-mistakes >= 1.46.0), and the legacy '## Pipeline' section does"
+                    echo "not record a '${required}' step summary either. A signature line"
+                    echo "alone can hide skipped review, test, or document steps."
+                    echo
+                    echo "Re-run the pipeline with 'git push no-mistakes' (no-mistakes"
+                    echo "v1.31.2+ per CONTRIBUTING.md) so every required step runs and is"
+                    echo "recorded in the PR body."
+                    echo
+                    echo "PR author: ${PR_AUTHOR}"
+                  } >&2
+                  exit 1
+                fi
+                case "$step_line" in
+                  *[Ss]kip*)
+                    {
+                      echo "::error::Required no-mistakes pipeline step '${required}' was skipped: ${step_line}"
+                      echo
+                      echo "This repository requires review, test, and document to each run to"
+                      echo "completion. Quota skips and agent skips are not compliant."
+                      echo
+                      echo "Re-run the pipeline with 'git push no-mistakes' so those required"
+                      echo "steps complete rather than skip."
+                      echo "See CONTRIBUTING.md for setup and the full workflow."
+                      echo
+                      echo "PR author: ${PR_AUTHOR}"
+                    } >&2
+                    exit 1
+                    ;;
+                esac
+              done
+              echo "No structured attestation comment (pre-1.46.0 no-mistakes); legacy pipeline step summaries are valid: Review, Test, and Document are present and not skipped."
+              exit 0
             fi
             incomplete=''
             for required in review test document; do
