@@ -1,0 +1,14 @@
+$ herdr --version && claude --version
+herdr 0.8.2
+2.1.245 (Claude Code)
+
+$ FM_HERDR_RECAL_LIVE=1 tests/fm-herdr-recalibration-live-e2e.test.sh
+ok - presentation projection is default-on (floor 0.8.0/proto 19 cleared) on herdr 0.8.2 / 2.1.245 (Claude Code)
+ok - report-agent drives and sticks working/blocked on an unclaimed pane (the U2 fix primitive works) on herdr 0.8.2 / 2.1.245 (Claude Code)
+ok - registration defect reproduces: a live claimed Claude crew reads metadata no-agent / recovery dead on herdr 0.8.2 / 2.1.245 (Claude Code)
+ok - process probe distinguishes a live Claude crew ('/home/marlon/.local/share/claude/versions/2.1.245') from a bare-shell husk ('bash') though both read metadata no-agent, on herdr 0.8.2 / 2.1.245 (Claude Code)
+ok - report-agent onto an integration-claimed Claude pane is still ignored (un-claim remains required) on herdr 0.8.2 / 2.1.245 (Claude Code)
+ok - agent start --kind claude leaves the pane unregistered (result 'timeout') on herdr 0.8.2 / 2.1.245 (Claude Code)
+ok - agent explain --file classifies an idle Claude screen as idle (detection feed intact) on herdr 0.8.2 / 2.1.245 (Claude Code)
+ok - Herdr agent-recognition recalibration complete: 7 checks on herdr 0.8.2 / 2.1.245 (Claude Code) in isolated session fm-lab-herdr-recal-live-2764316-7558
+exit=0

@@ -1,0 +1,12 @@
+# Counterfactual: the BASE-commit (8caa286) version of tests/fm-backend-autodetect-smoke.test.sh,
+# which lacks FM_SPAWN_CONFIRM=0, run on herdr 0.8.2 - the registration false-negative fails the spawn.
+$ tests/.recal-counterfactual-base-autodetect.test.sh
+not ok - fm-spawn.sh did not succeed auto-detecting herdr
+--- stdout ---
+
+--- stderr ---
+NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out.
+warning: /tmp/fm-backend-autodetect-smoke.J8cNHZ/data/autodetectsmoke1/brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+warning: autodetectsmoke1: no agent detected in pane fm-lab-fm-autodetect-sm-2783548-31233:w1:p2 after 15s; re-sending launch once
+error: autodetectsmoke1: agent did not start - pane fm-lab-fm-autodetect-sm-2783548-31233:w1:p2 is a bare shell with no agent after two launch attempts (15s each). The launch never produced a running agent; refusing to report success. Inspect/clean the pane before retrying.
+exit=1

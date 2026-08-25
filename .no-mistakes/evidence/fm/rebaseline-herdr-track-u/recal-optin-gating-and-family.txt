@@ -1,0 +1,33 @@
+$ bin/fm-test-run.sh --list --family live-harness-optin
+tests/fm-afk-pi-herdr-return-e2e.test.sh
+tests/fm-cmux-claude-composer-live-e2e.test.sh
+tests/fm-codex-continuity-live-e2e.test.sh
+tests/fm-composer-matrix-live-e2e.test.sh
+tests/fm-cursor-primary-live-e2e.test.sh
+tests/fm-grok-continuity-live-e2e.test.sh
+tests/fm-grok-stop-live-e2e.test.sh
+tests/fm-harness-liveness-drift-live-e2e.test.sh
+tests/fm-herdr-recalibration-live-e2e.test.sh
+tests/fm-herdr-submit-confirm-live-e2e.test.sh
+tests/fm-herdr-version-floor-live-e2e.test.sh
+tests/fm-muse-signals-live-e2e.test.sh
+tests/fm-opencode-primary-live-e2e.test.sh
+tests/fm-pi-primary-live-e2e.test.sh
+tests/fm-quota-array-dispatch-live-e2e.test.sh
+tests/fm-send-inbox-doorbell-live-e2e.test.sh
+tests/fm-send-secondmate-marker-herdr-e2e.test.sh
+tests/fm-sessionstart-hook-live-e2e.test.sh
+tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
+
+$ tests/fm-herdr-recalibration-live-e2e.test.sh   # without FM_HERDR_RECAL_LIVE
+skip: set FM_HERDR_RECAL_LIVE=1 to run the live Herdr agent-recognition recalibration harness
+exit=0
+
+$ bin/fm-test-run.sh tests/fm-herdr-recalibration-live-e2e.test.sh   # runner classifies the skip as a gate skip
+FM_TEST_BEGIN 2026-08-25T09:15:22Z tests/fm-herdr-recalibration-live-e2e.test.sh family=live-harness-optin expected_gate_skip=optin-env
+skip: set FM_HERDR_RECAL_LIVE=1 to run the live Herdr agent-recognition recalibration harness
+FM_TEST_END 2026-08-25T09:15:22Z tests/fm-herdr-recalibration-live-e2e.test.sh exit=0 duration_ms=18 gate_skip=true
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=1 duration_ms=59
+FM_TEST_SUMMARY_FAMILY family=live-harness-optin count=1 duration_ms=18 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-herdr-recalibration-live-e2e.test.sh duration_ms=18
+exit=0

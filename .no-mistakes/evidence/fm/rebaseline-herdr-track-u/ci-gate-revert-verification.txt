@@ -1,0 +1,22 @@
+# CI-gate revert verification (commit a59cb2d)
+
+$ git diff origin/main..HEAD -- .github/workflows/no-mistakes-required.yml   # empty = byte-identical to trunk
+(empty diff; exit=0)
+
+$ sha256sum: workflow at HEAD vs origin/main
+b6401ce607362a9c1839cb445785474f6bea8ce6f4fb95482beff9b033a2fc91  -
+b6401ce607362a9c1839cb445785474f6bea8ce6f4fb95482beff9b033a2fc91  -
+
+# What the restored gate actually enforces (structured attestation, >= 1.46.0):
+    43:            prefix='<!-- no-mistakes-pipeline-attestation:v1 '
+    63:                echo "::error::This repository requires no-mistakes >= 1.46.0; structured pipeline step attestation is missing or unparseable."
+    68:                echo '    <!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"...","steps":[...]} -->'
+    70:                echo "That comment is emitted by no-mistakes >= 1.46.0 (the release that started"
+    74:                echo "Re-run the pipeline with 'git push no-mistakes' using no-mistakes >= 1.46.0."
+    99:                echo "Re-run the pipeline with 'git push no-mistakes' using no-mistakes >= 1.46.0"
+
+# CONTRIBUTING.md documented floor now matches the gate:
+    20:3. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (PRs targeting `main` require **no-mistakes v1.46.0+**, the release that emits the structured step attestation the `Require no-mistakes` check verifies; without a fork, plain `no-mistakes init` still works for maintainers with push access).
+
+# Installed shared no-mistakes clears the floor:
+no-mistakes version v1.57.0 (0fcbbff) 2026-08-22T05:14:20Z

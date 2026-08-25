@@ -1,0 +1,11 @@
+# The exact invocation recorded in docs/verification/runtime-backends.md (protocol first, version second)
+$ . bin/backends/herdr.sh; fm_backend_herdr_release_floor_verdict 20 0.8.2
+rc=0 (0 = supported / default-on floor cleared)
+
+# Counterfactual below the floor proves the argument order is load-bearing
+$ fm_backend_herdr_release_floor_verdict 16 0.7.5
+rc=1 (1 = provably below floor)
+
+# The formerly-swapped order the review corrected would have been vacuously "supported"
+$ fm_backend_herdr_release_floor_verdict 0.7.5 16
+rc=0 (vacuous 0 with swapped args)
