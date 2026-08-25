@@ -101,13 +101,34 @@ Its header and `--help` own the flags, family labels, lanes, and changed-file ma
 Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.
 Local no-mistakes Test stays intent-targeted and must not wire `commands.test` to `--all` or a `tests/*.test.sh` walk.
 Family selection is the ordinary local path; `--all` is deliberate full regression only.
-CI owns broad regression across required portable parallel shards, the portable serial lane's separate-runner shards, the Herdr lane, lint, invariants, the coverage guard, and stock macOS Bash compatibility in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+CI owns broad regression across required portable parallel shards, the portable serial lane's separate-runner shards, the Herdr lane, lint, the coverage guard, and stock macOS Bash compatibility in [`.github/workflows/ci.yml`](.github/workflows/ci.yml); see "Validation and CI" below for how and when that workflow runs.
 Use `bin/fm-test-run.sh --list-lanes` for exact lane names and `--help` for `--jobs` rules and required gate-skip flags when reproducing a lane locally.
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so pass one to `bin/fm-test-run.sh` to focus on a subject with canonical timing output.
 A fixture may shorten a production timeout to keep a failure path prompt, but never below what the real work inside that window costs on a loaded machine: a fork, an exec, a lock acquisition, a beacon publication, or a first-poll check.
 Where a case's assertion is not about the timeout itself, give that window headroom over the measured loaded cost, and bound the test's own waiting with iteration-counted poll loops, which stretch under load where a wall-clock budget does not.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
 The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the lane's isolation boundary, while [runtime backend verification](docs/verification/runtime-backends.md#herdr) owns active empirical evidence; live harness credential tests remain opt-in.
+
+## Validation and CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) (lint, all behavior shards, the Herdr lane, macOS snapshot compatibility, and the coverage guard) is expensive and runs on `workflow_dispatch` only: nothing there is auto-triggered by a push or a pull request.
+[`.github/workflows/repo-invariants.yml`](.github/workflows/repo-invariants.yml) stays auto-triggered because it is a single near-zero-cost job (a few seconds, no installs) that guards PR hygiene invariants an author could otherwise merge broken: the `AGENTS.md`/`CLAUDE.md` pointer, the `.claude/skills` symlink, and personal fleet paths staying untracked.
+[`.github/workflows/no-mistakes-required.yml`](.github/workflows/no-mistakes-required.yml) also stays auto-triggered; it enforces the delivery path above and runs in seconds.
+
+The intended flow for substantial changes:
+
+1. Validate locally first: `bin/fm-lint.sh`, then the relevant `bin/fm-test-run.sh` selection (a family, `--changed`, or `--all` for a deliberate full local walk), then drive the change through the `no-mistakes` pipeline as described above.
+2. Build up one comprehensive PR rather than several small dependent ones when the work is naturally one unit; small independent PRs are still fine.
+3. Before merge, manually trigger the full workflow against your branch or PR as a last pre-merge check:
+
+   ```sh
+   gh workflow run ci.yml --ref <your-branch>
+   # or, to check a PR's exact head commit while the workflow definition itself
+   # runs from main:
+   gh workflow run ci.yml --ref main -f ref=refs/pull/<PR-number>/head
+   ```
+
+   (`gh-axi run` wraps the equivalent read side - watching and inspecting the triggered run.)
 
 ## Questions
 

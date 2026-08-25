@@ -1,10 +1,17 @@
 name: CI
 
+# Manually triggered only. The full suite (lint, all behavior shards, Herdr
+# behavior, macOS snapshot, coverage guard) is expensive; run it deliberately
+# once a branch or PR is locally validated and ready for a pre-merge check,
+# not on every push/PR event. See CONTRIBUTING.md "Validation and CI" for the
+# local-gates-first flow and the exact trigger command.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or PR ref to run the full suite against (e.g. a branch name or refs/pull/<number>/head)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -15,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -39,6 +48,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
       - name: Prove complete regression partition
         run: bin/fm-test-run.sh --check-coverage
 
@@ -53,6 +64,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
       - name: Install pinned ShellCheck
         run: |
@@ -90,6 +102,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
       - name: Install pinned ShellCheck
         run: |
@@ -141,6 +154,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
       - name: Install pinned ShellCheck
         run: |
@@ -200,6 +214,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
       - name: Require tools for real Herdr
         run: |
@@ -320,6 +335,8 @@ jobs:
     if: always()
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
       - name: Download lane timing artifacts
         uses: actions/download-artifact@v4
         with:
@@ -353,6 +370,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
       - name: Run snapshot consumers with stock Bash
         shell: /bin/bash {0}
         env:
@@ -389,29 +408,3 @@ jobs:
             echo "::error::expected 42 Bearings tests, got $bearings_count"
             exit 1
           }
-
-  invariants:
-    name: Repo invariants
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Compatibility pointers must stay intact
-        run: |
-          set -eu
-          [ ! -L CLAUDE.md ] || { echo "::error::CLAUDE.md must be a real @AGENTS.md pointer file, not a symlink"; exit 1; }
-          tmp=$(mktemp)
-          trap 'rm -f "$tmp"' EXIT
-          printf '%s\n' \
-            '<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->' \
-            '@AGENTS.md' >"$tmp"
-          cmp -s CLAUDE.md "$tmp" || { echo "::error::CLAUDE.md must be the canonical @AGENTS.md pointer"; exit 1; }
-          [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
-      - name: Personal fleet paths must not be tracked
-        run: |
-          set -eu
-          tracked=$(git ls-files -- data state config projects .no-mistakes)
-          if [ -n "$tracked" ]; then
-            echo "::error::Personal fleet paths are tracked in git:"
-            printf '%s\n' "$tracked"
-            exit 1
-          fi

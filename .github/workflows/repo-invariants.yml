@@ -1,0 +1,42 @@
+name: Repo invariants
+
+# Kept auto-triggered (unlike the manual-only ci.yml) because this check is
+# near-zero-cost (a single job, no installs, seconds to run) and load-bearing
+# for PR hygiene: it is the only automated guard against a broken AGENTS.md
+# pointer, a broken .claude/skills symlink, or an accidental commit of
+# gitignored personal fleet paths. See CONTRIBUTING.md "Validation and CI".
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  invariants:
+    name: Repo invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compatibility pointers must stay intact
+        run: |
+          set -eu
+          [ ! -L CLAUDE.md ] || { echo "::error::CLAUDE.md must be a real @AGENTS.md pointer file, not a symlink"; exit 1; }
+          tmp=$(mktemp)
+          trap 'rm -f "$tmp"' EXIT
+          printf '%s\n' \
+            '<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->' \
+            '@AGENTS.md' >"$tmp"
+          cmp -s CLAUDE.md "$tmp" || { echo "::error::CLAUDE.md must be the canonical @AGENTS.md pointer"; exit 1; }
+          [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
+      - name: Personal fleet paths must not be tracked
+        run: |
+          set -eu
+          tracked=$(git ls-files -- data state config projects .no-mistakes)
+          if [ -n "$tracked" ]; then
+            echo "::error::Personal fleet paths are tracked in git:"
+            printf '%s\n' "$tracked"
+            exit 1
+          fi
