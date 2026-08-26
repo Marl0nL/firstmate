@@ -338,10 +338,13 @@ fm_backend_herdr_pane_agent_state -> live -> agent_state alive (trunk before U2:
 `pane report-agent --state` remains the one primitive that publishes a state into herdr's own UI, and only on an UNCLAIMED pane; it is silently ignored on an integration-claimed Claude pane (U2 does not use it - that is U3's report-agent state-publishing).
 
 ```text
-# unclaimed pane / bare shell + report-agent
-report-agent --state working -> agent_status working ; pane_agent_state live ; agent list shows it
+# unclaimed pane / bare shell + report-agent (herdr-side registry behavior)
+report-agent --state working -> agent_status working ; agent list shows it
 +6s (override check)          -> agent_status working            # herdr does not revert it
-report-agent --state blocked -> agent_status blocked ; pane_agent_state live
+report-agent --state blocked -> agent_status blocked
+# (measured 2026-08-25, this record-over-shell pane also classified pane_agent_state
+#  live; since U3's record-corroboration fix the same shape classifies no-agent -
+#  acceptance table below)
 
 # integration-claimed Claude pane + report-agent (source firstmate AND herdr:claude, fresh --seq)
 report-agent --state working -> agent get still agent_not_found ; agent_status still unknown   # ignored by herdr
@@ -353,7 +356,7 @@ agent start probe --kind claude --pane <P> -- --dangerously-skip-permissions
 ```
 
 The herdr metadata alone cannot separate a live Claude crew from a genuine bare-shell husk - both read `agent_not_found`.
-The reality-touching process probe separates them, and the U2 fix composes it back into `fm_backend_herdr_pane_agent_state` (on the `agent_not_found` branch only) through the fleet-wide `fm_harness_process_matches` contract (`bin/fm-session-lock-lib.sh`):
+The reality-touching process probe separates them, and the U2 fix composes it back into `fm_backend_herdr_pane_agent_state` (at U2 on the `agent_not_found` branch only; since U3 the probe also corroborates every registered record, below) through the fleet-wide `fm_harness_process_matches` contract (`bin/fm-session-lock-lib.sh`):
 
 ```text
 # live claimed Claude pane                     # genuine bare shell
