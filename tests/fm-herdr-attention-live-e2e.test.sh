@@ -94,7 +94,11 @@ export PATH="$FAKEBIN:$ORIGINAL_PATH"
 
 lab() { env PATH="$ORIGINAL_PATH" "$LAB_HELPER" run "$SESSION" "$@"; }
 new_pane() { lab tab create --workspace "$WS" --cwd "$WORK" --label "$1" --no-focus | jq -er '.result.root_pane.pane_id'; }
-agent_status_of() { lab agent get "$1" 2>/dev/null | jq -r '.result.agent.agent_status // "none"'; }
+# agent get writes its error JSON (agent_not_found) to STDERR with rc 1 on
+# 0.8.2, so merge the streams before jq: an error record reads "none", a
+# registered record reads its agent_status, and non-JSON lab noise stays ''
+# so a status assertion still fails rather than passing as "none".
+agent_status_of() { lab agent get "$1" 2>&1 | jq -r 'if .error != null then "none" else (.result.agent.agent_status // "none") end' 2>/dev/null; }
 state_change_seq_of() { lab agent get "$1" 2>/dev/null | jq -r '.result.agent.state_change_seq // -1'; }
 agent_list_has() { lab agent list 2>/dev/null | jq -e --arg p "$1" '.result.agents[]? | select(.pane_id == $p)' >/dev/null 2>&1; }
 
