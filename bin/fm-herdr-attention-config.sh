@@ -2,8 +2,8 @@
 # fm-herdr-attention-config.sh - apply the captain-consented Herdr attention
 # settings to the GLOBAL Herdr config so Herdr's own agent panel becomes a
 # fleet-wide attention view for firstmate's report-agent state publishing (Track
-# U phase U3; see docs/verification/runtime-backends.md "Agent recognition
-# recalibration" and the captain's scoped consent recorded in
+# U phase U3; see docs/verification/runtime-backends.md "Agent-state publishing
+# (U3)" and the captain's scoped consent recorded in
 # data/decisions/herdr-integration-decisions-2026-08-24.md).
 #
 # This is the ONE authorized global-config edit. It touches EXACTLY three keys
