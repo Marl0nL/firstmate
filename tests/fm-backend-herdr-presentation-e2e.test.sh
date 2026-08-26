@@ -1425,22 +1425,6 @@ assert_no_projection_mutation_since "$START" "agent-free duplicate-token recover
 lab workspace get "$DUP1_WSID" >/dev/null 2>&1 || fail "duplicate-token recovery removed the first quarantined workspace"
 lab workspace get "$DUP2_WSID" >/dev/null 2>&1 || fail "duplicate-token recovery removed the second quarantined workspace"
 
-# U3 record corroboration (fm_backend_herdr_pane_agent_state): a registered
-# record alone is no longer liveness - it could be firstmate's own report-agent
-# echo - so the duplicate-live-agent risk fixture also needs a real
-# harness-named foreground process in the pane: a copied sleep binary named
-# claude, whose process name and argv[0] path both carry the evidence
-# fm_harness_process_matches accepts.
-mkdir -p "$TMP_ROOT/harness-bin"
-cp "$(command -v sleep)" "$TMP_ROOT/harness-bin/claude"
-fm_backend_herdr_send_text_line "$HERDR_LAB_SESSION:$DUP1_PANE" "$TMP_ROOT/harness-bin/claude 600" \
-  || fail "could not launch the harness-named foreground process in the duplicate-live-agent pane"
-DUP1_HARNESS_UP=0
-for _ in $(seq 1 75); do
-  if fm_backend_herdr_pane_foreground_harness "$HERDR_LAB_SESSION" "$DUP1_PANE"; then DUP1_HARNESS_UP=1; break; fi
-  sleep 0.2
-done
-[ "$DUP1_HARNESS_UP" = 1 ] || fail "the duplicate-live-agent pane never showed the harness-named foreground process"
 lab pane report-agent "$DUP1_PANE" --source fm-projection-e2e --agent test-agent --state idle >/dev/null \
   || fail "could not register the duplicate-live-agent risk fixture"
 START=$(log_line_count)

@@ -338,13 +338,10 @@ fm_backend_herdr_pane_agent_state -> live -> agent_state alive (trunk before U2:
 `pane report-agent --state` remains the one primitive that publishes a state into herdr's own UI, and only on an UNCLAIMED pane; it is silently ignored on an integration-claimed Claude pane (U2 does not use it - that is U3's report-agent state-publishing).
 
 ```text
-# unclaimed pane / bare shell + report-agent (herdr-side registry behavior)
-report-agent --state working -> agent_status working ; agent list shows it
+# unclaimed pane / bare shell + report-agent
+report-agent --state working -> agent_status working ; pane_agent_state live ; agent list shows it
 +6s (override check)          -> agent_status working            # herdr does not revert it
-report-agent --state blocked -> agent_status blocked
-# (measured 2026-08-25, this record-over-shell pane also classified pane_agent_state
-#  live; since U3's record-corroboration fix the same shape classifies no-agent -
-#  acceptance table below)
+report-agent --state blocked -> agent_status blocked ; pane_agent_state live
 
 # integration-claimed Claude pane + report-agent (source firstmate AND herdr:claude, fresh --seq)
 report-agent --state working -> agent get still agent_not_found ; agent_status still unknown   # ignored by herdr
@@ -356,7 +353,7 @@ agent start probe --kind claude --pane <P> -- --dangerously-skip-permissions
 ```
 
 The herdr metadata alone cannot separate a live Claude crew from a genuine bare-shell husk - both read `agent_not_found`.
-The reality-touching process probe separates them, and the U2 fix composes it back into `fm_backend_herdr_pane_agent_state` (at U2 on the `agent_not_found` branch only; since U3 the probe also corroborates every registered record, below) through the fleet-wide `fm_harness_process_matches` contract (`bin/fm-session-lock-lib.sh`):
+The reality-touching process probe separates them, and the U2 fix composes it back into `fm_backend_herdr_pane_agent_state` (on the `agent_not_found` branch only) through the fleet-wide `fm_harness_process_matches` contract (`bin/fm-session-lock-lib.sh`):
 
 ```text
 # live claimed Claude pane                     # genuine bare shell
@@ -367,15 +364,14 @@ fm_backend_herdr_agent_state      = alive      fm_backend_herdr_agent_state     
 ```
 
 Four-way liveness acceptance table, herdr 0.8.2 / protocol 20 (verdict of `fm_backend_herdr_agent_state`, which routes `fm_backend_herdr_pane_agent_state` through `dead->missing`, `no-agent->dead`, `live->alive`, else `unreadable`).
-The `trunk` column is the pre-U2 verdict (registry-record only); the `shipped` column is the post-U2 verdict (a verified-harness foreground process, which since U3 must also corroborate any registry record):
+The `trunk` column is the pre-U2 verdict (registry-record only); the `shipped` column is the post-U2 verdict (registry record OR a verified-harness foreground process):
 
 | Pane shape | `pane get` | `agent get` | process fg | `pane_agent_state` (shipped) | `agent_state` trunk -> shipped | Correct? |
 | --- | --- | --- | --- | --- | --- | --- |
 | Live claimed Claude crew (fm-spawn) | present, `agent_session` set | `agent_not_found` | claude binary | `live` | `dead` -> `alive` | now yes |
 | Live unclaimed Claude (`HERDR_ENV=0`) | present, `agent_session` null | `agent_not_found` | claude binary | `live` | `dead` -> `alive` | now yes |
 | Genuine bare-shell husk | present, `agent_session` null | `agent_not_found` | shell | `no-agent` | `dead` -> `dead` | yes - reclaimable |
-| `report-agent`-registered pane, live harness process | present | record (working/idle/blocked) | harness binary | `live` | `alive` -> `alive` | yes |
-| `report-agent`-registered pane, no harness process | present | record (working/idle/blocked) | shell or gone | `no-agent` | `alive` -> `dead` | now yes - a record never outlives its process |
+| `report-agent`-registered pane | present | record (working/idle/blocked) | any | `live` | `alive` -> `alive` | yes |
 | Structurally gone pane | `pane_not_found` | - | - | `dead` | `missing` -> `missing` | yes |
 | `agent start --kind claude` (timed out) | present | `agent_not_found` | claude binary | `live` | `dead` -> `alive` | now yes - the launched Claude is live |
 
@@ -383,8 +379,6 @@ The three formerly-`NO` rows were the false-negative: the trunk classifier keyed
 That is what made `bin/fm-spawn.sh`'s start-confirmation report "bare shell with no agent", `bin/fm-control.sh` exit-verification report `already-stopped`, the session-start liveness sweep treat healthy supervisors as respawn candidates, and wake-resident raise confirmation misfire.
 The composition that separated these rows on the fork (`agent_session`-aware classification plus the `pane_process_state` reality probe, local #22) was absent on the re-baselined trunk; the `pane_process_state` and `pane_process_cwds` accessors still existed and worked, so U2 composed the process identity back in without new machinery.
 U2 upgrades `agent_not_found` to `live` ONLY when the foreground process is a verified harness (per `fm_harness_process_matches`); a bare shell, or an unreadable process probe, stays `no-agent`, so a genuine restored husk is still reclaimable and an unprovable read never upgrades to live.
-Since U3 firstmate itself publishes `report-agent` records for its Claude crews, a registered record is no longer accepted as liveness on its own: a `live` verdict from a record additionally requires the same verified-harness foreground process.
-A record over a bare shell or a process-less pane degrades to `no-agent` (a crashed crew relaunches and a post-restart husk reclaims instead of reading firstmate's own echo as alive), and a record whose process probe is itself unreadable stays `unknown`, which never licenses close.
 The husk-reclaim path (`fm_backend_herdr_tab_is_husk`, `create_task`, presentation reclaim) reaches the same classifier, so a live crew is now correctly refused for reclaim instead of being closed as a restored shell.
 
 This 0.8.2 result differs from the recorded 0.8.0 "Native state" row above, where live Claude Code 2.1.236 registered `agent_status=idle`.
@@ -426,8 +420,12 @@ Two coupled parts, both verified live:
    Scoped to firstmate's own Claude crew/scout panes; the captain's own panes are launched by the captain, and a Claude secondmate is excluded because its own herdr auto-detection reads `HERDR_ENV=1`.
 2. Reporting: the watcher's steady-state poll maps each managed Claude crew's supervisory state (the semantic busy verdict plus the last status verb) onto herdr's `idle|working|blocked` vocabulary and calls `fm_backend_herdr_publish_agent_state`, which reads herdr's currently published `agent_status` and issues `pane report-agent` ONLY on a change.
    The reconciling read makes a per-poll call a cheap no-op once established and self-heals after a herdr server restart (which resets the registry to `unknown`); a fresh transition into `blocked` also raises a `notification show` toast.
-   The publish is REALITY-GATED (added 2026-08-27): before anything is issued, the U2 process probe (`fm_backend_herdr_pane_foreground_harness`) must confirm a live verified-harness foreground process in the pane, so a published record is always backed by a real live crew and can never feed firstmate's own echo back to the liveness classifier.
+   The publish is REALITY-GATED (added 2026-08-27): before anything is issued, the U2 process probe (`fm_backend_herdr_pane_foreground_harness`) must confirm a live verified-harness foreground process in the pane, so a published record is backed by a real live crew at publish time rather than fabricated onto a dead pane.
    When the probe does not confirm one (a crashed crew, a restored bare-shell husk, or an unreadable probe), nothing is published; instead any still-registered record is cleared with `pane release-agent` (same `--source firstmate`), which returns the pane to `agent_not_found` and drops it from `agent list` (verified live), so the classifier reads `no-agent`, dead crews relaunch, and husk reclaim proceeds.
+   The liveness classifier itself is left UNCHANGED: a registered agent record is trusted as `live` without a separate process probe.
+   Record-trust is a load-bearing fleet contract - pi/codex native registration, husk reclaim's refusal to replace a live registered agent, and a remote secondmate's liveness (which cannot be foreground-process-probed from this host) all depend on a registered agent reading `live`.
+   A defense-in-depth change that made a record require process corroboration was tried and REVERTED (2026-08-27) after the full CI suite proved it regressed exactly those cases.
+   The residual is bounded and self-correcting: the reality gate closes the fabrication vector at the reporter (the only record producer firstmate controls), so a dead Claude crew's stale firstmate record can read `live` for at most one watcher poll until the reporter's `release-agent` fires - no worse than, and handled the same way as, the pre-existing reboot-ghost replayed-record window.
 
 ```text
 # fm_backend_herdr_publish_agent_state on an unclaimed pane hosting a live claude crew (session:pane)

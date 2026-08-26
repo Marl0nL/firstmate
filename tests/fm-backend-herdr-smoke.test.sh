@@ -35,10 +35,8 @@ herdr_forget_inherited_pane
 SESSION="fm-lab-backend-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SM_SCRATCH=
-HB_SCRATCH=
 cleanup_all() {
   [ -n "$SM_SCRATCH" ] && rm -rf "$SM_SCRATCH"
-  [ -n "$HB_SCRATCH" ] && rm -rf "$HB_SCRATCH"
   herdr_safe_stop_and_delete "$SESSION"
 }
 trap cleanup_all EXIT
@@ -122,12 +120,7 @@ pass "real herdr: create_task prunes the freshly-created workspace's seeded defa
 # still depends on) so neither scenario disturbs it.
 
 # 1. A genuinely LIVE duplicate (a real registered agent, via herdr's own
-#    `pane report-agent`) must still refuse exactly as before. U3 record
-#    corroboration (fm_backend_herdr_pane_agent_state) means the record alone
-#    is no longer liveness - it could be firstmate's own report-agent echo -
-#    so "genuinely live" also needs a real harness-named foreground process in
-#    the pane: a copied sleep binary named claude, whose process name and
-#    argv[0] path both carry the evidence fm_harness_process_matches accepts.
+#    `pane report-agent`) must still refuse exactly as before.
 LIVE_DUP_LABEL="fm-smoke-livedup"
 LIVE_DUP_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp) || fail "could not create the live-duplicate scenario's tab"
 read -r LIVE_DUP_TAB_ID LIVE_DUP_PANE_ID <<EOF
@@ -136,17 +129,6 @@ EOF
 if [ -z "$LIVE_DUP_TAB_ID" ] || [ -z "$LIVE_DUP_PANE_ID" ]; then
   fail "live-duplicate scenario tab creation did not return ids"
 fi
-HB_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-smoke-hb.XXXXXX")
-mkdir -p "$HB_SCRATCH/harness-bin"
-cp "$(command -v sleep)" "$HB_SCRATCH/harness-bin/claude"
-fm_backend_herdr_send_text_line "$SESSION:$LIVE_DUP_PANE_ID" "$HB_SCRATCH/harness-bin/claude 600" \
-  || fail "could not launch the harness-named foreground process in the live-duplicate pane"
-HARNESS_UP=0
-for _ in $(seq 1 75); do
-  if fm_backend_herdr_pane_foreground_harness "$SESSION" "$LIVE_DUP_PANE_ID"; then HARNESS_UP=1; break; fi
-  sleep 0.2
-done
-[ "$HARNESS_UP" = 1 ] || fail "the live-duplicate pane never showed the harness-named foreground process"
 herdr pane report-agent "$LIVE_DUP_PANE_ID" --source fm-smoke-test --agent fm-smoke-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the live-duplicate scenario's pane"
 if fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp >/dev/null 2>&1; then

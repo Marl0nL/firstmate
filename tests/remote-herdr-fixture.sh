@@ -15,11 +15,7 @@
 # Beyond that it models the pane IO a real launch performs. A pane reports a
 # registered agent once anything has been typed into it, and submitting starts
 # one turn: the next agent read reports working and the pane settles back to
-# idle, which is the native transition the adapter confirms a submit with. The
-# same typed fact backs `pane process-info`: a launched pane reports a
-# harness-named foreground process in the verified response shape, so the
-# classifier's U3 record corroboration reads it live, while an untouched pane
-# reports a bare shell and stays a husk.
+# idle, which is the native transition the adapter confirms a submit with.
 #
 # Usage:
 #   . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
@@ -45,14 +41,13 @@ SH
 printf '%s\n' "$*" >> "$LOG"
 jq_state() { jq "$@" "$STATE"; }
 save() { tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
-ws=""; label=""; cwd=""; pane_arg=""
+ws=""; label=""; cwd=""
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
     --workspace) ws=${args[$((i+1))]:-} ;;
     --label) label=${args[$((i+1))]:-} ;;
     --cwd) cwd=${args[$((i+1))]:-} ;;
-    --pane) pane_arg=${args[$((i+1))]:-} ;;
   esac
 done
 case "${1:-} ${2:-}" in
@@ -102,22 +97,7 @@ case "${1:-} ${2:-}" in
     [ ! -f "$SEND_FAIL" ] || exit 1
     jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
   "pane read") printf '\n' ;;
-  "pane process-info")
-    # The liveness classifier corroborates every registered record against the
-    # pane's real foreground process (U3 record corroboration,
-    # bin/backends/herdr.sh fm_backend_herdr_pane_agent_state), so this models
-    # the verified response shape (docs/verification/runtime-backends.md,
-    # 2026-07-20, herdr 0.7.4): a launched pane (anything typed into it) hosts
-    # a harness-named foreground process, an untouched pane hosts a bare
-    # shell, and a missing pane answers pane_not_found.
-    if [ "$(jq_state -r --arg p "$pane_arg" '[.tabs[]|select(.pane_id==$p)]|length')" = 0 ]; then
-      printf '{"error":{"code":"pane_not_found","message":"%s"}}\n' "$pane_arg"
-    elif [ "$(jq_state -r --arg p "$pane_arg" '.typed[$p] // false')" = true ]; then
-      printf '{"result":{"process_info":{"foreground_processes":[{"name":"codex","argv":["codex"],"cwd":"/","pid":4242}]}}}\n'
-    else
-      printf '{"result":{"process_info":{"foreground_processes":[{"name":"bash","argv":["-bash"],"cwd":"/","pid":4243}]}}}\n'
-    fi
-    ;;
+  "pane process-info") printf '{"result":{"process":{"name":"codex"}}}\n' ;;
   "agent get")
     pane=${3:-}
     if [ "$(jq_state -r --arg p "$pane" '.working[$p] // false')" = true ]; then

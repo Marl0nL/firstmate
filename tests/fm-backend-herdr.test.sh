@@ -596,8 +596,6 @@ test_create_task_refuses_duplicate_label_when_agent_live() {
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
   # 4: agent get -> a genuinely registered, live agent (idle, not just working)
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
-  # keyed reality probe: the registered record is corroborated by a live claude
-  herdr_pi_claude > "$resp/pi-w1_p2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-dup1 /tmp/proj' "$ROOT" 2>&1 )
@@ -646,8 +644,6 @@ test_create_task_refuses_when_any_duplicate_label_is_live() {
   printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/6.out"
   printf '{"result":{"pane":{"pane_id":"w1:p3"}}}\n' > "$resp/7.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/8.out"
-  # keyed reality probe: p3's registered record is corroborated by a live claude
-  herdr_pi_claude > "$resp/pi-w1_p3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-mixed1 /tmp/proj' "$ROOT" 2>&1 )
@@ -891,72 +887,18 @@ test_pane_agent_state_unreadable_process_probe_stays_no_agent() {
   pass "fm_backend_herdr_pane_agent_state: an unreadable reality probe never upgrades to live (stays no-agent)"
 }
 
-test_pane_agent_state_registered_agent_with_live_process_reads_live() {
-  # A registered record alone is not liveness: firstmate itself publishes
-  # report-agent records for its claude crews, so a record can be firstmate's
-  # own echo. A registered agent reads live ONLY when the reality probe
-  # corroborates it with a verified-harness foreground process.
+test_pane_agent_state_registered_agent_skips_process_probe() {
+  # A registered agent keeps its pure-metadata verdict and pays no extra call.
   local dir log resp fb out
   dir="$TMP_ROOT/pas-registered"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"      # agent get: registered idle
-  herdr_pi_claude > "$resp/pi-w1_p2.out"                                       # process-info: live claude
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT" )
-  [ "$out" = live ] || fail "a registered idle agent with a live claude process must classify 'live', got '$out'"
-  assert_contains "$(cat "$log")" $'pane\x1fprocess-info' "a registered agent's live verdict must be corroborated by the reality probe"
-  pass "fm_backend_herdr_pane_agent_state: a registered agent reads live only with reality-probe corroboration"
-}
-
-test_pane_agent_state_registered_record_without_process_reads_no_agent() {
-  # THE liveness-echo regression: a claude pane carrying a report-agent record
-  # (firstmate's own published echo, or a restart-replayed ghost) whose real
-  # foreground process is a bare shell must NOT read live - the record must
-  # degrade to no-agent so the relaunch guard sees a dead crew and husk
-  # reclaim can proceed.
-  local dir log resp fb out
-  dir="$TMP_ROOT/pas-record-no-proc"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"      # agent get: firstmate's record echo
-  herdr_pi_shell > "$resp/pi-w1_p2.out"                                        # process-info: bare shell, no crew
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT" )
-  [ "$out" = no-agent ] || fail "a registered record with no live harness process must classify 'no-agent', got '$out'"
-  pass "fm_backend_herdr_pane_agent_state: a report-agent record with no live process degrades to no-agent (reclaimable)"
-}
-
-test_agent_state_recovery_maps_record_without_process_to_dead() {
-  # The recovery-grade view of the same case: a crashed claude crew whose pane
-  # still carries firstmate's published record must read dead so
-  # fm-wake-resident's dead-crew handling and the relaunch guard proceed.
-  local dir log resp fb out
-  dir="$TMP_ROOT/as-record-no-proc"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  herdr_pi_shell > "$resp/pi-w1_p2.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w1:p2' "$ROOT" )
-  [ "$out" = dead ] || fail "recovery-grade agent_state for a record-bearing pane with no live process must be 'dead', got '$out'"
-  pass "fm_backend_herdr_agent_state: a report-agent record with no live process reads dead (relaunchable)"
-}
-
-test_pane_agent_state_registered_record_unreadable_probe_reads_unknown() {
-  # A positive record is only downgraded on a positive process read: when the
-  # probe itself is unreadable the verdict is unknown, which never licenses
-  # closing (fail-closed polarity preserved).
-  local dir log resp fb out
-  dir="$TMP_ROOT/pas-record-unreadable"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"error":{"code":"internal_error","message":"transient"}}\n' > "$resp/pi-w1_p2.out"   # probe: unreadable
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT" )
-  [ "$out" = unknown ] || fail "a registered record with an unreadable probe must classify 'unknown', got '$out'"
-  pass "fm_backend_herdr_pane_agent_state: a registered record with an unreadable probe stays unknown (never licenses close)"
+  [ "$out" = live ] || fail "a registered idle agent must classify 'live', got '$out'"
+  assert_not_contains "$(cat "$log")" $'pane\x1fprocess-info' "a registered agent must NOT trigger the reality probe"
+  pass "fm_backend_herdr_pane_agent_state: a registered agent reads live without the extra process-info call"
 }
 
 test_pane_agent_state_dead_pane_skips_process_probe() {
@@ -3037,8 +2979,6 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
   printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}\n' > "$resp/2.out"
   printf '{"result":{"pane":{"pane_id":"w1:p1"}}}\n' > "$resp/3.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
-  # keyed reality probe: the registered record is corroborated by a live claude
-  herdr_pi_claude > "$resp/pi-w1_p1.out"
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_recovery_allows_flat fmtest "$1" task-p3' "$ROOT" "$journal" 2>&1)
   status=$?
@@ -4875,13 +4815,10 @@ test_create_task_husk_replacement_creates_before_closing
 test_pane_agent_state_live_unregistered_claude_reads_live
 test_pane_agent_state_bare_shell_reads_no_agent
 test_pane_agent_state_unreadable_process_probe_stays_no_agent
-test_pane_agent_state_registered_agent_with_live_process_reads_live
-test_pane_agent_state_registered_record_without_process_reads_no_agent
-test_pane_agent_state_registered_record_unreadable_probe_reads_unknown
+test_pane_agent_state_registered_agent_skips_process_probe
 test_pane_agent_state_dead_pane_skips_process_probe
 test_agent_state_recovery_maps_live_claude_to_alive
 test_agent_state_recovery_maps_bare_shell_to_dead
-test_agent_state_recovery_maps_record_without_process_to_dead
 test_foreground_harness_identifies_claude_and_rejects_shell
 test_create_task_refuses_duplicate_label_when_unregistered_claude_live
 test_create_task_creates_and_parses_ids

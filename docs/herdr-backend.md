@@ -260,17 +260,16 @@ No Herdr-specific copy of that protocol exists.
 ## Restart and liveness behavior
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids, but the underlying harness processes and live agent registrations do not survive.
-A restored same-labeled tab with a missing pane, or with no verified-harness foreground process, is a husk; a registered record alone does not prevent this (the corroboration rule below).
+A restored same-labeled tab with a missing pane, or with no registered agent and no verified-harness foreground process, is a husk.
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
 
 The generic Herdr agent-liveness probe reuses the same classifier.
-A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a live verified-harness foreground process - registered or not - becomes `alive`, and an unexpected read becomes `unreadable`.
+A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent - or a live verified-harness process in an unregistered pane - becomes `alive`, and an unexpected read becomes `unreadable`.
 Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
 
 A Claude crew registers no agent record on Herdr 0.8.2 / protocol 20 (`agent get` answers `agent_not_found`, `agent list` is empty), whether or not the integration claimed the pane, so its metadata alone is indistinguishable from a restored bare shell's.
-The classifier therefore composes the `pane process-info` reality probe into every structurally present pane's verdict: a pane whose foreground process is a verified harness (per the fleet-wide `fm_harness_process_matches` contract in `bin/fm-session-lock-lib.sh`) classifies `live`, while on the `agent_not_found` branch a bare shell - or an unreadable probe - stays `no-agent`, so a genuine restored husk remains reclaimable and an unprovable read never upgrades to live.
-A registered `agent get` record must be corroborated by the same probe, because firstmate itself publishes report-agent records for its Claude crews (below) and a record can therefore be firstmate's own echo or a restart-replayed ghost that outlives the process: a record over a bare shell or a process-less pane degrades to `no-agent`, and a record whose probe is itself unreadable stays `unknown` (a positive record is only downgraded on a positive process read, and `unknown` never licenses close).
+The classifier therefore composes the `pane process-info` reality probe into its `agent_not_found` branch: a pane whose foreground process is a verified harness (per the fleet-wide `fm_harness_process_matches` contract in `bin/fm-session-lock-lib.sh`) classifies `live`, while a bare shell - or an unreadable probe - stays `no-agent`, so a genuine restored husk remains reclaimable and an unprovable read never upgrades to live.
 Every liveness consumer and the husk-reclaim path route through this one classifier, so a live-but-unregistered crew is neither respawned as a duplicate nor closed as a restored shell.
 This recognition is firstmate-internal; publishing the crew's state into Herdr's own UI is the separate reporter below.
 The dated 0.8.2 measurements and the post-fix four-way liveness acceptance table are recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) "Agent recognition recalibration"; that record's live guard is `FM_HERDR_RECAL_LIVE=1 tests/fm-herdr-recalibration-live-e2e.test.sh`.
@@ -286,7 +285,7 @@ The dated 0.8.2 report-agent-publishing measurements are recorded in [`verificat
 The session-start sweep uses this probe.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
 
-Herdr's metadata surface can outlive the processes it describes: after a machine reboot the server replays its persisted session layout wholesale, so `agent list`, `pane get`, and `agent get` all answer in full for agents that are not running, including an `agent_status` of `idle` (the record-corroboration rule above is what keeps such a replayed record from classifying `live`).
+The classifier above consults the process probe only on the `agent_not_found` branch; a registered record keeps its pure metadata verdict, and that surface can outlive the processes it describes: after a machine reboot the server replays its persisted session layout wholesale, so `agent list`, `pane get`, and `agent get` all answer in full for agents that are not running, including an `agent_status` of `idle`, which classifies `live` for a pane with no live process.
 `pane process-info` is the only call in this adapter that reaches a real OS process rather than the persisted layout.
 `fm_backend_herdr_pane_process_state` (is a real process behind the pane), `fm_backend_herdr_pane_process_cwds` (its kernel-reported working directory), and `fm_backend_herdr_pane_foreground_harness` (is a foreground process a verified harness) are the reality-touching accessors, and any caller that must not be fooled by a replayed record needs both a metadata verdict and a process verdict.
 `bin/fm-autostart.sh` is the first such caller: its "a firstmate is already running" guard requires a matching entry to be confirmed by `pane process-info`, never `agent list` alone, so a post-reboot ghost record cannot make the boot unit skip starting the real one.

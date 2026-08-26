@@ -1894,18 +1894,11 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #              "ID stability across a server restart"), and what a future
 #              `resume_agents_on_restore = false` restore would produce too
 #              (a plain shell, never an agent). This is the reclaimable husk.
-#              A pane whose `agent get` DOES report a registered agent_status
-#              but whose reality probe finds no verified-harness foreground
-#              process lands here too: since firstmate itself publishes
-#              report-agent records for its claude crews (fm_backend_herdr_
-#              publish_agent_state), a record can be firstmate's own echo - or
-#              a restart-replayed ghost - that outlives the process it
-#              described, so a record is never accepted as liveness on its own.
-#   live     - the foreground-process reality probe
+#   live     - `agent get` succeeds and reports a real agent_status (working,
+#              idle, done, or blocked - any registered value), OR `agent get`
+#              answers agent_not_found but the foreground-process reality probe
 #              (fm_backend_herdr_pane_foreground_harness) identifies a verified
-#              harness, whether `agent get` reports a registered agent_status
-#              (working, idle, done, or blocked) or answers agent_not_found.
-#              The unregistered arm is load-bearing on herdr 0.8.2, where the
+#              harness. The second arm is load-bearing on herdr 0.8.2, where the
 #              v7-vs-v8 integration gap leaves a live Claude crew unregistered so
 #              its metadata is byte-identical to a bare-shell husk's; only the
 #              OS process separates them (docs/verification/runtime-backends.md
@@ -1913,18 +1906,15 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #              protocol 20)"). An idle or blocked (or unregistered-but-live)
 #              agent is a genuine agent, never a close-and-replace candidate.
 #   unknown  - anything else: an unparseable/unexpected response from either
-#              call, a `pane get` success whose own echoed pane_id does not
+#              call, or a `pane get` success whose own echoed pane_id does not
 #              round-trip (guards against misreading a herdr response shape
-#              change as "the pane exists"), or a registered record whose
-#              process probe is itself unreadable (a positive record is only
-#              DOWNGRADED on a positive process read, never on a failed one).
-#              The caller must fail safe toward refusal here, never toward
-#              closing - this is the conservative backstop the husk check
-#              depends on.
+#              change as "the pane exists"). The caller must fail safe toward
+#              refusal here, never toward closing - this is the conservative
+#              backstop the husk check depends on.
 #
-# The foreground-process probe is consulted on every structurally present pane
-# before a live verdict; only a structurally gone pane keeps its pure metadata
-# verdict and pays no extra call.
+# The foreground-process probe is consulted ONLY on the agent_not_found branch,
+# so a registered agent and a structurally gone pane both keep their pure
+# metadata verdict and pay no extra call.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code presence status
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
@@ -1961,16 +1951,7 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   fi
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   case "$status" in
-    working|idle|done|blocked)
-      if fm_backend_herdr_pane_foreground_harness "$session" "$pane_id"; then
-        printf 'live'
-      else
-        case "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" in
-          live|dead) printf 'no-agent' ;;
-          *) printf 'unknown' ;;
-        esac
-      fi
-      ;;
+    working|idle|done|blocked) printf 'live' ;;
     *) printf 'unknown' ;;
   esac
 }
