@@ -188,6 +188,41 @@ test_matrix_claude_bare_nbsp_row() {
   pass "matrix: claude's ❯+NBSP row reads empty on every profile in both locales (#1988)"
 }
 
+test_matrix_claude_titled_top_rule_captain_pane() {
+  # The away-mode inject wedge (task afk-daemon-inject-wedge-claude-pane,
+  # captured live from the captain's primary Claude pane, claude 2.1.246 on
+  # herdr 0.8.2 / protocol 20): a Claude session with a custom session title
+  # inlays that title in the composer's TOP rule
+  # (`──────────── Personal-Firstmate ─`). That row is no longer nothing-but-`─`,
+  # so the solid-separator test misses it, leaving the plain BOTTOM rule looking
+  # like a lone separator below the `❯`. The cursorless selector read that as a
+  # forming pi composer and deferred - the genuinely idle composer classified
+  # `unknown`, and the away-mode daemon deferred every escalation for ~8h. The
+  # fix does NOT treat a titled rule as a pi separator (that would let a titled
+  # divider pasted into a pi composer slice it into a false-empty pair);
+  # instead the bare `❯` glyph boxed between its titled top rule and its solid
+  # bottom rule (_fm_composer_bare_boxed_by_rules) suppresses the
+  # lone-separator staleness rule, so the boxed glyph reads empty exactly as
+  # the all-plain-rules idle pane above already does.
+  local screen typed cjk
+  screen=$'transcript line\n  ✔ Update installed · Restart to update\n───────────────────────────────── Personal-Firstmate ─\n❯'"$NBSP"$'\n──────────────────────────────────────────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents'
+  assert_screen "claude captain-pane idle on herdr" empty "$CAPS_STYLED" "$screen" '' probe-absent
+  assert_screen "claude captain-pane idle on tmux" empty "$CAPS_TMUX" "$screen" 3 probe-absent
+  assert_screen "claude captain-pane idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "claude captain-pane idle on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  # A title in the top rule must not fabricate empty over real typed input:
+  # fail-closed direction preserved.
+  typed=$'───────────────────────────────── Personal-Firstmate ─\n❯ fix the login bug\n──────────────────────────────────────────────────────'
+  assert_screen "claude captain-pane typed on herdr" pending "$CAPS_STYLED" "$typed" '' probe-absent
+  assert_screen "claude captain-pane typed on tmux" pending "$CAPS_TMUX" "$typed" 1 probe-absent
+  assert_screen "claude captain-pane typed on plain backends" unknown "$CAPS_PLAIN" "$typed"
+  # The boxed-glyph structure is the proof, not the title text: a non-ASCII
+  # session title reaches the same empty verdict.
+  cjk=$'transcript line\n──────────────────────── 個人ファーストメイト ─\n❯'"$NBSP"$'\n──────────────────────────────────────────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents'
+  assert_screen "claude captain-pane non-ASCII title on herdr" empty "$CAPS_STYLED" "$cjk" '' probe-absent
+  pass "matrix: claude's titled composer top rule (captain pane) reads empty idle (any title charset), pending when typed"
+}
+
 test_matrix_codex_dim_hint_row() {
   # Real idle codex: bold `›`, reset, then an SGR-2 dim hint. Styled captures
   # strip the ghost and prove empty; plain captures must defer as unknown -
@@ -318,6 +353,13 @@ test_matrix_pi_separated_needs_identity() {
   assert_screen "absent identity cannot prove blank pi pair" unknown "$CAPS_TMUX" "$screen" 2 probe-absent
   typed=$'────────────────────────\nfix the flaky test\n────────────────────────'
   assert_screen "pi typed" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
+  # A dash-bounded TITLED divider pasted as the last line of unsubmitted pi
+  # content must not close the pair and slice the region into a blank final
+  # sub-pair (a titled-rule-as-separator design reads this false empty, and
+  # the away-mode injector would type over the real input): pi pair
+  # separators stay solid-only, so the whole pasted region reads pending.
+  typed=$'transcript\n────────────────────────\npasted meeting notes\n──────── Notes ────────\n────────────────────────\n footer'
+  assert_screen "pi pasted titled divider stays pending" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
   typed=$'────────────────────────\n❯\n────────────────────────'
   assert_screen "pi lone-glyph draft with identity" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
   assert_screen "pi lone-glyph draft on tmux" pending "$CAPS_TMUX" "$typed" 1 "$pi_idle"
@@ -613,6 +655,7 @@ test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
+test_matrix_claude_titled_top_rule_captain_pane
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant

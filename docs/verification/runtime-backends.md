@@ -207,6 +207,39 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### Captain-pane titled composer rule (2026-08-26, herdr 0.8.2 / protocol 20, Claude Code 2.1.246)
+
+This re-derives the idle-composer classification that the agent-recognition recalibration below deliberately left untouched.
+Measured on the captain's host (Fedora) against herdr 0.8.2 / protocol 20 and Claude Code 2.1.246, in isolated `fm-lab-` sessions through `bin/fm-herdr-lab.sh` with a byte-identical default-session tripwire, plus a read-only `pane read` of the live primary pane.
+
+Base Claude's idle composer surface is unchanged at this release: a bare `❯` (then U+00A0) between two horizontal `─` rules, with the `⏵⏵ bypass permissions on ...` footer below, and a fresh idle pane classifies `empty` on every backend at every width from 60 to 200 columns, direct and nested inside tmux.
+The captain's primary pane differs by one thing: a custom session title is inlaid in the composer's TOP rule as a colored chip, `──────────── Personal-Firstmate ─`.
+Because that row is no longer nothing-but-`─`, the solid-separator test missed it, so only the plain BOTTOM rule registered - a lone separator directly below the `❯`, which the cursorless selector (`_fm_composer_select_cursorless`, used by herdr and the other cursorless backends) read as a forming pi composer and deferred on, classifying the genuinely idle composer `unknown`.
+The away-mode daemon then deferred every escalation for ~8h (`state/.supervise-daemon.log`: `inject deferred: supervisor composer not confirmed-empty (state=unknown ...)`).
+The cursor-anchored path (tmux) was never affected: it identifies the composer by the cursor row, not by the bottom-most-shape scan, so the same shape classified `empty` there before and after.
+
+Cursorless herdr verdict (`styled=1 cursor=0 identity=1`), from live captures, before and after the fix:
+
+| Pane (idle unless noted) | Composer top rule | Before | After |
+| --- | --- | --- | --- |
+| Fresh Claude, widths 60-200 | plain `────` | empty | empty |
+| Captain primary | `──── Personal-Firstmate ─` (titled) | unknown | empty |
+| Captain shape, text typed | titled | pending | pending |
+| Bare dead shell | none | unknown | unknown |
+
+The fix keeps pi separators solid-only and instead recognizes claude's idle composer as a bare agent glyph BOXED between its own top rule (which carries the session title) and its solid bottom rule (`_fm_composer_bare_boxed_by_rules`), suppressing the lone-separator staleness rule for exactly that shape; the pi separated-composer path is left untouched, so a titled divider pasted into a pi composer cannot slice it into a false `empty`.
+Because the boxed-glyph structure is the proof rather than the title text, a non-ASCII session title reaches the same `empty` verdict.
+The fail-closed direction is unchanged (typed reads pending, a dead shell reads unknown).
+The portable regression is `test_matrix_claude_titled_top_rule_captain_pane` in `tests/fm-composer-lib.test.sh`, built from the live byte capture; it classifies `unknown` without the fix.
+Live end-to-end proof: the away-mode inject guard's own verdict function, run read-only against the live primary pane, returned `empty` (it returned `unknown` before the fix):
+
+```sh
+. bin/backends/herdr.sh
+fm_backend_herdr_composer_state "default:<firstmate-pane>"   # -> empty
+```
+
+Out of this change's scope, and tracked separately in the backlog item: `config/wedge-alarm` was unset on this Linux host, so the loud away-mode alarm had no active channel and the wedge stayed silent.
+
 ## Steering-inbox doorbell
 
 The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
@@ -354,7 +387,7 @@ Installing the v8 integration is a global change to the captain's personal claud
 The live harness's B row also asserts that herdr still answers `agent_not_found` for the live crew, so if a future v8 install begins registering Claude the recalibration fails loudly and is re-measured.
 
 The detection feed the reporter design leans on is intact: `pane read --source detection` on an idle Claude renders the prompt box (`❯` above the `⏵⏵ bypass permissions on` footer), and `agent explain --file <cap> --agent claude --json` resolves it to `state: idle` via manifest `2026.08.21.1` (`matched_rule: live_prompt_box`).
-The idle-composer surface itself is unchanged at this Claude version; the full ghost-suggestion, pending, and queued-placeholder composer classification is owned by `bin/fm-composer-lib.sh` and its live guard `tests/fm-composer-matrix-live-e2e.test.sh`, which this recalibration did not re-derive (it is orthogonal to agent recognition, per the design report's coordination note).
+The idle-composer surface itself is unchanged at this Claude version; the full ghost-suggestion, pending, and queued-placeholder composer classification is owned by `bin/fm-composer-lib.sh` and its live guard `tests/fm-composer-matrix-live-e2e.test.sh`, which this recalibration did not re-derive (it is orthogonal to agent recognition, per the design report's coordination note); the composer classifier was subsequently re-derived for the captain-pane titled composer rule under [Captain-pane titled composer rule](#captain-pane-titled-composer-rule-2026-08-26-herdr-082--protocol-20-claude-code-21246).
 
 ### Presentation projection visibility on 0.8.2 (U1)
 
