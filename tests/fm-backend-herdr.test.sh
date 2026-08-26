@@ -596,6 +596,8 @@ test_create_task_refuses_duplicate_label_when_agent_live() {
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
   # 4: agent get -> a genuinely registered, live agent (idle, not just working)
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  # keyed reality probe: the registered record is corroborated by a live claude
+  herdr_pi_claude > "$resp/pi-w1_p2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-dup1 /tmp/proj' "$ROOT" 2>&1 )
@@ -644,6 +646,8 @@ test_create_task_refuses_when_any_duplicate_label_is_live() {
   printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/6.out"
   printf '{"result":{"pane":{"pane_id":"w1:p3"}}}\n' > "$resp/7.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/8.out"
+  # keyed reality probe: p3's registered record is corroborated by a live claude
+  herdr_pi_claude > "$resp/pi-w1_p3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-mixed1 /tmp/proj' "$ROOT" 2>&1 )
@@ -887,18 +891,72 @@ test_pane_agent_state_unreadable_process_probe_stays_no_agent() {
   pass "fm_backend_herdr_pane_agent_state: an unreadable reality probe never upgrades to live (stays no-agent)"
 }
 
-test_pane_agent_state_registered_agent_skips_process_probe() {
-  # A registered agent keeps its pure-metadata verdict and pays no extra call.
+test_pane_agent_state_registered_agent_with_live_process_reads_live() {
+  # A registered record alone is not liveness: firstmate itself publishes
+  # report-agent records for its claude crews, so a record can be firstmate's
+  # own echo. A registered agent reads live ONLY when the reality probe
+  # corroborates it with a verified-harness foreground process.
   local dir log resp fb out
   dir="$TMP_ROOT/pas-registered"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"      # agent get: registered idle
+  herdr_pi_claude > "$resp/pi-w1_p2.out"                                       # process-info: live claude
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT" )
-  [ "$out" = live ] || fail "a registered idle agent must classify 'live', got '$out'"
-  assert_not_contains "$(cat "$log")" $'pane\x1fprocess-info' "a registered agent must NOT trigger the reality probe"
-  pass "fm_backend_herdr_pane_agent_state: a registered agent reads live without the extra process-info call"
+  [ "$out" = live ] || fail "a registered idle agent with a live claude process must classify 'live', got '$out'"
+  assert_contains "$(cat "$log")" $'pane\x1fprocess-info' "a registered agent's live verdict must be corroborated by the reality probe"
+  pass "fm_backend_herdr_pane_agent_state: a registered agent reads live only with reality-probe corroboration"
+}
+
+test_pane_agent_state_registered_record_without_process_reads_no_agent() {
+  # THE liveness-echo regression: a claude pane carrying a report-agent record
+  # (firstmate's own published echo, or a restart-replayed ghost) whose real
+  # foreground process is a bare shell must NOT read live - the record must
+  # degrade to no-agent so the relaunch guard sees a dead crew and husk
+  # reclaim can proceed.
+  local dir log resp fb out
+  dir="$TMP_ROOT/pas-record-no-proc"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"      # agent get: firstmate's record echo
+  herdr_pi_shell > "$resp/pi-w1_p2.out"                                        # process-info: bare shell, no crew
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT" )
+  [ "$out" = no-agent ] || fail "a registered record with no live harness process must classify 'no-agent', got '$out'"
+  pass "fm_backend_herdr_pane_agent_state: a report-agent record with no live process degrades to no-agent (reclaimable)"
+}
+
+test_agent_state_recovery_maps_record_without_process_to_dead() {
+  # The recovery-grade view of the same case: a crashed claude crew whose pane
+  # still carries firstmate's published record must read dead so
+  # fm-wake-resident's dead-crew handling and the relaunch guard proceed.
+  local dir log resp fb out
+  dir="$TMP_ROOT/as-record-no-proc"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  herdr_pi_shell > "$resp/pi-w1_p2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w1:p2' "$ROOT" )
+  [ "$out" = dead ] || fail "recovery-grade agent_state for a record-bearing pane with no live process must be 'dead', got '$out'"
+  pass "fm_backend_herdr_agent_state: a report-agent record with no live process reads dead (relaunchable)"
+}
+
+test_pane_agent_state_registered_record_unreadable_probe_reads_unknown() {
+  # A positive record is only downgraded on a positive process read: when the
+  # probe itself is unreadable the verdict is unknown, which never licenses
+  # closing (fail-closed polarity preserved).
+  local dir log resp fb out
+  dir="$TMP_ROOT/pas-record-unreadable"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"error":{"code":"internal_error","message":"transient"}}\n' > "$resp/pi-w1_p2.out"   # probe: unreadable
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "a registered record with an unreadable probe must classify 'unknown', got '$out'"
+  pass "fm_backend_herdr_pane_agent_state: a registered record with an unreadable probe stays unknown (never licenses close)"
 }
 
 test_pane_agent_state_dead_pane_skips_process_probe() {
@@ -2979,6 +3037,8 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
   printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}\n' > "$resp/2.out"
   printf '{"result":{"pane":{"pane_id":"w1:p1"}}}\n' > "$resp/3.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  # keyed reality probe: the registered record is corroborated by a live claude
+  herdr_pi_claude > "$resp/pi-w1_p1.out"
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_recovery_allows_flat fmtest "$1" task-p3' "$ROOT" "$journal" 2>&1)
   status=$?
@@ -4628,15 +4688,20 @@ test_wait_transition_clean_timeout_returns_1() {
 }
 
 # --- U3: report-agent state publishing (fm_backend_herdr_publish_agent_state) ---
-# The reconciling reporter reads herdr's currently published agent_status and
-# pushes `pane report-agent` ONLY on a change, so it is a cheap no-op once
-# established and re-establishes after a server restart (unknown != target).
+# The reconciling reporter is reality-gated (it publishes only onto a pane
+# whose foreground process is a verified harness, and releases a stale record
+# otherwise), reads herdr's currently published agent_status and pushes `pane
+# report-agent` ONLY on a change, so it is a cheap no-op once established and
+# re-establishes after a server restart (unknown != target).
 
 publish_run() {  # <dir> <current-agent_status-json> <target> <harness> <state> [title] [body] -> stdout: log path
+  # The keyed reality probe models a LIVE claude crew in the pane, the normal
+  # publishing case; the release-path tests below script a bare shell instead.
   local dir=$1 curjson=$2 target=$3 harness=$4 state=$5 title=${6-} body=${7-}
   local log resp fb
   mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '%s\n' "$curjson" > "$resp/1.out"   # agent get: current published status
+  herdr_pi_claude > "$resp/pi-w1_p2.out"     # process-info: live claude crew
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_publish_agent_state "$1" "$2" "$3" "$4" "$5"' \
@@ -4655,8 +4720,47 @@ test_publish_agent_state_noop_when_already_reported() {
 test_publish_agent_state_pushes_on_change() {
   local log
   log=$(publish_run "$TMP_ROOT/pub-change" '{"result":{"agent":{"agent_status":"idle"}}}' fmtest:w1:p2 claude working)
+  assert_contains "$(cat "$log")" $'pane\x1fprocess-info' "the reporter must consult the reality probe before publishing"
   assert_contains "$(cat "$log")" $'pane\x1freport-agent\x1fw1:p2\x1f--source\x1ffirstmate\x1f--agent\x1fclaude\x1f--state\x1fworking' "a changed state must push report-agent with source firstmate"
   pass "publish pushes report-agent when the target state differs from herdr's"
+}
+
+test_publish_agent_state_releases_stale_record_when_no_live_process() {
+  # THE reality gate: a pane whose crew crashed to a bare shell (or a restored
+  # bare-shell husk) still carries firstmate's own report-agent record. The
+  # reporter must NOT re-publish onto it - that echo would defeat the liveness
+  # classifier - and must instead clear the stale record with release-agent so
+  # the pane returns to agent_not_found and reads dead/reclaimable.
+  local dir log resp fb calls
+  dir="$TMP_ROOT/pub-release"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"   # agent get: firstmate's stale record
+  herdr_pi_shell > "$resp/pi-w1_p2.out"                                     # process-info: bare shell, crew gone
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_publish_agent_state fmtest:w1:p2 claude working' "$ROOT" \
+    >/dev/null 2>&1 || fail "releasing a stale record must succeed (return 0)"
+  calls=$(cat "$log")
+  assert_not_contains "$calls" $'pane\x1freport-agent' "no state may be published onto a pane with no live crew process"
+  assert_contains "$calls" $'pane\x1frelease-agent\x1fw1:p2\x1f--source\x1ffirstmate\x1f--agent\x1fclaude' "the stale firstmate record must be released"
+  assert_not_contains "$calls" $'notification\x1fshow' "a release must never raise a toast"
+  pass "publish refuses a pane with no live crew process and releases the stale record"
+}
+
+test_publish_agent_state_no_live_process_no_record_publishes_nothing() {
+  # No live crew AND no registered record: nothing to publish, nothing to
+  # release - the reporter must leave the pane untouched.
+  local dir log resp fb calls
+  dir="$TMP_ROOT/pub-norecord"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/1.out"
+  herdr_pi_shell > "$resp/pi-w1_p2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_publish_agent_state fmtest:w1:p2 claude idle' "$ROOT" \
+    >/dev/null 2>&1 || fail "a record-free no-crew pane must be a clean no-op (return 0)"
+  calls=$(cat "$log")
+  assert_not_contains "$calls" $'pane\x1freport-agent' "no state may be published onto a record-free no-crew pane"
+  assert_not_contains "$calls" $'pane\x1frelease-agent' "there is no record to release on a record-free pane"
+  pass "publish leaves a record-free no-crew pane untouched"
 }
 
 test_publish_agent_state_reestablishes_after_restart() {
@@ -4697,6 +4801,32 @@ test_publish_agent_state_unparseable_target_returns_error() {
   out=$( bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_publish_agent_state "notarget" claude working; echo "rc=$?"' "$ROOT" 2>/dev/null )
   [ "$out" = "rc=1" ] || fail "a target with no session:pane split must return 1, got '$out'"
   pass "publish returns non-zero when the target cannot be parsed"
+}
+
+test_state_seq_numeric_and_monotonic_on_bsd_date() {
+  # BSD/macOS date has no %N: `date +%s%N` emits a literal N suffix
+  # ("1756280000N"). The seq helper must still hand report-agent a purely
+  # numeric value that advances across calls, or every publish on a Darwin
+  # captain silently fails.
+  local dir out first second
+  dir="$TMP_ROOT/seq-bsd"; mkdir -p "$dir/bin"
+  cat > "$dir/bin/date" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  +%s%N) printf '1756280000N\n' ;;
+  +%s) printf '1756280000\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/bin/date"
+  out=$( PATH="$dir/bin:$PATH" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_state_seq; printf "\n"; fm_backend_herdr_state_seq; printf "\n"' "$ROOT" )
+  first=$(printf '%s\n' "$out" | sed -n 1p)
+  second=$(printf '%s\n' "$out" | sed -n 2p)
+  case "$first" in ''|*[!0-9]*) fail "seq must be purely numeric under a BSD-shaped date, got '$first'" ;; esac
+  case "$second" in ''|*[!0-9]*) fail "second seq must be purely numeric under a BSD-shaped date, got '$second'" ;; esac
+  [ "$second" -gt "$first" ] || fail "seq must advance across calls within one process ($first -> $second)"
+  pass "fm_backend_herdr_state_seq: numeric and strictly advancing under a BSD-shaped (no-%N) date"
 }
 
 # shellcheck source=bin/fm-backend.sh
@@ -4745,10 +4875,13 @@ test_create_task_husk_replacement_creates_before_closing
 test_pane_agent_state_live_unregistered_claude_reads_live
 test_pane_agent_state_bare_shell_reads_no_agent
 test_pane_agent_state_unreadable_process_probe_stays_no_agent
-test_pane_agent_state_registered_agent_skips_process_probe
+test_pane_agent_state_registered_agent_with_live_process_reads_live
+test_pane_agent_state_registered_record_without_process_reads_no_agent
+test_pane_agent_state_registered_record_unreadable_probe_reads_unknown
 test_pane_agent_state_dead_pane_skips_process_probe
 test_agent_state_recovery_maps_live_claude_to_alive
 test_agent_state_recovery_maps_bare_shell_to_dead
+test_agent_state_recovery_maps_record_without_process_to_dead
 test_foreground_harness_identifies_claude_and_rejects_shell
 test_create_task_refuses_duplicate_label_when_unregistered_claude_live
 test_create_task_creates_and_parses_ids
@@ -4893,9 +5026,12 @@ test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_publish_agent_state_noop_when_already_reported
 test_publish_agent_state_pushes_on_change
+test_publish_agent_state_releases_stale_record_when_no_live_process
+test_publish_agent_state_no_live_process_no_record_publishes_nothing
 test_publish_agent_state_reestablishes_after_restart
 test_publish_agent_state_blocked_raises_toast
 test_publish_agent_state_blocked_no_toast_without_title
 test_publish_agent_state_rejects_unknown_state
 test_publish_agent_state_unparseable_target_returns_error
+test_state_seq_numeric_and_monotonic_on_bsd_date
 test_wait_transition_clean_timeout_returns_1

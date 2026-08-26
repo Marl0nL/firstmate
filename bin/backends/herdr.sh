@@ -1894,11 +1894,18 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #              "ID stability across a server restart"), and what a future
 #              `resume_agents_on_restore = false` restore would produce too
 #              (a plain shell, never an agent). This is the reclaimable husk.
-#   live     - `agent get` succeeds and reports a real agent_status (working,
-#              idle, done, or blocked - any registered value), OR `agent get`
-#              answers agent_not_found but the foreground-process reality probe
+#              A pane whose `agent get` DOES report a registered agent_status
+#              but whose reality probe finds no verified-harness foreground
+#              process lands here too: since firstmate itself publishes
+#              report-agent records for its claude crews (fm_backend_herdr_
+#              publish_agent_state), a record can be firstmate's own echo - or
+#              a restart-replayed ghost - that outlives the process it
+#              described, so a record is never accepted as liveness on its own.
+#   live     - the foreground-process reality probe
 #              (fm_backend_herdr_pane_foreground_harness) identifies a verified
-#              harness. The second arm is load-bearing on herdr 0.8.2, where the
+#              harness, whether `agent get` reports a registered agent_status
+#              (working, idle, done, or blocked) or answers agent_not_found.
+#              The unregistered arm is load-bearing on herdr 0.8.2, where the
 #              v7-vs-v8 integration gap leaves a live Claude crew unregistered so
 #              its metadata is byte-identical to a bare-shell husk's; only the
 #              OS process separates them (docs/verification/runtime-backends.md
@@ -1906,15 +1913,18 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #              protocol 20)"). An idle or blocked (or unregistered-but-live)
 #              agent is a genuine agent, never a close-and-replace candidate.
 #   unknown  - anything else: an unparseable/unexpected response from either
-#              call, or a `pane get` success whose own echoed pane_id does not
+#              call, a `pane get` success whose own echoed pane_id does not
 #              round-trip (guards against misreading a herdr response shape
-#              change as "the pane exists"). The caller must fail safe toward
-#              refusal here, never toward closing - this is the conservative
-#              backstop the husk check depends on.
+#              change as "the pane exists"), or a registered record whose
+#              process probe is itself unreadable (a positive record is only
+#              DOWNGRADED on a positive process read, never on a failed one).
+#              The caller must fail safe toward refusal here, never toward
+#              closing - this is the conservative backstop the husk check
+#              depends on.
 #
-# The foreground-process probe is consulted ONLY on the agent_not_found branch,
-# so a registered agent and a structurally gone pane both keep their pure
-# metadata verdict and pay no extra call.
+# The foreground-process probe is consulted on every structurally present pane
+# before a live verdict; only a structurally gone pane keeps its pure metadata
+# verdict and pays no extra call.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code presence status
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
@@ -1951,7 +1961,16 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   fi
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   case "$status" in
-    working|idle|done|blocked) printf 'live' ;;
+    working|idle|done|blocked)
+      if fm_backend_herdr_pane_foreground_harness "$session" "$pane_id"; then
+        printf 'live'
+      else
+        case "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" in
+          live|dead) printf 'no-agent' ;;
+          *) printf 'unknown' ;;
+        esac
+      fi
+      ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -3189,35 +3208,71 @@ fm_backend_herdr_busy_state() {  # <target>
 }
 
 # fm_backend_herdr_state_seq: a monotonic-enough `--seq` value for report-agent.
-# Nanosecond wall clock, matching the recalibration harness's seq_ns; herdr uses
-# --seq only to drop an out-of-order report, so a wall-clock stamp that advances
-# every call is sufficient (a rare backward clock step at worst skips one push,
-# self-healed by the next reconcile).
-fm_backend_herdr_state_seq() { date +%s%N; }
+# Nanosecond wall clock on GNU date, matching the recalibration harness's
+# seq_ns. BSD/macOS date has no %N and emits a literal `N` suffix instead
+# (`1756280000N`), which would hand report-agent a malformed seq on every
+# Darwin captain, so a non-numeric read falls back to the whole-second clock
+# scaled to the same nanosecond magnitude. Either way the value is bumped past
+# the last one this process issued, so repeated calls within one second still
+# advance; herdr uses --seq only to drop an out-of-order report, so a rare
+# backward clock step across processes at worst skips one push, self-healed by
+# the next reconcile.
+fm_backend_herdr_state_seq() {
+  local ns
+  ns=$(date +%s%N 2>/dev/null)
+  case "$ns" in
+    ''|*[!0-9]*) ns=$(( $(date +%s) * 1000000000 )) ;;
+  esac
+  if [ -n "${FM_BACKEND_HERDR_STATE_SEQ_LAST:-}" ] \
+    && [ "$ns" -le "$FM_BACKEND_HERDR_STATE_SEQ_LAST" ]; then
+    ns=$((FM_BACKEND_HERDR_STATE_SEQ_LAST + 1))
+  fi
+  FM_BACKEND_HERDR_STATE_SEQ_LAST=$ns
+  printf '%s' "$ns"
+}
 
 # fm_backend_herdr_publish_agent_state: reconcile <target>'s herdr-published
 # agent state to <state> (idle|working|blocked) so herdr's own attention-sorted
-# agent panel shows the crew's live state. RECONCILING and idempotent: it reads
-# herdr's currently published agent_status and issues `pane report-agent` ONLY
-# when it differs, so calling every supervision poll is a cheap no-op once the
-# state is established, and a herdr server restart - which resets the registry to
-# `unknown` - self-heals on the next poll (unknown != the target state, so it is
-# re-published). `pane report-agent` only takes on an UNCLAIMED pane (verified on
-# 0.8.2); firstmate's claude crews are launched claim-suppressed (HERDR_ENV=0 in
-# bin/fm-spawn.sh) for exactly this. On a FRESH transition into `blocked` it also
-# raises a herdr toast (notification show) so a worker that needs the captain
-# surfaces at once; the toast is best-effort and gated on <toast_title> being
-# non-empty, and fires once because the very report that set `blocked` makes the
-# next poll a reconciled no-op. The caller owns <toast_title>/<toast_body>
-# wording (captain-facing; AGENTS.md section 9). Returns 0 on a no-op or a
-# successful push, non-zero only when the target could not be parsed or the push
-# call failed.
+# agent panel shows the crew's live state. REALITY-GATED: before anything is
+# published, the U2 process probe (fm_backend_herdr_pane_foreground_harness)
+# must confirm a live verified-harness foreground process in the pane, so a
+# published record is always backed by a real live crew and can never fabricate
+# a `live` verdict for the liveness classifier out of firstmate's own echo.
+# When the probe does NOT confirm one (crashed crew, restored bare-shell husk,
+# unreadable probe), nothing is published; instead any still-registered record
+# on the pane is cleared with `pane release-agent`, returning it to
+# agent_not_found so the classifier reads the pane from reality again (dead
+# crews relaunch, husks reclaim). RECONCILING and idempotent on the publish
+# side: it reads herdr's currently published agent_status and issues `pane
+# report-agent` ONLY when it differs, so calling every supervision poll is a
+# cheap no-op once the state is established, and a herdr server restart - which
+# resets the registry to `unknown` - self-heals on the next poll (unknown !=
+# the target state, so it is re-published). `pane report-agent` only takes on
+# an UNCLAIMED pane (verified on 0.8.2); firstmate's claude crews are launched
+# claim-suppressed (HERDR_ENV=0 in bin/fm-spawn.sh) for exactly this. On a
+# FRESH transition into `blocked` it also raises a herdr toast (notification
+# show) so a worker that needs the captain surfaces at once; the toast is
+# best-effort and gated on <toast_title> being non-empty, and fires once
+# because the very report that set `blocked` makes the next poll a reconciled
+# no-op. The caller owns <toast_title>/<toast_body> wording (captain-facing;
+# AGENTS.md section 9). Returns 0 on a no-op or a successful push/release,
+# non-zero only when the target could not be parsed or the push/release call
+# failed.
 fm_backend_herdr_publish_agent_state() {  # <target> <harness> <state> [toast_title] [toast_body]
   local target=$1 harness=$2 state=$3 toast_title=${4-} toast_body=${5-}
   case "$state" in idle | working | blocked) ;; *) return 0 ;; esac
   [ -n "$harness" ] || return 0
   fm_backend_herdr_parse_target "$target" || return 1
   local session=$FM_BACKEND_HERDR_SESSION pane=$FM_BACKEND_HERDR_PANE current seq
+  if ! fm_backend_herdr_pane_foreground_harness "$session" "$pane"; then
+    current=$(fm_backend_herdr_agent_status_raw "$session" "$pane")
+    [ -n "$current" ] || return 0
+    seq=$(fm_backend_herdr_state_seq)
+    fm_backend_herdr_cli "$session" pane release-agent "$pane" \
+      --source "$FM_BACKEND_HERDR_STATE_SOURCE" --agent "$harness" \
+      --seq "$seq" >/dev/null 2>&1 || return 1
+    return 0
+  fi
   current=$(fm_backend_herdr_agent_status_raw "$session" "$pane")
   [ "$current" = "$state" ] && return 0
   seq=$(fm_backend_herdr_state_seq)

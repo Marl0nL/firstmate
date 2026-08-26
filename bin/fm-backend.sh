@@ -799,7 +799,10 @@ fm_backend_busy_state() {  # <backend> <target>
 # vocabulary). Only herdr has such a registry (its attention-sorted agent panel);
 # every other backend is a no-op. The herdr implementation is reconciling and
 # idempotent (it pushes only when its published state differs from <state>), so a
-# caller may invoke it every supervision poll. [toast_title]/[toast_body] carry
+# caller may invoke it every supervision poll; it is also reality-gated (it
+# publishes only onto a pane with a live verified-harness foreground process,
+# and releases a stale record otherwise), so the published registry never
+# outlives the crew it describes. [toast_title]/[toast_body] carry
 # an optional captain-facing alert raised on a fresh transition into `blocked`.
 fm_backend_publish_agent_state() {  # <backend> <target> <harness> <state> [toast_title] [toast_body]
   local backend=$1

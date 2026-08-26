@@ -291,8 +291,10 @@ window_label() {
 # agent_state -> bin/backends/herdr.sh). A `blocked:`/`needs-decision:` status
 # verb outranks the busy verdict, so an idle-but-blocked crew floats to the top
 # of herdr's priority panel and raises a toast; otherwise a busy pane is
-# `working` and a quiet pane is `idle`. The publish is reconciling, so this may
-# run every poll and only the fresh transition into blocked toasts. Toast text is
+# `working` and a quiet pane is `idle`. The publish is reconciling and
+# reality-gated (a pane with no live crew process is released, never
+# published), so this may run every poll and only the fresh transition into
+# blocked toasts. Toast text is
 # captain-facing (AGENTS.md section 9): a plain title plus the worker's own
 # one-line reason, capped, with no internal terms added.
 report_herdr_agent_state() {  # <window> <last-status-line> <busy_now>
