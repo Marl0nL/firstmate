@@ -1,0 +1,44 @@
+# U3 end-to-end demo: fm-spawn claim-suppression -> firstmate publishes -> herdr agent panel data
+# herdr 0.8.2 / 2.1.246 (Claude Code), lab session (isolated, guarded): fm-lab-u3-demo-705462-27929
+
+## 1. Real bin/fm-spawn.sh spawns a claude crew on the herdr backend
+fm-spawn.sh u3demo1 <scratch-project> --harness claude --mode local-only --yolo on  -> rc=0, pane=w1:p2
+
+## 2. The typed launch command in the crew pane carries the claim-suppression prefix (pane read, wrapped lines joined)
+marlon@bazzite:/var/home/marlon/.treehouse/scratch-project-d5829c/1/scratch-project$ HERDR_ENV
+=0 env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude
+--dangerously-skip-permissions "$('/home/marlon/.no-mistakes/worktrees/08ac01b5fe88/01M0Z7YW3R
+6XXW2Q6TJVDXSAJF/bin/fm-operational-input.sh' encode launch-brief < '/tmp/fm-u3-demo.0WWavh/da
+ta/u3demo1/brief.md')"
+
+
+## 3. The pane is UNCLAIMED (agent_session null), so pane report-agent takes
+pane get w1:p2 .agent_session -> null
+
+## 4. firstmate publishes working, then blocked (fm_backend_herdr_publish_agent_state, the watcher's per-poll call)
+publish working -> rc 0
+agent list (the data herdr's attention-sorted agent panel renders):
+[
+  {
+    "agent": "claude",
+    "agent_status": "working",
+    "cwd": "/tmp/fm-u3-demo.0WWavh/scratch-project",
+    "focused": true,
+    "foreground_cwd": "/var/home/marlon/.treehouse/scratch-project-d5829c/1/scratch-project",
+    "pane_id": "w1:p2",
+    "revision": 2,
+    "state_change_seq": 1,
+    "tab_id": "w1:t2",
+    "terminal_id": "term_659f4df3bc5b12",
+    "terminal_title": "marlon@bazzite:/var/home/marlon/.treehouse/scratch-project-d5829c/1/scratch-project",
+    "terminal_title_stripped": "marlon@bazzite:/var/home/marlon/.treehouse/scratch-project-d5829c/1/scratch-project",
+    "workspace_id": "w1"
+  }
+]
+publish blocked (with toast) -> rc 0
+agent get after blocked:
+{"pane_id":"w1:p2","agent_kind":null,"agent_status":"blocked","source":null}
+
+## 5. Teardown (task + isolated lab session; default-session tripwire verified by the helper)
+fm-teardown rc=0
+lab teardown ok

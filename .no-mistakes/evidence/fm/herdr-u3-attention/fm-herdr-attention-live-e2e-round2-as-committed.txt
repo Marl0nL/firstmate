@@ -1,0 +1,22 @@
+# Round 2 re-run: FM_HERDR_ATTENTION_LIVE=1 tests/fm-herdr-attention-live-e2e.test.sh
+# Run 2026-08-27 from the committed tree at 1ebd92c (no local patches), herdr 0.8.2 / Claude Code 2.1.246, isolated fm-lab session, rc=0.
+# Context: round 1 found the committed guard's agent_status_of helper discarded the stderr error JSON
+# that `agent get` emits for an agent-less pane on herdr 0.8.2, so checks E and F could not pass as
+# committed; the fix landed as commit 1ebd92c. This run proves the guard is green exactly as committed.
+ok - a claim-suppressed (HERDR_ENV=0) Claude crew is unclaimed on herdr 0.8.2 / 2.1.246 (Claude Code)
+ok - publishing registers the live crew in agent list with state idle on herdr 0.8.2 / 2.1.246 (Claude Code)
+ok - publishing drives an idle->working transition in the registry on herdr 0.8.2 / 2.1.246 (Claude Code)
+ok - re-publishing an unchanged state issues no new report (state_change_seq stable) on herdr 0.8.2 / 2.1.246 (Claude Code)
+ok - publishing a blocked transition lands blocked and its toast call is accepted on herdr 0.8.2 / 2.1.246 (Claude Code)
+ok - a firstmate-reported state sticks and is not overridden by Herdr on herdr 0.8.2 / 2.1.246 (Claude Code)
+ok - the reality gate refuses to publish onto a pane with no live crew process on herdr 0.8.2 / 2.1.246 (Claude Code)
+ok - a crashed crew's stale record is released and the pane reads no-agent/reclaimable on herdr 0.8.2 / 2.1.246 (Claude Code)
+ok - U3 attention state-publishing live harness completed (8 checks) on herdr 0.8.2 / 2.1.246 (Claude Code)
+
+# Also re-run green from the same committed tree in this round (fake-CLI, no live herdr needed):
+#   tests/fm-backend-herdr.test.sh          - reporter reality gate, release-on-crash, liveness-echo
+#                                             classifier regressions, BSD-shaped no-%N seq fallback
+#   tests/fm-watch-herdr-report.test.sh     - watcher busy/status -> idle|working|blocked mapping
+#   tests/fm-herdr-attention-config.test.sh - consented-settings TOML transform, restore-on-failure
+#   tests/fm-busy-state.test.sh             - claude anti-echo guard (pi keeps the native verdict)
+#   tests/fm-crew-state.test.sh             - crew-state view with the pi-migrated native-busy case

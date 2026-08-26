@@ -1,0 +1,22 @@
+# bin/fm-herdr-attention-config-edit.py - the TOML transform bin/fm-herdr-attention-config.sh applies on the captain's host
+# (helper adds dated backup, 'herdr config check' validation with restore-on-failure, then 'herdr server reload-config')
+
+## sample captain config -> transformed (rc=0; diff -u):
+--- /tmp/tmp.JdtWZldCL5/config.toml	2026-08-27 01:29:09.805749594 +1000
++++ /tmp/tmp.JdtWZldCL5/config.new.toml	2026-08-27 01:29:09.823749555 +1000
+@@ -3,7 +3,11 @@
+ port = 4400
+ 
+ [ui]
++agent_panel_sort = "priority"
+ theme = "dark"
+ 
+ [ui.toast]
+-delivery = "off"
++delivery = "herdr"
++
++[ui.sound]
++enabled = true
+\ No newline at end of file
+
+## idempotence: re-running on the transformed config -> rc=3 (3 = already applied, nothing written)
