@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Live Herdr agent-recognition recalibration harness (live-harness-optin family).
 #
-# Track U phases U0 (measurement) and U2 (the recognition fix). Herdr's per-pane
-# agent recognition is a harness-dependent surface: whether a live Claude crew
-# registers an agent record, whether `pane report-agent` drives and sticks a
-# state, and whether the OS process probe can tell a live agent from a husk are
-# all things Herdr and Claude emit, not things a stub can prove. This harness
-# ports the design report's exp1-exp7 registration counterfactuals
+# Track U phases U0 (measurement), U2 (the recognition fix), and U3's record
+# corroboration. Herdr's per-pane agent recognition is a harness-dependent
+# surface: whether a live Claude crew registers an agent record, whether
+# `pane report-agent` drives and sticks a registry state, and whether the OS
+# process probe can tell a live agent from a husk are all things Herdr and
+# Claude emit, not things a stub can prove. This harness ports the design
+# report's exp1-exp7 registration counterfactuals
 # (data/design-herdr-interface/report.md, appendix) onto the installed
 # Herdr/Claude.
 #
@@ -14,13 +15,17 @@
 # agent record, so the trunk classifier read every live crew as no-agent/dead.
 # U2 composed the reality-touching foreground-process probe back into
 # fm_backend_herdr_pane_agent_state so a live Claude crew reads live/alive while
-# a genuine bare shell still reads no-agent/dead. This harness now guards BOTH
-# halves live: it proves the underlying herdr environment still does NOT register
-# a Claude crew (so the fix is doing real work), AND that the composed classifier
-# now returns the correct four-way verdict for a live crew, a bare-shell husk, a
-# report-agent-registered pane, and a structurally gone pane. A Herdr or Claude
-# upgrade that changes any of it fails LOUDLY, naming both versions, instead of
-# letting the liveness/husk/spawn/exit classifiers drift silently.
+# a genuine bare shell still reads no-agent/dead. U3 then made firstmate publish
+# report-agent records for its own claude crews, so the classifier corroborates
+# EVERY registered record against the same probe: a record over a bare shell
+# reads no-agent/dead, never live (a record must not outlive its process). This
+# harness guards all of it live: it proves the underlying herdr environment
+# still does NOT register a Claude crew (so the fix is doing real work), AND
+# that the composed classifier returns the correct four-way verdict for a live
+# crew, a bare-shell husk, a record-over-shell pane, and a structurally gone
+# pane. A Herdr or Claude upgrade that changes any of it fails LOUDLY, naming
+# both versions, instead of letting the liveness/husk/spawn/exit classifiers
+# drift silently.
 #
 # It exercises the real bin/backends/herdr.sh classifiers, never source bytes,
 # and every Herdr call - including the adapter's own - is routed through the
@@ -117,6 +122,10 @@ wait_claude_ready() {  # <pane>
   lab pane wait-output "$1" --regex 'bypass permissions' --timeout 60000 >/dev/null 2>&1
   sleep 3
 }
+# agent get writes its error JSON (agent_not_found) to STDERR with rc 1 on
+# 0.8.2; merge the streams so a registered record reads its agent_status and an
+# unregistered pane reads "none" instead of leaking the error to jq.
+agent_status_of() { lab agent get "$1" 2>&1 | jq -r 'if .error != null then "none" else (.result.agent.agent_status // "none") end' 2>/dev/null; }
 
 WS=$(lab workspace create --cwd "$WORK" --label fm-recal --no-focus \
   | jq -er '.result.workspace.workspace_id') \
@@ -135,11 +144,16 @@ fm_backend_herdr_release_floor_verdict "$FLOOR_PROTO" "$FLOOR_VER" || floor_rc=$
 CHECKED=$((CHECKED + 1))
 pass "presentation projection is default-on (floor $FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION/proto $FM_BACKEND_HERDR_MIN_PRESENTATION_PROTOCOL cleared) on $V"
 
-# --- A. report-agent is the load-bearing fix primitive (exp3/exp6) -----------
-# On an UNCLAIMED pane, `report-agent --state` must register the pane, drive the
-# adapter's `live` verdict, and STICK (Herdr must not override it from its own
-# screen detection). This is the primitive U2's reporter is built on; if it ever
-# stops working the whole recognition fix is void.
+# --- A. report-agent is the load-bearing publish primitive (exp3/exp6) --------
+# On an UNCLAIMED pane, `report-agent --state` must register the record in
+# herdr's own registry (agent get / agent list / pane get agent_status) and
+# STICK (Herdr must not override it from its own screen detection). This is the
+# primitive U3's reporter publishes the agent panel through; if it ever stops
+# working the publishing fix is void. Since U3's record-corroboration fix the
+# record must NOT drive the adapter's liveness verdict by itself: a record over
+# a bare shell classifies no-agent (recovery dead), because only the
+# foreground-process probe proves a live crew - the record here is firstmate's
+# own echo.
 BARE=$(new_pane bare) || fail "could not create the bare-shell pane"
 sleep 2
 base_state=$(fm_backend_herdr_pane_agent_state "$SESSION" "$BARE")
@@ -147,20 +161,28 @@ base_state=$(fm_backend_herdr_pane_agent_state "$SESSION" "$BARE")
   || fail "report-agent primitive: a fresh bare shell classified '$base_state', expected no-agent, on $V"
 lab pane report-agent "$BARE" --source firstmate --agent claude --state working --seq "$(seq_ns)" >/dev/null 2>&1 \
   || fail "report-agent working was rejected on an unclaimed pane on $V"
-st_working=$(fm_backend_herdr_pane_agent_state "$SESSION" "$BARE")
-[ "$st_working" = live ] \
-  || fail "report-agent primitive: after report working, an unclaimed pane classified '$st_working', expected live, on $V - the fix primitive is broken"
+reg_working=$(agent_status_of "$BARE")
+[ "$reg_working" = working ] \
+  || fail "report-agent primitive: after report working, the registry shows agent_status '$reg_working', expected working, on $V - the publish primitive is broken"
+lab agent list 2>/dev/null | jq -e --arg p "$BARE" '.result.agents[]? | select(.pane_id == $p)' >/dev/null 2>&1 \
+  || fail "report-agent primitive: the registered pane is absent from 'agent list' on $V"
+rec_meta=$(fm_backend_herdr_pane_agent_state "$SESSION" "$BARE")
+[ "$rec_meta" = no-agent ] \
+  || fail "record corroboration regressed on $V: a report-agent record over a bare shell classified '$rec_meta', expected no-agent - a record must not substitute for the process probe"
+rec_recovery=$(fm_backend_herdr_agent_state "$SESSION:$BARE")
+[ "$rec_recovery" = dead ] \
+  || fail "record corroboration regressed on $V: a record-over-shell pane classified recovery '$rec_recovery', expected dead (a record never outlives its process)"
 sleep 6
-st_stick=$(fm_backend_herdr_pane_agent_state "$SESSION" "$BARE")
-[ "$st_stick" = live ] \
-  || fail "report-agent primitive: reported state did not stick after 6s (classified '$st_stick', expected live) on $V - Herdr is now overriding firstmate-reported state"
+reg_stick=$(agent_status_of "$BARE")
+[ "$reg_stick" = working ] \
+  || fail "report-agent primitive: reported state did not stick after 6s (agent_status '$reg_stick', expected working) on $V - Herdr is now overriding firstmate-reported state"
 lab pane report-agent "$BARE" --source firstmate --agent claude --state blocked --seq "$(seq_ns)" >/dev/null 2>&1 \
   || fail "report-agent blocked was rejected on an unclaimed pane on $V"
 blk=$(lab pane get "$BARE" | jq -r '.result.pane.agent_status // empty')
 [ "$blk" = blocked ] \
   || fail "report-agent primitive: after report blocked, agent_status was '$blk', expected blocked, on $V"
 CHECKED=$((CHECKED + 1))
-pass "report-agent drives and sticks working/blocked on an unclaimed pane (the U2 fix primitive works) on $V"
+pass "report-agent drives and sticks working/blocked in the registry while the record-over-shell pane reads no-agent/dead (U3 record corroboration) on $V"
 
 # --- B. The recognition fix: a live claimed Claude crew reads live/alive ------
 # A live pane-typed Claude crew (fm-spawn style, integration-claimed) registers
