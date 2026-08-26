@@ -286,6 +286,41 @@ window_label() {
   [ -n "$task" ] && printf 'fm-%s' "$task"
 }
 
+# report_herdr_agent_state: map a claude crew's supervisory state to herdr's
+# idle|working|blocked agent-panel vocabulary and publish it (fm_backend_publish_
+# agent_state -> bin/backends/herdr.sh). A `blocked:`/`needs-decision:` status
+# verb outranks the busy verdict, so an idle-but-blocked crew floats to the top
+# of herdr's priority panel and raises a toast; otherwise a busy pane is
+# `working` and a quiet pane is `idle`. The publish is reconciling, so this may
+# run every poll and only the fresh transition into blocked toasts. Toast text is
+# captain-facing (AGENTS.md section 9): a plain title plus the worker's own
+# one-line reason, capped, with no internal terms added.
+report_herdr_agent_state() {  # <window> <last-status-line> <busy_now>
+  local w=$1 last=$2 busy_now=$3 state title body reason
+  title=""
+  body=""
+  case "$last" in
+    needs-decision:*)
+      state=blocked
+      title="firstmate: a worker needs your decision"
+      reason=${last#needs-decision:}
+      ;;
+    blocked:*)
+      state=blocked
+      title="firstmate: a worker is blocked"
+      reason=${last#blocked:}
+      ;;
+    *)
+      if [ "$busy_now" -eq 0 ]; then state=working; else state=idle; fi
+      ;;
+  esac
+  if [ "$state" = blocked ]; then
+    reason=${reason# }
+    body=$(printf '%s' "$reason" | tr '\n' ' ' | cut -c1-200)
+  fi
+  fm_backend_publish_agent_state herdr "$w" claude "$state" "$title" "$body" 2>/dev/null || true
+}
+
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
@@ -1339,6 +1374,18 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # Publish this crew's live state into herdr's own agent panel so the captain
+    # sees an attention-sorted working/idle/blocked view across every space. This
+    # rides the existing poll (no new daemon) and reuses the busy verdict already
+    # computed above plus the last status verb. fm_backend_publish_agent_state is
+    # reconciling (it pushes only on a change and re-establishes after a herdr
+    # server restart), so an unchanged crew is a cheap no-op. Scoped to claude
+    # crews - the claim-suppressed panes herdr never registers itself; herdr
+    # detects pi/codex natively, and secondmate supervisor panes stay claimed.
+    if [ "$kind" != secondmate ] && fm_backend_has_push "$(window_backend "$w")" \
+      && [ "$(window_harness "$w")" = claude ]; then
+      report_herdr_agent_state "$w" "$last" "$busy_now"
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

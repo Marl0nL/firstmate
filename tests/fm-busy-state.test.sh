@@ -376,25 +376,49 @@ test_dead_endpoint_overrides() {
 }
 
 test_herdr_native_busy_only() {
+  # pi is a harness herdr registers itself, so its native agent_status is an
+  # independent signal (unlike claude - see test_herdr_native_busy_not_trusted_for_claude).
   local state out
   state=$(new_state_dir herdr-native)
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
   fm_backend_busy_state() { printf '%s' "$FAKE_NATIVE"; }
   FAKE_NATIVE=busy
-  out=$(fm_busy_classify herdr s:p claude t1 "$state")
+  out=$(fm_busy_classify herdr s:p pi t1 "$state")
   [ "$out" = "busy herdr-native" ] || fail "native busy with no record must classify busy, got '$out'"
   FAKE_NATIVE=idle
-  out=$(fm_busy_classify herdr s:p claude t1 "$state")
+  out=$(fm_busy_classify herdr s:p pi t1 "$state")
   [ "$out" = "unknown missing" ] || fail "native idle must NOT classify idle, got '$out'"
   # A valid record outranks the native verdict.
   local gen
   gen=$("$EV" arm "$state" t1)
-  "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop
+  "$EV" apply "$state" t1 idle --gen "$gen" --source pi-ext --event stop
   FAKE_NATIVE=busy
-  out=$(fm_busy_classify herdr s:p claude t1 "$state")
-  [ "$out" = "idle claude-hook" ] || fail "the adapter record must outrank herdr's native verdict, got '$out'"
+  out=$(fm_busy_classify herdr s:p pi t1 "$state")
+  [ "$out" = "idle pi-ext" ] || fail "the adapter record must outrank herdr's native verdict, got '$out'"
   unset -f fm_backend_busy_state
   pass "herdr's native verdict is trusted for busy only, and records outrank it"
+}
+
+test_herdr_native_busy_not_trusted_for_claude() {
+  # Anti-circularity: herdr never registers a claude crew itself, so its native
+  # agent_status for a claude pane is either unknown or firstmate's OWN
+  # report-agent echo (Track U3) - never an independent signal. fm_busy_classify
+  # must therefore NOT borrow herdr's native busy for claude, or a wedged crew's
+  # stale "working" report could latch busy and suppress stale detection.
+  local state out
+  state=$(new_state_dir herdr-native-claude)
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf 'busy'; }
+  out=$(fm_busy_classify herdr s:p claude t1 "$state")
+  [ "$out" = "unknown missing" ] || fail "claude must NOT borrow herdr's native busy (its own echo), got '$out'"
+  # A real firstmate turn record is still authoritative for claude.
+  local gen
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source claude-hook --event submit
+  out=$(fm_busy_classify herdr s:p claude t1 "$state")
+  [ "$out" = "busy claude-hook" ] || fail "claude's own turn record must still drive busy, got '$out'"
+  unset -f fm_backend_busy_state
+  pass "claude does not borrow herdr's native busy verdict (report-agent echo), but its own record still counts"
 }
 
 # The record parser runs inside sourcing callers (the watcher, the daemon, the
@@ -459,6 +483,7 @@ test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
+test_herdr_native_busy_not_trusted_for_claude
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
 

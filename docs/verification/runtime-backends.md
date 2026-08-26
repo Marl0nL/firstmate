@@ -406,8 +406,44 @@ foreground      -> /home/.../claude/versions/2.1.245   # what firstmate's classi
 
 So on 0.8.2, re-homing the fleet to herdr delivers the **per-task-workspace half of the captain's visibility immediately**: each worker gets its own labelled space in the spaces sidebar, with the worker's live terminal inside it, so the captain can navigate to any crew across all homes without one space hiding the others.
 It does **not** deliver herdr-native status indicators (the attention-sorted agent panel, working/idle/blocked icons) for Claude crews, because herdr registers no agent for them (`agent list` stays empty, `agent_status` stays `unknown`).
-The U2 recognition fix is firstmate-internal - it corrects spawn, exit, liveness, and raise decisions - but it does not publish state into herdr's own UI; that is U3's report-agent state-publishing on un-claimed panes.
-Net: re-homing gives the captain immediate cross-space pane visibility, while the at-a-glance status-indicator half waits on U3.
+The U2 recognition fix is firstmate-internal - it corrects spawn, exit, liveness, and raise decisions - but it does not publish state into herdr's own UI; that is U3's report-agent state-publishing on un-claimed panes, recorded under "Agent-state publishing (U3)" below.
+Net: re-homing gives the captain immediate cross-space pane visibility, while the at-a-glance status-indicator half is delivered by U3.
+
+### Agent-state publishing (U3)
+
+Measured 2026-08-26 in a guarded `fm-lab-` session against herdr 0.8.2 / protocol 20 and Claude Code 2.1.246, default-session tripwire clean.
+U3 makes firstmate the authoritative agent-state reporter for its own Claude crews so herdr's own attention-sorted agent panel shows a working/idle/blocked view across every space.
+Two coupled parts, both verified live:
+
+1. Claim-suppression: `bin/fm-spawn.sh` launches each Claude crew/scout pane on herdr with `HERDR_ENV=0` prepended to the typed command, so the integration `SessionStart` hook does not claim the pane (Claude ignores `HERDR_ENV`; only the hook reads it).
+   An unclaimed pane carries `agent_session: null` and is the pane `pane report-agent` takes on; a claimed pane silently ignores it (recorded above).
+   Scoped to firstmate's own Claude crew/scout panes; the captain's own panes are launched by the captain, and a Claude secondmate is excluded because its own herdr auto-detection reads `HERDR_ENV=1`.
+2. Reporting: the watcher's steady-state poll maps each managed Claude crew's supervisory state (the semantic busy verdict plus the last status verb) onto herdr's `idle|working|blocked` vocabulary and calls `fm_backend_herdr_publish_agent_state`, which reads herdr's currently published `agent_status` and issues `pane report-agent` ONLY on a change.
+   The reconciling read makes a per-poll call a cheap no-op once established and self-heals after a herdr server restart (which resets the registry to `unknown`); a fresh transition into `blocked` also raises a `notification show` toast.
+
+```text
+# fm_backend_herdr_publish_agent_state on an unclaimed pane (session:pane)
+publish idle    -> agent get agent_status idle    ; agent list shows the pane
+publish working -> agent get agent_status working ; state_change_seq advances
+publish working (again, unchanged) -> NO report-agent issued ; state_change_seq stable  # reconciling no-op
+publish blocked -> agent get agent_status blocked ; notification show accepted
++5s (override check)               -> agent_status still blocked                         # herdr does not revert a firstmate report
+
+# claim-suppressed Claude crew (env HERDR_ENV=0 claude ...)
+pane get agent_session -> null                    # unclaimed: report-agent takes
+publish working        -> agent get agent_status working ; agent list shows the crew
+```
+
+The blocked toast is delivered only when the global config enables it: with `[ui.toast]` at its default `delivery = "off"`, `notification show` returns `{"reason":"disabled","shown":false}` (the call still succeeds).
+The captain-consented attention config - `agent_panel_sort = "priority"`, `[ui.toast] delivery = "herdr"`, `[ui.sound] enabled = true` - is the ONE authorized global-config edit and is applied by `bin/fm-herdr-attention-config.sh` (dated backup, `herdr config check` validation with restore-on-failure, then `herdr server reload-config`); `herdr --default-config` confirms the three keys and their accepted values (`agent_panel_sort` one of `spaces`/`workspaces`/`priority`).
+The attention-sorted panel floating a blocked crew to the top is a server-global GUI behavior not scriptable from an isolated lab session, so it stays a captain visual confirmation after that helper runs; this harness proves the data the panel sorts on.
+Refresh this section with:
+
+```sh
+FM_HERDR_ATTENTION_LIVE=1 tests/fm-herdr-attention-live-e2e.test.sh
+```
+
+Because firstmate now publishes the Claude pane's own state, herdr's native `agent_status` for a Claude crew is firstmate's own echo rather than an independent signal, so `bin/fm-busy-lib.sh` no longer borrows herdr's native busy verdict for `claude` (harnesses herdr registers itself, such as pi and codex, keep it); this prevents a wedged crew's stale report from latching busy and masking stale detection.
 
 ### Submit confirmation
 

@@ -49,7 +49,9 @@
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
-#      (generation state is sufficient for busy, not for idle), then the
+#      (generation state is sufficient for busy, not for idle) EXCEPT for
+#      claude, whose native herdr state is firstmate's own report-agent echo
+#      rather than an independent signal (see the herdr-native arm), then the
 #      muse session-log and cursor transcript pull sources, then the Grok-only
 #      temporary regex fallback classifies a grok task from its rendered tail,
 #      then unknown missing
@@ -894,7 +896,21 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   # for BUSY (streaming means a turn is running); native idle is narrower
   # than turn state (a long foreground tool call reads idle) and stays
   # unknown here.
-  if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
+  #
+  # EXCEPT for claude: herdr never registers a claude crew itself (it reads
+  # agent_not_found / agent_status unknown on 0.8.2, docs/verification/
+  # runtime-backends.md "Agent recognition recalibration"), so herdr's native
+  # agent_status for a claude pane is NEVER an independent signal. Since U3
+  # firstmate publishes that pane's own working/idle/blocked state via
+  # `pane report-agent` (bin/backends/herdr.sh fm_backend_herdr_publish_agent_state),
+  # herdr's native busy for claude would just read back firstmate's OWN report
+  # - a feedback loop that could latch a wedged crew as busy and suppress stale
+  # detection. Skipping it for claude changes nothing pre-U3 (native was always
+  # unknown -> not busy) and keeps the classifier reading only firstmate's own
+  # turn record for claude. Harnesses herdr detects itself (pi, codex) keep the
+  # trusted native busy signal.
+  if [ "$backend" = herdr ] && [ "${harness%%-*}" != claude ] \
+    && command -v fm_backend_busy_state >/dev/null 2>&1; then
     native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
     if [ "$native" = busy ]; then
       printf 'busy herdr-native'

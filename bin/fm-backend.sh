@@ -793,6 +793,24 @@ fm_backend_busy_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_publish_agent_state: publish <target>'s worker state into the
+# backend's OWN agent registry so the backend's native UI reflects it. <state> is
+# the backend-neutral idle|working|blocked verdict (bin/fm-transition-lib.sh
+# vocabulary). Only herdr has such a registry (its attention-sorted agent panel);
+# every other backend is a no-op. The herdr implementation is reconciling and
+# idempotent (it pushes only when its published state differs from <state>), so a
+# caller may invoke it every supervision poll. [toast_title]/[toast_body] carry
+# an optional captain-facing alert raised on a fresh transition into `blocked`.
+fm_backend_publish_agent_state() {  # <backend> <target> <harness> <state> [toast_title] [toast_body]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr) fm_backend_herdr_publish_agent_state "$@" ;;
+    *) return 0 ;;
+  esac
+}
+
 # fm_backend_composer_state: classify the composer/input area of <target> as
 # empty|pending|pending-unproven|unknown for callers that need a pre-submit
 # input guard, a submit acknowledgement, or a launch-readiness check. It is

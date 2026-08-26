@@ -2798,6 +2798,24 @@ esac
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+# Claim-suppression (herdr): the herdr claude integration hook (SessionStart)
+# reads HERDR_ENV=1 and "claims" the pane by reporting only its session identity
+# (pane.report_agent_session), which leaves the pane state-unmanaged - herdr
+# neither runs its own detection on it nor accepts an external `pane report-agent`
+# state report (verified on herdr 0.8.2 / protocol 20, docs/verification/
+# runtime-backends.md "Agent recognition recalibration"). Launching the crew's
+# claude with HERDR_ENV=0 suppresses that claim (claude itself ignores HERDR_ENV;
+# only the hook reads it), leaving the pane UNCLAIMED so firstmate can publish its
+# working/idle/blocked state into herdr's own agent panel via `pane report-agent`
+# (bin/fm-watch.sh -> fm_backend_publish_agent_state). Scoped to firstmate's own
+# claude crew/scout panes on herdr; the captain's own panes are launched by the
+# captain and are never touched. A claude secondmate is itself a firstmate whose
+# backend auto-detection reads HERDR_ENV=1 (bin/fm-backend.sh fm_backend_detect),
+# so it is deliberately excluded here - supervisor-pane registration is a separate
+# follow-up that must first give the secondmate an explicit backend.
+if [ "$HARNESS" = claude ] && [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ]; then
+  LAUNCH="HERDR_ENV=0 $LAUNCH"
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
