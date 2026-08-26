@@ -115,6 +115,25 @@ pass "real herdr: interrupt refuses when herdr's own agent registry reports no a
 
 # --- a registered agent: classification flips, and the verbs follow ---------
 
+# U3 record corroboration (bin/backends/herdr.sh fm_backend_herdr_pane_agent_state):
+# a registered record alone is no longer liveness - it can be firstmate's own
+# report-agent echo or a restart-replayed ghost - so the classifier corroborates
+# it against the pane's real foreground process. A genuinely live registered
+# agent therefore needs a real harness-named foreground process in the pane: a
+# copied sleep binary named claude, whose process name AND argv[0] path both
+# carry the harness evidence fm_harness_process_matches accepts, and which
+# ignores the typed control keys below exactly like a TUI that absorbs them.
+mkdir -p "$SCRATCH/harness-bin"
+cp "$(command -v sleep)" "$SCRATCH/harness-bin/claude"
+fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "$SCRATCH/harness-bin/claude 600" \
+  || fail "could not launch the harness-named foreground process in the task pane"
+HARNESS_UP=0
+for _ in $(seq 1 75); do
+  if fm_backend_herdr_pane_foreground_harness "$SESSION" "$PANE_ID"; then HARNESS_UP=1; break; fi
+  sleep 0.2
+done
+[ "$HARNESS_UP" = 1 ] || fail "the task pane never showed the harness-named foreground process"
+
 herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
   --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the task pane"

@@ -162,7 +162,24 @@ pass "fixed: the workspace holds exactly the 2 replacement tabs after both respa
 # Register a real agent (herdr's own native registration primitive) on one of
 # the freshly-respawned panes, then confirm a further same-labeled spawn
 # attempt refuses exactly as before - the husk fix must never touch a pane
-# that actually has something registered in it.
+# that actually has something registered in it. U3 record corroboration
+# (fm_backend_herdr_pane_agent_state) means the record alone is no longer
+# liveness - it could be firstmate's own report-agent echo, or exactly the
+# restart-replayed ghost this file reproduces above - so "genuinely live" also
+# needs a real harness-named foreground process in the pane: a copied sleep
+# binary named claude, whose process name and argv[0] path both carry the
+# evidence fm_harness_process_matches accepts.
+
+mkdir -p "$SCRATCH/harness-bin"
+cp "$(command -v sleep)" "$SCRATCH/harness-bin/claude"
+fm_backend_herdr_send_text_line "$SESSION:$NEW_CREW_PANE_ID" "$SCRATCH/harness-bin/claude 600" \
+  || fail "could not launch the harness-named foreground process in the respawned crewmate-shaped pane"
+HARNESS_UP=0
+for _ in $(seq 1 75); do
+  if fm_backend_herdr_pane_foreground_harness "$SESSION" "$NEW_CREW_PANE_ID"; then HARNESS_UP=1; break; fi
+  sleep 0.2
+done
+[ "$HARNESS_UP" = 1 ] || fail "the respawned crewmate-shaped pane never showed the harness-named foreground process"
 
 herdr pane report-agent "$NEW_CREW_PANE_ID" --source fm-respawn-e2e --agent fm-respawn-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the respawned crewmate-shaped pane"
