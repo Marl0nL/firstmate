@@ -260,25 +260,26 @@ No Herdr-specific copy of that protocol exists.
 ## Restart and liveness behavior
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids, but the underlying harness processes and live agent registrations do not survive.
-A restored same-labeled tab with a missing pane or no registered agent is a husk.
+A restored same-labeled tab with a missing pane, or with no registered agent and no verified-harness foreground process, is a husk.
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
 
 The generic Herdr agent-liveness probe reuses the same classifier.
-A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
+A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent - or a live verified-harness process in an unregistered pane - becomes `alive`, and an unexpected read becomes `unreadable`.
 Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
 
-A Claude crew is the exception that this classifier currently mishandles on Herdr 0.8.2 / protocol 20: Claude registers no agent record (`agent get` answers `agent_not_found`, `agent list` is empty), whether or not the integration claimed the pane, so a genuinely live Claude crew reads `no-agent` and this probe reports it `dead`.
-That false-negative is what makes spawn start-confirmation report a bare shell, `fm-control` exit-verification report an already-stopped agent, and the session-start liveness sweep treat healthy Claude supervisors as respawn candidates.
-The `pane process-info` reality probe still distinguishes a live Claude crew (a Claude binary in the foreground) from a genuine bare-shell husk that reads the same `no-agent`, and the metadata classifier does not yet compose it back in.
-The dated 0.8.2 measurements, the four-way liveness acceptance table, and the `report-agent` fix primitive are recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) "Agent recognition recalibration"; that record's live guard is `FM_HERDR_RECAL_LIVE=1 tests/fm-herdr-recalibration-live-e2e.test.sh`.
+A Claude crew registers no agent record on Herdr 0.8.2 / protocol 20 (`agent get` answers `agent_not_found`, `agent list` is empty), whether or not the integration claimed the pane, so its metadata alone is indistinguishable from a restored bare shell's.
+The classifier therefore composes the `pane process-info` reality probe into its `agent_not_found` branch: a pane whose foreground process is a verified harness (per the fleet-wide `fm_harness_process_matches` contract in `bin/fm-session-lock-lib.sh`) classifies `live`, while a bare shell - or an unreadable probe - stays `no-agent`, so a genuine restored husk remains reclaimable and an unprovable read never upgrades to live.
+Every liveness consumer and the husk-reclaim path route through this one classifier, so a live-but-unregistered crew is neither respawned as a duplicate nor closed as a restored shell.
+This recognition is firstmate-internal and publishes nothing into Herdr's own UI, so Herdr's status indicators stay empty for Claude crews until report-agent state-publishing exists.
+The dated 0.8.2 measurements and the post-fix four-way liveness acceptance table are recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) "Agent recognition recalibration"; that record's live guard is `FM_HERDR_RECAL_LIVE=1 tests/fm-herdr-recalibration-live-e2e.test.sh`.
 
 The session-start sweep uses this probe.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
 
-The classifier above reads the metadata surface (`pane get`, `agent get`), and that surface can outlive the processes it describes: after a machine reboot the server replays its persisted session layout wholesale, so `agent list`, `pane get`, and `agent get` all answer in full for agents that are not running, including an `agent_status` of `idle`, which classifies `live` for a pane with no live process.
+The classifier above consults the process probe only on the `agent_not_found` branch; a registered record keeps its pure metadata verdict, and that surface can outlive the processes it describes: after a machine reboot the server replays its persisted session layout wholesale, so `agent list`, `pane get`, and `agent get` all answer in full for agents that are not running, including an `agent_status` of `idle`, which classifies `live` for a pane with no live process.
 `pane process-info` is the only call in this adapter that reaches a real OS process rather than the persisted layout.
-`fm_backend_herdr_pane_process_state` (is a real process behind the pane) and `fm_backend_herdr_pane_process_cwds` (its kernel-reported working directory) are the reality-touching accessors, and any caller that must not be fooled by a replayed record needs both a metadata verdict and a process verdict.
+`fm_backend_herdr_pane_process_state` (is a real process behind the pane), `fm_backend_herdr_pane_process_cwds` (its kernel-reported working directory), and `fm_backend_herdr_pane_foreground_harness` (is a foreground process a verified harness) are the reality-touching accessors, and any caller that must not be fooled by a replayed record needs both a metadata verdict and a process verdict.
 `bin/fm-autostart.sh` is the first such caller: its "a firstmate is already running" guard requires a matching entry to be confirmed by `pane process-info`, never `agent list` alone, so a post-reboot ghost record cannot make the boot unit skip starting the real one.
 The dated reboot-ghost evidence, and that a live `agent start` claude reported `agent_status: "unknown"` on Herdr 0.7.4, are recorded under [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr); re-verifying this against the current Herdr floor is a Phase 6 cutover live-smoke item.
 

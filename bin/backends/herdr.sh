@@ -86,6 +86,17 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
 
+# Shared verified-harness process identity (bin/fm-session-lock-lib.sh's
+# fm_harness_process_matches, which itself sources bin/fm-cursor-lib.sh). The
+# ONE fleet-wide owner of "is this OS process a verified harness". This adapter
+# composes it into fm_backend_herdr_pane_agent_state so a live Claude crew that
+# Herdr never registered (the herdr 0.8.2 v7-vs-v8 integration gap;
+# docs/verification/runtime-backends.md "Agent recognition recalibration") is
+# recognized from its foreground process rather than misread as an agent-free
+# husk. The name vocabulary is never re-derived here.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-session-lock-lib.sh"
+
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # events.subscribe (the native pane.agent_status_changed push stream) and its
 # subscription_event schema first shipped at protocol 16 (verified: herdr
@@ -1856,36 +1867,48 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 }
 
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
-# dead|no-agent|live|unknown, purely from the JSON body of two read-only
-# calls - never from process exit status, since a business-logic "not found"
-# response is a normal, expected outcome here, not a call failure (real herdr
-# 0.7.1 exits 1 for it; the canned-response test fakes exit 0; parsing only
-# the JSON keeps this function correct against either).
+# dead|no-agent|live|unknown from the JSON body of read-only calls - never from
+# process exit status, since a business-logic "not found" response is a normal,
+# expected outcome here, not a call failure (real herdr 0.7.1 exits 1 for it;
+# the canned-response test fakes exit 0; parsing only the JSON keeps this
+# function correct against either).
 #
 #   dead     - `pane get` responds with error code pane_not_found: the pane
 #              itself is gone (closed, or its process died and herdr already
 #              reaped it - verified empirically: killing a pane's shell pid
 #              on a live server makes herdr immediately drop both the pane
 #              and its tab from `pane get`/`tab list`).
-#   no-agent - `pane get` succeeds (the pane structurally exists) but `agent
-#              get` responds with error code agent_not_found: nothing is
-#              registered in it - exactly what a herdr session-layout restore
-#              produces (verified empirically: `session stop` + fresh `herdr
-#              server` restart leaves the pane alive, agent_status "unknown",
-#              agent get -> agent_not_found - docs/herdr-backend.md "ID
-#              stability across a server restart"), and what a future
+#   no-agent - `pane get` succeeds (the pane structurally exists), `agent get`
+#              responds with error code agent_not_found, AND the reality probe
+#              finds no verified-harness foreground process: nothing is running
+#              there but a bare shell - exactly what a herdr session-layout
+#              restore produces (verified empirically: `session stop` + fresh
+#              `herdr server` restart leaves the pane alive, agent_status
+#              "unknown", agent get -> agent_not_found - docs/herdr-backend.md
+#              "ID stability across a server restart"), and what a future
 #              `resume_agents_on_restore = false` restore would produce too
-#              (a plain shell, never an agent).
+#              (a plain shell, never an agent). This is the reclaimable husk.
 #   live     - `agent get` succeeds and reports a real agent_status (working,
-#              idle, done, or blocked - any registered value). An idle or
-#              blocked agent is still a genuine, still-registered agent, not
-#              a restored husk, so it is never a close-and-replace candidate.
+#              idle, done, or blocked - any registered value), OR `agent get`
+#              answers agent_not_found but the foreground-process reality probe
+#              (fm_backend_herdr_pane_foreground_harness) identifies a verified
+#              harness. The second arm is load-bearing on herdr 0.8.2, where the
+#              v7-vs-v8 integration gap leaves a live Claude crew unregistered so
+#              its metadata is byte-identical to a bare-shell husk's; only the
+#              OS process separates them (docs/verification/runtime-backends.md
+#              "Agent recognition recalibration (2026-08-25, herdr 0.8.2 /
+#              protocol 20)"). An idle or blocked (or unregistered-but-live)
+#              agent is a genuine agent, never a close-and-replace candidate.
 #   unknown  - anything else: an unparseable/unexpected response from either
 #              call, or a `pane get` success whose own echoed pane_id does not
 #              round-trip (guards against misreading a herdr response shape
 #              change as "the pane exists"). The caller must fail safe toward
 #              refusal here, never toward closing - this is the conservative
 #              backstop the husk check depends on.
+#
+# The foreground-process probe is consulted ONLY on the agent_not_found branch,
+# so a registered agent and a structurally gone pane both keep their pure
+# metadata verdict and pay no extra call.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code presence status
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
@@ -1899,7 +1922,25 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
   code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
   if [ -n "$code" ]; then
-    [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
+    if [ "$code" = "agent_not_found" ]; then
+      # agent_not_found no longer proves the pane is agent-free. On herdr 0.8.2
+      # the agent registry records NO agent for a live Claude crew (its v7
+      # integration reports pane identity only; 0.8.2 expects v8 - see
+      # docs/verification/runtime-backends.md "Agent recognition recalibration"),
+      # so a genuinely live Claude crew answers agent_not_found exactly like a
+      # restored bare shell. Consult the reality-touching foreground-process
+      # probe to separate them: a pane whose foreground process is a verified
+      # harness is a LIVE crew, while a bare shell - or an unreadable probe -
+      # stays no-agent, so a genuine restored husk is still reclaimable and an
+      # unprovable read never upgrades to live.
+      if fm_backend_herdr_pane_foreground_harness "$session" "$pane_id"; then
+        printf 'live'
+      else
+        printf 'no-agent'
+      fi
+    else
+      printf 'unknown'
+    fi
     return 0
   fi
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
@@ -2001,11 +2042,72 @@ fm_backend_herdr_pane_process_cwds() {  # <session> <pane_id>
       select(length > 0) | .[]' 2>/dev/null
 }
 
+# fm_backend_herdr_pane_foreground_harness: return 0 when ANY foreground process
+# of <pane_id> in <session> is a verified harness, per the fleet-wide
+# fm_harness_process_matches contract (bin/fm-session-lock-lib.sh).
+#
+# This is the IDENTITY arm of the reality-touching probe. process_state above
+# answers "is a real process attached"; process_cwds answers "where is it
+# running"; this answers "is that process one of OUR agents", straight from
+# `pane process-info`'s kernel view (name + argv) rather than from herdr's agent
+# registry. It exists because on herdr 0.8.2 that registry records NO agent for
+# a live Claude crew: the installed v7 integration reports only pane identity
+# (pane.report_agent_session) while herdr 0.8.2 expects v8, so `agent get`
+# answers agent_not_found for a genuinely live Claude crew exactly as it does for
+# a restored bare shell (docs/verification/runtime-backends.md "Agent
+# recognition recalibration (2026-08-25, herdr 0.8.2 / protocol 20)"). The
+# foreground process identity is the one signal that still separates them.
+#
+# Verified response shape (docs/verification/runtime-backends.md "Boot autostart
+# reality probe"): each entry of .result.process_info.foreground_processes
+# carries name, argv, cwd, and pid. A native Claude Code process reports a
+# version basename as .name and its /claude/versions/<v> install path as
+# argv[0], which fm_harness_process_matches identifies via the argv[0] path
+# component (bin/fm-session-lock-lib.sh explains the per-platform name-source
+# split). ANY foreground process naming a harness is enough, mirroring the tmux
+# classifier's "any source naming a harness is alive" rule.
+#
+# Returns non-zero when no foreground process is a harness, or when process-info
+# is unreadable (no body, or the pane is gone), so an unprovable read never
+# upgrades a pane to live - exactly the fail-safe the husk classifier depends on.
+fm_backend_herdr_pane_foreground_harness() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 out name args
+  # 2>&1 for the same verified reason as the classifiers above: herdr writes
+  # error bodies to stderr.
+  out=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>&1)
+  while IFS=$'\t' read -r name args; do
+    [ -n "$name$args" ] || continue
+    if fm_harness_process_matches "$name" "$args"; then
+      return 0
+    fi
+  done <<EOF
+$(printf '%s' "$out" | jq -r '
+  .result.process_info.foreground_processes[]?
+  | [(.name // ""), ((.argv // []) | join(" "))]
+  | @tsv' 2>/dev/null)
+EOF
+  return 1
+}
+
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
 # sweep as the tmux classifier. It reuses the husk classifier rather than
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
 # a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
 # unexpected or failed API read is `unreadable`.
+#
+# Because fm_backend_herdr_pane_agent_state now composes the foreground-process
+# reality probe (see its docstring), a live-but-unregistered Claude crew reads
+# `live` -> `alive` here instead of `no-agent` -> `dead`, which is the fix for
+# the four-way liveness table's three false-negative rows on herdr 0.8.2
+# (docs/verification/runtime-backends.md "Agent recognition recalibration"): a
+# live Claude crew, whether integration-claimed or unclaimed, no longer reads
+# `dead`, while a genuine bare-shell husk still does. This one classifier is the
+# single point every recovery-grade consumer routes through (spawn
+# start-confirmation, fm-control exit verification, the session-start liveness
+# sweep, and wake-resident raise confirmation all reach it via
+# fm_backend_agent_state / fm_backend_agent_alive), and the husk-reclaim path
+# reaches the same verdict through fm_backend_herdr_tab_is_husk, so a live crew
+# is never respawned as a duplicate nor closed as a husk.
 fm_backend_herdr_agent_state() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
