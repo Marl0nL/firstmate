@@ -1,0 +1,5 @@
+ok - real fm-spawn launched a claude crew into lab pane w1:p2
+ok - a real claude crew is the pane's foreground process (/home/marlon/.local/share/claude/versions/2.1.246)
+ok - the fm-spawn-launched claude pane is unclaimed (agent_session null): HERDR_ENV=0 claim-suppression wired through fm-spawn
+ok - report-agent takes on the fm-spawn-launched pane (agent_status=working): the panel publishing path is open
+ok - claim-suppression wiring verified end-to-end (real fm-spawn -> real herdr -> real claude)

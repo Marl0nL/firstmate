@@ -1,0 +1,27 @@
+== herdr version: herdr 0.8.2
+== 1) check on a pristine default config (expect exit 10 / NOT applied)
+herdr attention settings: NOT applied - run 'apply' (/tmp/fm-attn-cfg.RipTlT/config.toml)
+exit=10
+== 2) apply --no-reload (real 'herdr config check' validates the edit)
+applied herdr attention settings to /tmp/fm-attn-cfg.RipTlT/config.toml
+backup: /tmp/fm-attn-cfg.RipTlT/config.toml.fm-backup-20260827-041623
+note: --no-reload set; run 'herdr server reload-config' to apply to the running server
+exit=0
+== 3) the three consented keys as written
+156:agent_panel_sort = "priority"
+253:# agent_panel_sort = "spaces"
+284:# Background notification popup delivery
+285:[ui.toast]
+286:delivery = "herdr"
+291:# delivery = "off"
+298:# enabled = true
+302:[ui.sound]
+== 4) check again (expect exit 0 / already applied)
+herdr attention settings: already applied (/tmp/fm-attn-cfg.RipTlT/config.toml)
+exit=0
+== 5) apply again (expect idempotent no-op)
+herdr attention settings already applied; nothing to do (/tmp/fm-attn-cfg.RipTlT/config.toml)
+exit=0
+== 6) standalone real 'herdr config check' on the edited file
+config: ok
+exit=0
