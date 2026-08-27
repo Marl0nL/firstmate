@@ -1072,6 +1072,41 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  # herdr fake for herdr-endpoint metas (window=firstmate:fm-<id>): answers the
+  # reread-nudge doorbell's status/send/agent probes, refuses any session other
+  # than the fixture's own, and never starts a real herdr server.
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+prev=
+for arg in "$@"; do
+  if [ "$prev" = --session ] && [ "$arg" != firstmate ]; then
+    echo "fake herdr: refusing session '$arg'" >&2
+    exit 1
+  fi
+  prev=$arg
+done
+cmd=${1:-}; sub=${2:-}
+case "$cmd $sub" in
+  "status --json")
+    printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true}}\n'
+    ;;
+  "pane get")
+    printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}"
+    ;;
+  "agent get")
+    printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
+    ;;
+  "pane send-text"|"pane run"|"pane send-keys")
+    exit 0
+    ;;
+  server*)
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/herdr"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -1411,6 +1446,69 @@ test_backend_inheritance_present_and_absent() {
   assert_contains "$(cat "$instruction")" $'-----BEGIN config/backend-----\nABSENT\n-----END config/backend-----' \
     "backend absence reread must use ABSENT token"
   pass "B12b backend inheritance: present values and primary absence converge exactly"
+}
+
+# The effective-backend override is keyed on each secondmate's OWN recorded
+# endpoint backend (its meta backend=), never the primary's effective backend:
+# a claim-suppressed supervisor pane (HERDR_ENV=0) can no longer auto-detect
+# herdr itself, so convergence must PIN config/backend=herdr into a
+# herdr-endpoint mate's home even while the primary itself runs another backend
+# - that is what keeps the value the spawn wrote from being mirror-wiped by the
+# next convergence - while a non-herdr-endpoint mate keeps the plain absence
+# mirror even under a herdr primary and is never silently retargeted.
+# FM_BACKEND selects the primary's effective backend for each run
+# (fm_backend_name reads it first) to prove the keying ignores it.
+test_backend_effective_override_pins_and_survives() {
+  local w head out err status
+  w=$(new_world backend-effective-override)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  err="$w/backend-effective-override.err"
+
+  # Primary leaves config/backend absent; the mate records a herdr endpoint.
+  # A primary effectively on tmux must still pin the herdr-endpoint mate.
+  printf 'backend=herdr\n' >> "$w/home/state/sm.meta"
+  out=$(FM_BACKEND=tmux run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "herdr-endpoint override push should succeed"
+  assert_contains "$out" "backend: pushed - effective-backend override" \
+    "a herdr-endpoint mate must get config/backend pinned even under a non-herdr primary"
+  [ "$(cat "$w/sm/config/backend")" = herdr ] \
+    || fail "effective-backend override did not write config/backend=herdr ($(cat "$w/sm/config/backend" 2>/dev/null || echo ABSENT))"
+
+  # Idempotent: an unchanged re-run neither churns nor re-reports the write.
+  out=$(FM_BACKEND=tmux run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "herdr-endpoint override re-run should succeed"
+  case "$out" in
+    *"backend: pushed"*) fail "an unchanged effective-backend override re-reported a push" ;;
+  esac
+  [ "$(cat "$w/sm/config/backend")" = herdr ] \
+    || fail "effective-backend override did not survive an unchanged convergence"
+
+  # Durability: the pin survives every further convergence regardless of the
+  # primary's own effective backend rather than being mirror-wiped.
+  out=$(FM_BACKEND=herdr run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "repeated convergence should succeed"
+  [ "$(cat "$w/sm/config/backend")" = herdr ] \
+    || fail "config/backend=herdr was wiped by a repeated convergence"
+
+  # A NON-herdr-endpoint mate keeps the plain absence mirror even when the
+  # primary's own effective backend is herdr: never silently retargeted.
+  grep -v '^backend=' "$w/home/state/sm.meta" > "$w/home/state/sm.meta.tmp" \
+    && mv "$w/home/state/sm.meta.tmp" "$w/home/state/sm.meta"
+  out=$(FM_BACKEND=herdr run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "non-herdr-endpoint push should succeed"
+  assert_contains "$out" "backend: pushed - mirrored primary absence" \
+    "a non-herdr-endpoint mate must keep the plain absence mirror under a herdr primary"
+  [ -e "$w/sm/config/backend" ] && fail "non-herdr-endpoint convergence did not mirror primary absence"
+
+  # An EXPLICIT primary config/backend file still wins over the override.
+  printf 'backend=herdr\n' >> "$w/home/state/sm.meta"
+  printf 'zellij\n' > "$w/home/config/backend"
+  out=$(FM_BACKEND=tmux run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "explicit primary backend push should succeed"
+  [ "$(cat "$w/sm/config/backend")" = zellij ] \
+    || fail "explicit primary config/backend did not win over the herdr effective-backend override"
+  pass "B12d effective-backend override: keyed on the mate's own herdr endpoint, durable under any primary backend; explicit file and non-herdr endpoints unchanged"
 }
 
 # config/herdr-presentation-spaces has an unconfigured default, so this item's
@@ -2575,6 +2673,7 @@ test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent
+test_backend_effective_override_pins_and_survives
 test_presentation_inheritance_default_on_and_opt_out
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_bootstrap_rereads_after_partial_propagation

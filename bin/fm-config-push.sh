@@ -221,7 +221,18 @@ while IFS='|' read -r id home _window meta; do
     continue
   }
   reports="$reports $report"
+  # The effective-backend override is keyed on this mate's OWN recorded endpoint
+  # backend (its meta backend=), not the primary's current effective backend: a
+  # herdr-endpoint mate is claim-suppressed (HERDR_ENV=0) and needs
+  # config/backend=herdr re-pinned durably by every push even when the primary
+  # runs another backend, while a non-herdr-endpoint mate keeps the plain
+  # absence mirror and is never retargeted to herdr (fm-config-inherit-lib.sh).
+  inherit_effective_backend=
+  if [ "$(fm_backend_of_meta "$meta")" = herdr ]; then
+    inherit_effective_backend=herdr
+  fi
   if FM_CONFIG_INHERIT_REPORT="$report" FM_CONFIG_INHERIT_LIVE=1 \
+    FM_INHERIT_EFFECTIVE_BACKEND="$inherit_effective_backend" \
     propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
     :
   else

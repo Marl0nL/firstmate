@@ -109,6 +109,52 @@ test_blocked_toast_body_is_capped() {
   pass "a verbose blocked reason is capped for the toast"
 }
 
+# --- maybe_report_herdr_agent_state gate --------------------------------------
+# The watcher publishes through maybe_report_herdr_agent_state, which gates on a
+# push-capable (herdr) backend AND a claude harness - and, deliberately, NOT on
+# kind, so a secondmate SUPERVISOR pane registers in the panel exactly like a
+# crew pane. window_backend/window_harness are redefined here to drive the gate;
+# report_herdr_agent_state and fm_backend_publish_agent_state stay real/mocked so
+# a published call still lands one record in CALLS.
+MOCK_BACKEND=herdr
+MOCK_HARNESS=claude
+# shellcheck disable=SC2317  # invoked indirectly through maybe_report_herdr_agent_state
+window_backend() { printf '%s' "$MOCK_BACKEND"; }
+# shellcheck disable=SC2317  # invoked indirectly through maybe_report_herdr_agent_state
+window_harness() { printf '%s' "$MOCK_HARNESS"; }
+
+# gate <backend> <harness> -> the captured publish record (empty when suppressed)
+gate() {
+  MOCK_BACKEND=$1
+  MOCK_HARNESS=$2
+  : >"$CALLS"
+  maybe_report_herdr_agent_state "sess:w9:p9" "working: supervising" 0
+  cat "$CALLS"
+}
+
+test_gate_publishes_a_claude_herdr_pane() {
+  local r
+  r=$(gate herdr claude)
+  [ -n "$r" ] || fail "the gate must publish for a claude herdr pane (crew or secondmate supervisor)"
+  [ "$(field "$r" 2)" = "sess:w9:p9" ] || fail "the gate must pass the window target through"
+  [ "$(field "$r" 4)" = working ] || fail "the published state must map through report_herdr_agent_state, got '$(field "$r" 4)'"
+  pass "the reporter gate publishes a claude herdr pane regardless of kind (secondmate supervisor included)"
+}
+
+test_gate_skips_a_non_push_backend() {
+  local r
+  r=$(gate tmux claude)
+  [ -z "$r" ] || fail "the gate must not publish onto a non-push backend, got '$r'"
+  pass "the reporter gate skips a non-herdr (no native push) backend"
+}
+
+test_gate_skips_a_non_claude_harness() {
+  local r
+  r=$(gate herdr codex)
+  [ -z "$r" ] || fail "the gate must not publish for a non-claude harness (herdr detects pi/codex natively), got '$r'"
+  pass "the reporter gate skips a non-claude harness on herdr"
+}
+
 test_busy_pane_maps_to_working
 test_idle_pane_maps_to_idle
 test_blocked_verb_maps_to_blocked_with_toast
@@ -117,3 +163,6 @@ test_blocked_verb_outranks_a_busy_pane
 test_no_status_line_busy_is_working
 test_no_status_line_idle_is_idle
 test_blocked_toast_body_is_capped
+test_gate_publishes_a_claude_herdr_pane
+test_gate_skips_a_non_push_backend
+test_gate_skips_a_non_claude_harness

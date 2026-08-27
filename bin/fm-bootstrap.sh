@@ -430,7 +430,7 @@ secondmate_sync() {
   # running home, send its literal-content reread instruction pointer so the
   # live agent does not keep applying stale defaults. Spawn/respawn already
   # re-reads at launch and needs no redundant nudge unless files changed after launch.
-  local id home home_real home_lock propagated_homes report reread_out reread_skip_pending
+  local id home home_real home_lock propagated_homes report reread_out reread_skip_pending sm_inherit_effective_backend
   propagated_homes=""
   SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
   while IFS='|' read -r id home _window _meta; do
@@ -474,7 +474,18 @@ secondmate_sync() {
       fm_lock_release "$home_lock" || true
       continue
     }
+    # The effective-backend override is keyed on this mate's OWN recorded
+    # endpoint backend (its meta backend=), not the primary's current effective
+    # backend: a herdr-endpoint mate is claim-suppressed (HERDR_ENV=0) and needs
+    # config/backend=herdr re-pinned durably by every sweep even when the primary
+    # runs another backend, while a non-herdr-endpoint mate keeps the plain
+    # absence mirror and is never retargeted to herdr (fm-config-inherit-lib.sh).
+    sm_inherit_effective_backend=
+    if [ "$(fm_backend_of_meta "$STATE/$id.meta")" = herdr ]; then
+      sm_inherit_effective_backend=herdr
+    fi
     if FM_CONFIG_INHERIT_REPORT="$report" FM_CONFIG_INHERIT_LIVE=1 \
+      FM_INHERIT_EFFECTIVE_BACKEND="$sm_inherit_effective_backend" \
       propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
       :
     else

@@ -1690,8 +1690,17 @@ if [ "$KIND" = secondmate ]; then
     fi
     CONFIG_INHERIT_LOCK_HELD=1
     # Inheritance propagation: push the primary-authoritative live-safe local inheritance
-    # surface into this secondmate home (fm-config-inherit-lib.sh).
-    FM_CONFIG_INHERIT_LIVE=1 \
+    # surface into this secondmate home (fm-config-inherit-lib.sh). On a herdr
+    # endpoint the supervisor pane is claim-suppressed (HERDR_ENV=0 below), which
+    # disables its own herdr auto-detection, so pin config/backend=herdr durably
+    # through the effective-backend override when the primary leaves
+    # config/backend auto-detected. The primary's own explicit config/backend
+    # still wins, and the claim-suppression gate below fires only when the herdr
+    # pin actually landed in this home, so a failed or skipped write leaves the
+    # mate integration-claimed instead of unclaimed-but-undetectable.
+    SPAWN_INHERIT_EFFECTIVE_BACKEND=
+    [ "$BACKEND" = herdr ] && SPAWN_INHERIT_EFFECTIVE_BACKEND=herdr
+    FM_CONFIG_INHERIT_LIVE=1 FM_INHERIT_EFFECTIVE_BACKEND="$SPAWN_INHERIT_EFFECTIVE_BACKEND" \
       propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
       || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
   fi
@@ -2808,13 +2817,43 @@ fi
 # only the hook reads it), leaving the pane UNCLAIMED so firstmate can publish its
 # working/idle/blocked state into herdr's own agent panel via `pane report-agent`
 # (bin/fm-watch.sh -> fm_backend_publish_agent_state). Scoped to firstmate's own
-# claude crew/scout panes on herdr; the captain's own panes are launched by the
-# captain and are never touched. A claude secondmate is itself a firstmate whose
-# backend auto-detection reads HERDR_ENV=1 (bin/fm-backend.sh fm_backend_detect),
-# so it is deliberately excluded here - supervisor-pane registration is a separate
-# follow-up that must first give the secondmate an explicit backend.
-if [ "$HARNESS" = claude ] && [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ]; then
-  LAUNCH="HERDR_ENV=0 $LAUNCH"
+# claude crew/scout AND secondmate SUPERVISOR panes on herdr; the captain's own
+# panes are launched by the captain and are never touched. A claude secondmate is
+# itself a firstmate whose backend auto-detection would normally read HERDR_ENV=1
+# (bin/fm-backend.sh fm_backend_detect), and suppressing the claim disables that
+# detection, so a secondmate SUPERVISOR pane is claim-suppressed ONLY when BOTH
+# guards hold: the spawn is locally inheritance-managed (FM_SKIP_SECONDMATE_INHERIT
+# != 1; bin/fm-remote-secondmate-control.sh sets it to 1 for a remote mate's
+# host-local respawn, and a remote-managed mate must stay integration-claimed
+# and visible in the REMOTE herdr's own agent panel - no local watcher can
+# publish for it, even when an explicit primary config/backend=herdr was
+# byte-mirrored into its home), AND the home actually carries an explicit
+# config/backend=herdr pin (normally written just above through the inheritance
+# effective-backend override - see the FM_INHERIT_EFFECTIVE_BACKEND wiring at
+# the secondmate setup). The pin is read with fm_backend_name's parse (first
+# non-empty line, whitespace-stripped) and must be exactly herdr. A local home
+# whose pin write failed or was gitignore-guard-skipped deliberately stays
+# integration-claimed, because an unclaimed mate without the pin could no
+# longer resolve its own herdr backend.
+if [ "$HARNESS" = claude ] && [ "$BACKEND" = herdr ]; then
+  SUPPRESS_HERDR_CLAIM=1
+  if [ "$KIND" = secondmate ]; then
+    SUPPRESS_HERDR_CLAIM=0
+    if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ] && [ -f "$PROJ_ABS/config/backend" ]; then
+      while IFS= read -r home_pin_line || [ -n "$home_pin_line" ]; do
+        home_pin_line=$(printf '%s' "$home_pin_line" | tr -d '[:space:]')
+        if [ -n "$home_pin_line" ]; then
+          if [ "$home_pin_line" = herdr ]; then
+            SUPPRESS_HERDR_CLAIM=1
+          fi
+          break
+        fi
+      done < "$PROJ_ABS/config/backend"
+    fi
+  fi
+  if [ "$SUPPRESS_HERDR_CLAIM" = 1 ]; then
+    LAUNCH="HERDR_ENV=0 $LAUNCH"
+  fi
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

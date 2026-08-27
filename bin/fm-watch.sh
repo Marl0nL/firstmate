@@ -323,6 +323,25 @@ report_herdr_agent_state() {  # <window> <last-status-line> <busy_now>
   fm_backend_publish_agent_state herdr "$w" claude "$state" "$title" "$body" 2>/dev/null || true
 }
 
+# maybe_report_herdr_agent_state: publish <window>'s supervisory state into
+# herdr's agent panel when it is a claude pane on a push-capable (herdr) backend.
+# This covers firstmate's own claude crew/scout panes AND secondmate SUPERVISOR
+# panes: both are launched claim-suppressed (HERDR_ENV=0, bin/fm-spawn.sh) so
+# herdr does not manage them itself, and the reality gate inside
+# fm_backend_herdr_publish_agent_state refuses any pane without a live claude
+# foreground process - so a dormant wake-resident advisor's bare shell never
+# registers, and a still-integration-claimed pane (a secondmate not yet respawned
+# on this code) simply ignores the report until it is respawned unclaimed. The
+# captain's OWN primary pane is not a recorded window and is launched by the
+# captain (claimed), so it is deliberately never published here. has_push is the
+# herdr stand-in the whole watcher already uses for this dispatch.
+maybe_report_herdr_agent_state() {  # <window> <last-status-line> <busy_now>
+  local w=$1 last=$2 busy_now=$3
+  fm_backend_has_push "$(window_backend "$w")" || return 0
+  [ "$(window_harness "$w")" = claude ] || return 0
+  report_herdr_agent_state "$w" "$last" "$busy_now"
+}
+
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
@@ -1357,11 +1376,35 @@ EOF
     # gate reads the shared predicate rather than the pause verb alone. Narrowing
     # it to `paused` would leave a mate's captain hold rotting invisibly: the
     # clear above already spares its pause tracking, but nothing would ever
-    # re-surface it.
+    # re-surface it. But a claim-suppressed claude SUPERVISOR pane still
+    # self-registers its live idle/working state into herdr's agent panel every
+    # poll, which needs the pane's own busy verdict - so for a publishable (herdr
+    # claude) idle mate, capture and publish here before skipping the stale
+    # machinery. A non-herdr idle mate keeps its capture-free fast path.
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
+      if fm_backend_has_push "$(window_backend "$w")" && [ "$(window_harness "$w")" = claude ] \
+        && tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+        if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+        report_herdr_agent_state "$w" "$last" "$busy_now"
+      fi
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    # Busy match: a backend's native semantic state when available (herdr), else
+    # the last 6 non-blank lines only (the TUI footer area, where every verified
+    # harness renders its busy indicator) so busy-looking strings in displayed
+    # content cannot suppress stale detection. Read once per window per poll and
+    # reused below so a busy verdict is consistent within one cycle.
+    if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # Publish this window's live state into herdr's own agent panel so the captain
+    # sees an attention-sorted working/idle/blocked view across every space,
+    # including the secondmate SUPERVISOR panes (handled above when idle). This
+    # rides the existing poll (no new daemon) and reuses the busy verdict just
+    # computed plus the last status verb; the publish is reconciling (pushes only
+    # on a change, re-establishes after a herdr server restart) and reality-gated
+    # (a pane with no live claude process is released, never registered), so it is
+    # a cheap no-op on an unchanged window.
+    maybe_report_herdr_agent_state "$w" "$last" "$busy_now"
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -1370,24 +1413,6 @@ EOF
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
     prev=$(cat "$hf" 2>/dev/null || true)
-    # Busy match: a backend's native semantic state when available (herdr), else
-    # the last 6 non-blank lines only (the TUI footer area, where every verified
-    # harness renders its busy indicator) so busy-looking strings in displayed
-    # content cannot suppress stale detection. Read once per window per poll and
-    # reused below so a busy verdict is consistent within one cycle.
-    if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
-    # Publish this crew's live state into herdr's own agent panel so the captain
-    # sees an attention-sorted working/idle/blocked view across every space. This
-    # rides the existing poll (no new daemon) and reuses the busy verdict already
-    # computed above plus the last status verb. fm_backend_publish_agent_state is
-    # reconciling (it pushes only on a change and re-establishes after a herdr
-    # server restart), so an unchanged crew is a cheap no-op. Scoped to claude
-    # crews - the claim-suppressed panes herdr never registers itself; herdr
-    # detects pi/codex natively, and secondmate supervisor panes stay claimed.
-    if [ "$kind" != secondmate ] && fm_backend_has_push "$(window_backend "$w")" \
-      && [ "$(window_harness "$w")" = claude ]; then
-      report_herdr_agent_state "$w" "$last" "$busy_now"
-    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

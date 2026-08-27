@@ -417,7 +417,7 @@ Two coupled parts, both verified live:
 
 1. Claim-suppression: `bin/fm-spawn.sh` launches each Claude crew/scout pane on herdr with `HERDR_ENV=0` prepended to the typed command, so the integration `SessionStart` hook does not claim the pane (Claude ignores `HERDR_ENV`; only the hook reads it).
    An unclaimed pane carries `agent_session: null` and is the pane `pane report-agent` takes on; a claimed pane silently ignores it (recorded above).
-   Scoped to firstmate's own Claude crew/scout panes; the captain's own panes are launched by the captain, and a Claude secondmate is excluded because its own herdr auto-detection reads `HERDR_ENV=1`.
+   Scoped to firstmate's own Claude crew/scout AND secondmate supervisor panes (see "Supervisor-pane self-registration" below); the captain's own primary pane is launched by the captain (integration-claimed) and is never touched.
 2. Reporting: the watcher's steady-state poll maps each managed Claude crew's supervisory state (the semantic busy verdict plus the last status verb) onto herdr's `idle|working|blocked` vocabulary and calls `fm_backend_herdr_publish_agent_state`, which reads herdr's currently published `agent_status` and issues `pane report-agent` ONLY on a change.
    The reconciling read makes a per-poll call a cheap no-op once established and self-heals after a herdr server restart (which resets the registry to `unknown`); a fresh transition into `blocked` also raises a `notification show` toast.
    The publish is REALITY-GATED (added 2026-08-27): before anything is issued, the U2 process probe (`fm_backend_herdr_pane_foreground_harness`) must confirm a live verified-harness foreground process in the pane, so a published record is backed by a real live crew at publish time rather than fabricated onto a dead pane.
@@ -455,6 +455,44 @@ FM_HERDR_ATTENTION_LIVE=1 tests/fm-herdr-attention-live-e2e.test.sh
 ```
 
 Because firstmate now publishes the Claude pane's own state, herdr's native `agent_status` for a Claude crew is firstmate's own echo rather than an independent signal, so `bin/fm-busy-lib.sh` no longer borrows herdr's native busy verdict for `claude` (harnesses herdr registers itself, such as pi and codex, keep it); this prevents a wedged crew's stale report from latching busy and masking stale detection.
+
+### Supervisor-pane self-registration
+
+Measured 2026-08-27 in a guarded `fm-lab-` session against herdr 0.8.2 / protocol 20 and Claude Code 2.1.247, default-session tripwire clean.
+This completes the fleet view begun by U3: the PRIMARY firstmate and each secondmate SUPERVISOR pane, not only their crews, appear in herdr's attention-sorted agent panel.
+
+Secondmate supervisor panes are now included on both coupled parts:
+
+1. Claim-suppression: `bin/fm-spawn.sh` no longer excludes `kind=secondmate`, so a secondmate supervisor's claude launch is also prefixed `HERDR_ENV=0` and its pane is left unclaimed - but only when BOTH guards hold: the spawn is locally inheritance-managed (`FM_SKIP_SECONDMATE_INHERIT` != 1) AND the secondmate home actually carries an explicit `config/backend=herdr` pin.
+   A remote mate's host-local respawn (`bin/fm-remote-secondmate-control.sh` sets `FM_SKIP_SECONDMATE_INHERIT=1`) deliberately stays integration-claimed even when an explicit primary `config/backend=herdr` was byte-mirrored into its home, because no local watcher can publish for it and it must stay visible in the REMOTE herdr's own agent panel; a local home whose pin write failed or was gitignore-guard-skipped likewise stays integration-claimed rather than losing its own herdr resolution.
+   Because that same suppression disables the secondmate's OWN herdr auto-detection (which reads `HERDR_ENV=1`), the spawn and every convergence sweep (`bin/fm-bootstrap.sh`, `bin/fm-config-push.sh`) pin `config/backend=herdr` into the secondmate home through the inheritance effective-backend override (`bin/fm-config-inherit-lib.sh`), keyed on the secondmate's own endpoint backend (its meta `backend=`), so the supervisor and its own crews still resolve herdr without detection and a primary relaunched on another backend never mirror-wipes a live pinned mate.
+   The primary's own explicit `config/backend` still wins; a non-herdr-endpoint mate keeps the plain absence mirror and is never retargeted to herdr.
+2. Reporting: the watcher's reporter gate (`maybe_report_herdr_agent_state`) is kind-agnostic and runs before the secondmate stale-exemption `continue`, so an idle-but-live supervisor pane is captured and published each poll.
+   The reality gate is unchanged, so a dormant wake-resident advisor's bare shell (a stood-down secondmate) never registers, and a still-integration-claimed secondmate not yet respawned on this code simply ignores the report until it is respawned unclaimed.
+
+The captain's OWN primary pane stays excluded by design: it is not a recorded window and is launched by the captain with `HERDR_ENV=1` (integration-claimed), so `report-agent` would be ignored on it, and un-claiming it would require `HERDR_ENV=0` on the captain's own launch, disturbing the captain's herdr integration.
+Registration is therefore secondmates-only from the primary's watcher; each secondmate's own watcher continues to publish its own crews.
+
+```text
+# claim-suppressed claude SUPERVISOR pane with a live kind=secondmate task record, driven through
+# the REAL watcher gate maybe_report_herdr_agent_state (session:pane), busy_now 1=idle 0=working
+pane get agent_session                 -> null                    # HERDR_ENV=0: unclaimed, report-agent takes
+gate "" 1  (idle)                      -> agent_status idle    ; agent list shows the supervisor pane
+gate "" 0  (working)                   -> agent_status working ; state_change_seq advances
+gate "" 0  (working, unchanged)        -> NO report-agent issued ; state_change_seq stable   # reconciling no-op
+gate "blocked: ..." 0                  -> agent_status blocked ; +4s still blocked            # report sticks
+kill the supervisor claude, then gate  -> pane release-agent issued ; agent get agent_not_found ; dropped from agent list ; classifies no-agent
+# dormant wake-resident advisor (bare shell) + kind=secondmate record
+gate "" 1                              -> NO report-agent issued ; pane stays out of agent list  # reality gate holds
+```
+
+The primary and secondmate supervisor panes floating in the attention-sorted panel remain a server-global GUI behavior (captain visual confirmation after `bin/fm-herdr-attention-config.sh` runs); this harness proves the registry data the panel sorts on.
+An existing secondmate launched before this code is still integration-claimed, so firstmate must respawn each secondmate once for its supervisor pane to register.
+Refresh this section with:
+
+```sh
+FM_HERDR_SUPERVISOR_SELFREG_LIVE=1 tests/fm-herdr-supervisor-selfreg-live-e2e.test.sh
+```
 
 ### Submit confirmation
 
