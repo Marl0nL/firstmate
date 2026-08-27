@@ -1072,6 +1072,41 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  # herdr fake for herdr-endpoint metas (window=firstmate:fm-<id>): answers the
+  # reread-nudge doorbell's status/send/agent probes, refuses any session other
+  # than the fixture's own, and never starts a real herdr server.
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+prev=
+for arg in "$@"; do
+  if [ "$prev" = --session ] && [ "$arg" != firstmate ]; then
+    echo "fake herdr: refusing session '$arg'" >&2
+    exit 1
+  fi
+  prev=$arg
+done
+cmd=${1:-}; sub=${2:-}
+case "$cmd $sub" in
+  "status --json")
+    printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true}}\n'
+    ;;
+  "pane get")
+    printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}"
+    ;;
+  "agent get")
+    printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
+    ;;
+  "pane send-text"|"pane run"|"pane send-keys")
+    exit 0
+    ;;
+  server*)
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/herdr"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0
