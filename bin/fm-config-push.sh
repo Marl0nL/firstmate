@@ -111,6 +111,14 @@ fi
 
 echo "config-push: $FM_HOME -> live secondmate homes"
 
+# The primary's EFFECTIVE runtime backend, resolved once. When it is herdr, this
+# push must re-pin config/backend=herdr into each claim-suppressed secondmate
+# home through the inheritance effective-backend override so the mid-session
+# convergence does not wipe the value that keeps the HERDR_ENV=0 supervisor pane
+# resolving herdr (fm-config-inherit-lib.sh). Non-herdr fleets keep the mirror.
+inherit_effective_backend=
+[ "$(fm_backend_name 2>/dev/null)" = herdr ] && inherit_effective_backend=herdr
+
 seen_homes=""
 errors=0
 while IFS='|' read -r id home _window meta; do
@@ -222,6 +230,7 @@ while IFS='|' read -r id home _window meta; do
   }
   reports="$reports $report"
   if FM_CONFIG_INHERIT_REPORT="$report" FM_CONFIG_INHERIT_LIVE=1 \
+    FM_INHERIT_EFFECTIVE_BACKEND="$inherit_effective_backend" \
     propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
     :
   else

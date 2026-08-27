@@ -1413,6 +1413,61 @@ test_backend_inheritance_present_and_absent() {
   pass "B12b backend inheritance: present values and primary absence converge exactly"
 }
 
+# When the primary leaves config/backend auto-detected but its EFFECTIVE runtime
+# backend is herdr, a claim-suppressed secondmate supervisor pane (HERDR_ENV=0)
+# can no longer auto-detect herdr itself, so convergence must PIN config/backend=herdr
+# into the secondmate home through the effective-backend override rather than
+# mirroring the primary's file absence. This is what keeps the value the spawn
+# wrote from being wiped on the next convergence. FM_BACKEND selects the primary's
+# effective backend for the run (fm_backend_name reads it first).
+test_backend_effective_override_pins_and_survives() {
+  local w head out err status
+  w=$(new_world backend-effective-override)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  err="$w/backend-effective-override.err"
+
+  # Primary leaves config/backend absent; effective backend is herdr.
+  out=$(FM_BACKEND=herdr run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "herdr effective-backend override push should succeed"
+  assert_contains "$out" "backend: pushed - effective-backend override" \
+    "an auto-detected herdr primary must pin config/backend downstream, not mirror absence"
+  [ "$(cat "$w/sm/config/backend")" = herdr ] \
+    || fail "effective-backend override did not write config/backend=herdr ($(cat "$w/sm/config/backend" 2>/dev/null || echo ABSENT))"
+
+  # Idempotent: an unchanged re-run neither churns nor re-reports the write.
+  out=$(FM_BACKEND=herdr run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "herdr effective-backend override re-run should succeed"
+  case "$out" in
+    *"backend: pushed"*) fail "an unchanged effective-backend override re-reported a push" ;;
+  esac
+  [ "$(cat "$w/sm/config/backend")" = herdr ] \
+    || fail "effective-backend override did not survive an unchanged convergence"
+
+  # Durability: a value the spawn wrote (already herdr here) survives every
+  # further herdr convergence rather than being mirror-wiped.
+  out=$(FM_BACKEND=herdr run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "second herdr convergence should succeed"
+  [ "$(cat "$w/sm/config/backend")" = herdr ] \
+    || fail "config/backend=herdr was wiped by a repeated herdr convergence"
+
+  # A NON-herdr effective backend still mirrors primary absence (override is
+  # scoped to herdr, the only backend that claim-suppresses the supervisor pane).
+  out=$(FM_BACKEND=tmux run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "tmux effective-backend push should succeed"
+  assert_contains "$out" "backend: pushed - mirrored primary absence" \
+    "a non-herdr effective backend must keep the plain absence mirror"
+  [ -e "$w/sm/config/backend" ] && fail "non-herdr convergence did not mirror primary absence"
+
+  # An EXPLICIT primary config/backend file still wins over the override.
+  printf 'zellij\n' > "$w/home/config/backend"
+  out=$(FM_BACKEND=herdr run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "explicit primary backend push should succeed"
+  [ "$(cat "$w/sm/config/backend")" = zellij ] \
+    || fail "explicit primary config/backend did not win over the herdr effective-backend override"
+  pass "B12d effective-backend override: an auto-detected herdr primary durably pins config/backend=herdr; explicit file and non-herdr fleets are unchanged"
+}
+
 # config/herdr-presentation-spaces has an unconfigured default, so this item's
 # convergence is asserted through the preference the spawn gate actually reads
 # in the destination home, not through file presence alone: mirroring the primary's
@@ -2575,6 +2630,7 @@ test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent
+test_backend_effective_override_pins_and_survives
 test_presentation_inheritance_default_on_and_opt_out
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_bootstrap_rereads_after_partial_propagation

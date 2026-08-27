@@ -6,7 +6,10 @@
 # profile rules, primary config/crew-harness=codex makes a secondmate's crewmates
 # spawn on codex too, primary config/backlog-backend=manual makes that home
 # hand-edit backlog files too, primary config/backend pins that home's local
-# runtime-backend default for future spawns, primary config/startup-memory-budget
+# runtime-backend default for future spawns (and, when the primary leaves it
+# auto-detected, an effective-backend override in propagate_inheritable_config
+# still pins a claim-suppressed secondmate to the primary's live backend),
+# primary config/startup-memory-budget
 # bounds that home's startup-memory curation, and primary
 # config/herdr-presentation-spaces carries the same Herdr presentation-projection
 # preference - an absent primary file and an absent destination file both mean
@@ -30,7 +33,8 @@
 # (bin/fm-bootstrap.sh), and the focused mid-session config push
 # (bin/fm-config-push.sh). It is PRIMARY-AUTHORITATIVE: the primary's value wins
 # and is re-pushed on every convergence, so the fleet stays converged on the
-# primary; an item the primary does not set is mirrored as absence downstream.
+# primary; an item the primary does not set is mirrored as absence downstream
+# (config/backend excepted under the effective-backend override above).
 # After successful config/* changes under an already-running secondmate, callers
 # invoke fm_config_send_reread_nudge so the live agent re-reads exact post-write
 # bytes (spawn/respawn already re-reads at launch and needs no redundant nudge).
@@ -137,6 +141,48 @@ copy_inheritable_file() {
   mkdir -p "$dest_parent" 2>/dev/null || return 1
   tmp=$(mktemp "$dest_parent/.fm-inherit.XXXXXX" 2>/dev/null) || return 1
   if ! cp "$src" "$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if [ -L "$dest" ] && ! rm -f "$dest" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if mv -f "$tmp" "$dest" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  return 1
+}
+
+# fm_inherit_effective_backend_valid: 0 when <value> is a safe runtime-backend
+# token (a lowercase-letter-led alphanumeric/dash word), the only shape a caller
+# may pass in FM_INHERIT_EFFECTIVE_BACKEND. This is a syntactic guard against an
+# empty or unsafe value reaching the config/backend writer below; the caller
+# owns choosing a real backend name (only herdr today), so no allowlist is
+# restated here.
+fm_inherit_effective_backend_valid() {  # <value>
+  case "$1" in
+    ''|*[!a-z0-9-]*) return 1 ;;
+    [!a-z]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# fm_write_inherited_backend: atomically write "<value>\n" to <dest> with the
+# same destination safety as copy_inheritable_file (refuse a non-file/non-symlink
+# destination, replace a symlink, tmp+rename). Used only for the config/backend
+# effective-backend override; the byte content is a validated backend token.
+fm_write_inherited_backend() {  # <dest> <value>
+  local dest=$1 value=$2 dest_parent tmp
+  if [ -e "$dest" ] && [ ! -f "$dest" ] && [ ! -L "$dest" ]; then
+    return 1
+  fi
+  dest_parent=${dest%/*}
+  [ -n "$dest_parent" ] && [ "$dest_parent" != "$dest" ] || return 1
+  mkdir -p "$dest_parent" 2>/dev/null || return 1
+  tmp=$(mktemp "$dest_parent/.fm-inherit.XXXXXX" 2>/dev/null) || return 1
+  if ! printf '%s\n' "$value" > "$tmp" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     return 1
   fi
@@ -494,6 +540,41 @@ propagate_inheritable_config() {
           continue
         fi
       fi
+    fi
+    # Effective-backend override: config/backend is the one inherited item whose
+    # ABSENCE on the primary does not always mean "unconfigured default". A
+    # claim-suppressed secondmate supervisor pane is launched HERDR_ENV=0, which
+    # disables the secondmate's OWN herdr auto-detection, so without an EXPLICIT
+    # runtime backend it would fall back to tmux. When the primary sets
+    # config/backend the file wins (generic copy below); when it does not, a
+    # caller that launches or converges a claim-suppressed secondmate passes the
+    # primary's effective backend in FM_INHERIT_EFFECTIVE_BACKEND and we write
+    # that token so the secondmate resolves the same backend without detection.
+    # Only bin/fm-spawn.sh and the convergence sweeps set it, and only to a
+    # validated backend (herdr today), so every other propagation keeps the plain
+    # absence mirror below unchanged.
+    if [ "$item" = backend ] && [ ! -f "$src" ] \
+       && fm_inherit_effective_backend_valid "${FM_INHERIT_EFFECTIVE_BACKEND:-}"; then
+      if ! destination_allows_inherited_item "$dest_config" "$item"; then
+        reason=$(inheritable_config_skip_reason)
+        warn_inheritable_config_skip "$item" "$dest_config" "$reason"
+        record_inheritable_config_result "$item" skipped "$reason"
+        continue
+      fi
+      if [ -L "$dest" ] || [ ! -f "$dest" ] \
+         || [ "$(cat "$dest" 2>/dev/null)" != "$FM_INHERIT_EFFECTIVE_BACKEND" ]; then
+        if fm_write_inherited_backend "$dest" "$FM_INHERIT_EFFECTIVE_BACKEND"; then
+          record_inheritable_config_result "$item" pushed "effective-backend override"
+        else
+          reason="failed to write effective backend"
+          warn_inheritable_config_error "$item" "$dest" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=1
+        fi
+      else
+        record_inheritable_config_result "$item" unchanged ""
+      fi
+      continue
     fi
     if [ -f "$src" ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then

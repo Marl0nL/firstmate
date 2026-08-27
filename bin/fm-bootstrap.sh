@@ -301,6 +301,14 @@ secondmate_sync() {
     done
     return 0
   fi
+  # The primary's EFFECTIVE runtime backend, resolved once per sweep. When it is
+  # herdr, convergence must re-pin config/backend=herdr into every claim-suppressed
+  # secondmate home through the inheritance effective-backend override; otherwise
+  # the plain absence mirror would wipe the value the spawn wrote and the
+  # HERDR_ENV=0 supervisor pane would fall back to tmux detection
+  # (fm-config-inherit-lib.sh). Non-herdr fleets pass nothing and keep the mirror.
+  local sm_inherit_effective_backend=
+  [ "$(fm_backend_name 2>/dev/null)" = herdr ] && sm_inherit_effective_backend=herdr
   FF_NUDGE_WINDOWS=""
   FF_SEEN_HOMES=""
   SECOND_MATE_NUDGE_MESSAGE=$FM_SECOND_MATE_NUDGE_MESSAGE
@@ -475,6 +483,7 @@ secondmate_sync() {
       continue
     }
     if FM_CONFIG_INHERIT_REPORT="$report" FM_CONFIG_INHERIT_LIVE=1 \
+      FM_INHERIT_EFFECTIVE_BACKEND="$sm_inherit_effective_backend" \
       propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
       :
     else

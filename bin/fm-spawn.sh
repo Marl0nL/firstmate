@@ -1690,8 +1690,14 @@ if [ "$KIND" = secondmate ]; then
     fi
     CONFIG_INHERIT_LOCK_HELD=1
     # Inheritance propagation: push the primary-authoritative live-safe local inheritance
-    # surface into this secondmate home (fm-config-inherit-lib.sh).
-    FM_CONFIG_INHERIT_LIVE=1 \
+    # surface into this secondmate home (fm-config-inherit-lib.sh). On herdr the
+    # supervisor pane is claim-suppressed (HERDR_ENV=0 below), which disables its
+    # own herdr auto-detection, so pin config/backend=herdr durably through the
+    # effective-backend override when the primary leaves config/backend
+    # auto-detected. The primary's own explicit config/backend still wins.
+    SPAWN_INHERIT_EFFECTIVE_BACKEND=
+    [ "$BACKEND" = herdr ] && SPAWN_INHERIT_EFFECTIVE_BACKEND=herdr
+    FM_CONFIG_INHERIT_LIVE=1 FM_INHERIT_EFFECTIVE_BACKEND="$SPAWN_INHERIT_EFFECTIVE_BACKEND" \
       propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
       || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
   fi
@@ -2808,12 +2814,15 @@ fi
 # only the hook reads it), leaving the pane UNCLAIMED so firstmate can publish its
 # working/idle/blocked state into herdr's own agent panel via `pane report-agent`
 # (bin/fm-watch.sh -> fm_backend_publish_agent_state). Scoped to firstmate's own
-# claude crew/scout panes on herdr; the captain's own panes are launched by the
-# captain and are never touched. A claude secondmate is itself a firstmate whose
-# backend auto-detection reads HERDR_ENV=1 (bin/fm-backend.sh fm_backend_detect),
-# so it is deliberately excluded here - supervisor-pane registration is a separate
-# follow-up that must first give the secondmate an explicit backend.
-if [ "$HARNESS" = claude ] && [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ]; then
+# claude crew/scout AND secondmate SUPERVISOR panes on herdr; the captain's own
+# panes are launched by the captain and are never touched. A claude secondmate is
+# itself a firstmate whose backend auto-detection would normally read HERDR_ENV=1
+# (bin/fm-backend.sh fm_backend_detect); suppressing the claim disables that
+# detection, so a secondmate spawn also pins config/backend=herdr into the
+# secondmate home through the inheritance effective-backend override (see the
+# FM_INHERIT_EFFECTIVE_BACKEND wiring at the secondmate setup above), letting the
+# supervisor pane self-register while its own crews still resolve herdr.
+if [ "$HARNESS" = claude ] && [ "$BACKEND" = herdr ]; then
   LAUNCH="HERDR_ENV=0 $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
