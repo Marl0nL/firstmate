@@ -1,0 +1,8 @@
+ok - a claim-suppressed (HERDR_ENV=0) claude SUPERVISOR pane is unclaimed and reads kind=secondmate on herdr 0.8.2 / 2.1.247 (Claude Code)
+ok - the watcher gate registers a kind=secondmate supervisor pane (idle) in herdr's agent panel on herdr 0.8.2 / 2.1.247 (Claude Code)
+ok - the gate drives a supervisor idle->working transition on herdr 0.8.2 / 2.1.247 (Claude Code)
+ok - re-publishing an unchanged supervisor state issues no new report (state_change_seq stable) on herdr 0.8.2 / 2.1.247 (Claude Code)
+ok - a blocked status verb lands blocked and sticks (herdr does not override the report) on herdr 0.8.2 / 2.1.247 (Claude Code)
+ok - a crashed supervisor's stale record is released and the pane reads no-agent on exit on herdr 0.8.2 / 2.1.247 (Claude Code)
+ok - a dormant wake-resident advisor's bare shell never registers (reality gate holds) on herdr 0.8.2 / 2.1.247 (Claude Code)
+ok - Herdr supervisor self-registration live harness completed (7 checks) on herdr 0.8.2 / 2.1.247 (Claude Code)

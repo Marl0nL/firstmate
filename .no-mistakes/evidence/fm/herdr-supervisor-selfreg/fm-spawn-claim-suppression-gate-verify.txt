@@ -1,0 +1,8 @@
+ok - spawn-time inheritance pinned config/backend=herdr into the local secondmate home (primary file absent)
+ok - local pinned secondmate launches claim-suppressed (HERDR_ENV=0 in the sent launch command)
+ok - the mate meta records backend=herdr (per-mate sweep keying input)
+ok - remote-managed secondmate (FM_SKIP_SECONDMATE_INHERIT=1) stays integration-claimed even with an explicit herdr pin in its home
+ok - a herdr-endpoint secondmate whose home pin is NOT herdr (explicit primary tmux) stays integration-claimed (pin-gated suppression)
+--- captured launch line (case 1, local pinned) ---
+  HERDR_SESSION=default pane send-text w1:p3 FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME='/tmp/fm-spawn-gate.NJ7XnU/local/home' FM_HOME='/tmp/fm-spawn-gate.NJ7XnU/local/sm' FM_TRACE_CONTEXT=off FM_SUPERVISION_MODEL=autoarm HERDR_ENV=0 env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "$('/var/home/marlon/.no-mistakes/worktrees/08ac01b5fe88/01M10MKD797BMM6WCF9F542JR2/bin/fm-operational-input.sh' encode launch-brief < '/tmp/fm-spawn-gate.NJ7XnU/local/sm/data/charter.md')" --session default
+all spawn-gate checks passed
