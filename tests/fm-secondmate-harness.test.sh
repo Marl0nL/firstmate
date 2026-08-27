@@ -1413,13 +1413,16 @@ test_backend_inheritance_present_and_absent() {
   pass "B12b backend inheritance: present values and primary absence converge exactly"
 }
 
-# When the primary leaves config/backend auto-detected but its EFFECTIVE runtime
-# backend is herdr, a claim-suppressed secondmate supervisor pane (HERDR_ENV=0)
-# can no longer auto-detect herdr itself, so convergence must PIN config/backend=herdr
-# into the secondmate home through the effective-backend override rather than
-# mirroring the primary's file absence. This is what keeps the value the spawn
-# wrote from being wiped on the next convergence. FM_BACKEND selects the primary's
-# effective backend for the run (fm_backend_name reads it first).
+# The effective-backend override is keyed on each secondmate's OWN recorded
+# endpoint backend (its meta backend=), never the primary's effective backend:
+# a claim-suppressed supervisor pane (HERDR_ENV=0) can no longer auto-detect
+# herdr itself, so convergence must PIN config/backend=herdr into a
+# herdr-endpoint mate's home even while the primary itself runs another backend
+# - that is what keeps the value the spawn wrote from being mirror-wiped by the
+# next convergence - while a non-herdr-endpoint mate keeps the plain absence
+# mirror even under a herdr primary and is never silently retargeted.
+# FM_BACKEND selects the primary's effective backend for each run
+# (fm_backend_name reads it first) to prove the keying ignores it.
 test_backend_effective_override_pins_and_survives() {
   local w head out err status
   w=$(new_world backend-effective-override)
@@ -1427,45 +1430,50 @@ test_backend_effective_override_pins_and_survives() {
   add_sm_worktree "$w" sm "$head"
   err="$w/backend-effective-override.err"
 
-  # Primary leaves config/backend absent; effective backend is herdr.
-  out=$(FM_BACKEND=herdr run_config_push "$w" 2>"$err"); status=$?
-  expect_code 0 "$status" "herdr effective-backend override push should succeed"
+  # Primary leaves config/backend absent; the mate records a herdr endpoint.
+  # A primary effectively on tmux must still pin the herdr-endpoint mate.
+  printf 'backend=herdr\n' >> "$w/home/state/sm.meta"
+  out=$(FM_BACKEND=tmux run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "herdr-endpoint override push should succeed"
   assert_contains "$out" "backend: pushed - effective-backend override" \
-    "an auto-detected herdr primary must pin config/backend downstream, not mirror absence"
+    "a herdr-endpoint mate must get config/backend pinned even under a non-herdr primary"
   [ "$(cat "$w/sm/config/backend")" = herdr ] \
     || fail "effective-backend override did not write config/backend=herdr ($(cat "$w/sm/config/backend" 2>/dev/null || echo ABSENT))"
 
   # Idempotent: an unchanged re-run neither churns nor re-reports the write.
-  out=$(FM_BACKEND=herdr run_config_push "$w" 2>"$err"); status=$?
-  expect_code 0 "$status" "herdr effective-backend override re-run should succeed"
+  out=$(FM_BACKEND=tmux run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "herdr-endpoint override re-run should succeed"
   case "$out" in
     *"backend: pushed"*) fail "an unchanged effective-backend override re-reported a push" ;;
   esac
   [ "$(cat "$w/sm/config/backend")" = herdr ] \
     || fail "effective-backend override did not survive an unchanged convergence"
 
-  # Durability: a value the spawn wrote (already herdr here) survives every
-  # further herdr convergence rather than being mirror-wiped.
+  # Durability: the pin survives every further convergence regardless of the
+  # primary's own effective backend rather than being mirror-wiped.
   out=$(FM_BACKEND=herdr run_config_push "$w" 2>"$err"); status=$?
-  expect_code 0 "$status" "second herdr convergence should succeed"
+  expect_code 0 "$status" "repeated convergence should succeed"
   [ "$(cat "$w/sm/config/backend")" = herdr ] \
-    || fail "config/backend=herdr was wiped by a repeated herdr convergence"
+    || fail "config/backend=herdr was wiped by a repeated convergence"
 
-  # A NON-herdr effective backend still mirrors primary absence (override is
-  # scoped to herdr, the only backend that claim-suppresses the supervisor pane).
-  out=$(FM_BACKEND=tmux run_config_push "$w" 2>"$err"); status=$?
-  expect_code 0 "$status" "tmux effective-backend push should succeed"
+  # A NON-herdr-endpoint mate keeps the plain absence mirror even when the
+  # primary's own effective backend is herdr: never silently retargeted.
+  grep -v '^backend=' "$w/home/state/sm.meta" > "$w/home/state/sm.meta.tmp" \
+    && mv "$w/home/state/sm.meta.tmp" "$w/home/state/sm.meta"
+  out=$(FM_BACKEND=herdr run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "non-herdr-endpoint push should succeed"
   assert_contains "$out" "backend: pushed - mirrored primary absence" \
-    "a non-herdr effective backend must keep the plain absence mirror"
-  [ -e "$w/sm/config/backend" ] && fail "non-herdr convergence did not mirror primary absence"
+    "a non-herdr-endpoint mate must keep the plain absence mirror under a herdr primary"
+  [ -e "$w/sm/config/backend" ] && fail "non-herdr-endpoint convergence did not mirror primary absence"
 
   # An EXPLICIT primary config/backend file still wins over the override.
+  printf 'backend=herdr\n' >> "$w/home/state/sm.meta"
   printf 'zellij\n' > "$w/home/config/backend"
-  out=$(FM_BACKEND=herdr run_config_push "$w" 2>"$err"); status=$?
+  out=$(FM_BACKEND=tmux run_config_push "$w" 2>"$err"); status=$?
   expect_code 0 "$status" "explicit primary backend push should succeed"
   [ "$(cat "$w/sm/config/backend")" = zellij ] \
     || fail "explicit primary config/backend did not win over the herdr effective-backend override"
-  pass "B12d effective-backend override: an auto-detected herdr primary durably pins config/backend=herdr; explicit file and non-herdr fleets are unchanged"
+  pass "B12d effective-backend override: keyed on the mate's own herdr endpoint, durable under any primary backend; explicit file and non-herdr endpoints unchanged"
 }
 
 # config/herdr-presentation-spaces has an unconfigured default, so this item's

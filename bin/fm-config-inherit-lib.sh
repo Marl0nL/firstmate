@@ -8,7 +8,8 @@
 # hand-edit backlog files too, primary config/backend pins that home's local
 # runtime-backend default for future spawns (and, when the primary leaves it
 # auto-detected, an effective-backend override in propagate_inheritable_config
-# still pins a claim-suppressed secondmate to the primary's live backend),
+# still pins a claim-suppressed secondmate to its own endpoint backend, which
+# each caller derives from that mate's spawn --backend or meta backend= record),
 # primary config/startup-memory-budget
 # bounds that home's startup-memory curation, and primary
 # config/herdr-presentation-spaces carries the same Herdr presentation-projection
@@ -548,11 +549,12 @@ propagate_inheritable_config() {
     # runtime backend it would fall back to tmux. When the primary sets
     # config/backend the file wins (generic copy below); when it does not, a
     # caller that launches or converges a claim-suppressed secondmate passes the
-    # primary's effective backend in FM_INHERIT_EFFECTIVE_BACKEND and we write
-    # that token so the secondmate resolves the same backend without detection.
-    # Only bin/fm-spawn.sh and the convergence sweeps set it, and only to a
-    # validated backend (herdr today), so every other propagation keeps the plain
-    # absence mirror below unchanged.
+    # secondmate's own endpoint backend (the spawn's --backend at launch, the
+    # mate's meta backend= record on a sweep) in FM_INHERIT_EFFECTIVE_BACKEND
+    # and we write that token so the secondmate resolves its endpoint backend
+    # without detection. Only bin/fm-spawn.sh and the convergence sweeps set it,
+    # and only to a validated backend (herdr today), so every other propagation
+    # keeps the plain absence mirror below unchanged.
     if [ "$item" = backend ] && [ ! -f "$src" ] \
        && fm_inherit_effective_backend_valid "${FM_INHERIT_EFFECTIVE_BACKEND:-}"; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
