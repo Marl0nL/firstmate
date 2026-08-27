@@ -4627,6 +4627,148 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
+# --- U3: report-agent state publishing (fm_backend_herdr_publish_agent_state) ---
+# The reconciling reporter is reality-gated (it publishes only onto a pane
+# whose foreground process is a verified harness, and releases a stale record
+# otherwise), reads herdr's currently published agent_status and pushes `pane
+# report-agent` ONLY on a change, so it is a cheap no-op once established and
+# re-establishes after a server restart (unknown != target).
+
+publish_run() {  # <dir> <current-agent_status-json> <target> <harness> <state> [title] [body] -> stdout: log path
+  # The keyed reality probe models a LIVE claude crew in the pane, the normal
+  # publishing case; the release-path tests below script a bare shell instead.
+  local dir=$1 curjson=$2 target=$3 harness=$4 state=$5 title=${6-} body=${7-}
+  local log resp fb
+  mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' "$curjson" > "$resp/1.out"   # agent get: current published status
+  herdr_pi_claude > "$resp/pi-w1_p2.out"     # process-info: live claude crew
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_publish_agent_state "$1" "$2" "$3" "$4" "$5"' \
+    "$ROOT" "$target" "$harness" "$state" "$title" "$body" >/dev/null 2>&1
+  printf '%s' "$log"
+}
+
+test_publish_agent_state_noop_when_already_reported() {
+  local log
+  log=$(publish_run "$TMP_ROOT/pub-noop" '{"result":{"agent":{"agent_status":"working"}}}' fmtest:w1:p2 claude working)
+  assert_contains "$(cat "$log")" $'agent\x1fget\x1fw1:p2' "the reconcile must read herdr's current published status"
+  assert_not_contains "$(cat "$log")" $'pane\x1freport-agent' "an already-published state must NOT re-report (reconciling no-op)"
+  pass "publish is a no-op when herdr already shows the target state"
+}
+
+test_publish_agent_state_pushes_on_change() {
+  local log
+  log=$(publish_run "$TMP_ROOT/pub-change" '{"result":{"agent":{"agent_status":"idle"}}}' fmtest:w1:p2 claude working)
+  assert_contains "$(cat "$log")" $'pane\x1fprocess-info' "the reporter must consult the reality probe before publishing"
+  assert_contains "$(cat "$log")" $'pane\x1freport-agent\x1fw1:p2\x1f--source\x1ffirstmate\x1f--agent\x1fclaude\x1f--state\x1fworking' "a changed state must push report-agent with source firstmate"
+  pass "publish pushes report-agent when the target state differs from herdr's"
+}
+
+test_publish_agent_state_releases_stale_record_when_no_live_process() {
+  # THE reality gate: a pane whose crew crashed to a bare shell (or a restored
+  # bare-shell husk) still carries firstmate's own report-agent record. The
+  # reporter must NOT re-publish onto it - that echo would defeat the liveness
+  # classifier - and must instead clear the stale record with release-agent so
+  # the pane returns to agent_not_found and reads dead/reclaimable.
+  local dir log resp fb calls
+  dir="$TMP_ROOT/pub-release"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"   # agent get: firstmate's stale record
+  herdr_pi_shell > "$resp/pi-w1_p2.out"                                     # process-info: bare shell, crew gone
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_publish_agent_state fmtest:w1:p2 claude working' "$ROOT" \
+    >/dev/null 2>&1 || fail "releasing a stale record must succeed (return 0)"
+  calls=$(cat "$log")
+  assert_not_contains "$calls" $'pane\x1freport-agent' "no state may be published onto a pane with no live crew process"
+  assert_contains "$calls" $'pane\x1frelease-agent\x1fw1:p2\x1f--source\x1ffirstmate\x1f--agent\x1fclaude' "the stale firstmate record must be released"
+  assert_not_contains "$calls" $'notification\x1fshow' "a release must never raise a toast"
+  pass "publish refuses a pane with no live crew process and releases the stale record"
+}
+
+test_publish_agent_state_no_live_process_no_record_publishes_nothing() {
+  # No live crew AND no registered record: nothing to publish, nothing to
+  # release - the reporter must leave the pane untouched.
+  local dir log resp fb calls
+  dir="$TMP_ROOT/pub-norecord"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/1.out"
+  herdr_pi_shell > "$resp/pi-w1_p2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_publish_agent_state fmtest:w1:p2 claude idle' "$ROOT" \
+    >/dev/null 2>&1 || fail "a record-free no-crew pane must be a clean no-op (return 0)"
+  calls=$(cat "$log")
+  assert_not_contains "$calls" $'pane\x1freport-agent' "no state may be published onto a record-free no-crew pane"
+  assert_not_contains "$calls" $'pane\x1frelease-agent' "there is no record to release on a record-free pane"
+  pass "publish leaves a record-free no-crew pane untouched"
+}
+
+test_publish_agent_state_reestablishes_after_restart() {
+  # A server restart resets the registry: agent get answers agent_not_found, so
+  # agent_status_raw reads empty; empty != idle, so the reporter re-publishes.
+  local log
+  log=$(publish_run "$TMP_ROOT/pub-restart" '{"error":{"code":"agent_not_found"}}' fmtest:w1:p2 claude idle)
+  assert_contains "$(cat "$log")" $'pane\x1freport-agent\x1fw1:p2\x1f--source\x1ffirstmate\x1f--agent\x1fclaude\x1f--state\x1fidle' "an unknown (post-restart) registry must be re-established"
+  pass "publish re-establishes state after a herdr server restart resets the registry"
+}
+
+test_publish_agent_state_blocked_raises_toast() {
+  local log
+  log=$(publish_run "$TMP_ROOT/pub-blocked" '{"result":{"agent":{"agent_status":"working"}}}' fmtest:w1:p2 claude blocked "firstmate: a worker is blocked" "the reason")
+  assert_contains "$(cat "$log")" $'pane\x1freport-agent\x1fw1:p2\x1f--source\x1ffirstmate\x1f--agent\x1fclaude\x1f--state\x1fblocked' "blocked must publish the blocked state"
+  assert_contains "$(cat "$log")" $'notification\x1fshow\x1ffirstmate: a worker is blocked' "a fresh transition into blocked must raise a toast"
+  assert_contains "$(cat "$log")" $'--sound\x1frequest' "the blocked toast must use the request sound"
+  pass "publish raises a herdr toast on a fresh transition into blocked"
+}
+
+test_publish_agent_state_blocked_no_toast_without_title() {
+  local log
+  log=$(publish_run "$TMP_ROOT/pub-blocked-notitle" '{"result":{"agent":{"agent_status":"working"}}}' fmtest:w1:p2 claude blocked)
+  assert_contains "$(cat "$log")" $'pane\x1freport-agent\x1fw1:p2\x1f--source\x1ffirstmate\x1f--agent\x1fclaude\x1f--state\x1fblocked' "blocked still publishes without a toast title"
+  assert_not_contains "$(cat "$log")" $'notification\x1fshow' "no toast may fire when no title was supplied"
+  pass "publish suppresses the toast when no title is supplied"
+}
+
+test_publish_agent_state_rejects_unknown_state() {
+  local log
+  log=$(publish_run "$TMP_ROOT/pub-badstate" '{"result":{"agent":{"agent_status":"working"}}}' fmtest:w1:p2 claude gorp)
+  [ ! -s "$log" ] || fail "an out-of-vocabulary state must make no herdr call at all, log: $(cat "$log")"
+  pass "publish rejects a state outside idle|working|blocked without any herdr call"
+}
+
+test_publish_agent_state_unparseable_target_returns_error() {
+  local out
+  out=$( bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_publish_agent_state "notarget" claude working; echo "rc=$?"' "$ROOT" 2>/dev/null )
+  [ "$out" = "rc=1" ] || fail "a target with no session:pane split must return 1, got '$out'"
+  pass "publish returns non-zero when the target cannot be parsed"
+}
+
+test_state_seq_numeric_and_monotonic_on_bsd_date() {
+  # BSD/macOS date has no %N: `date +%s%N` emits a literal N suffix
+  # ("1756280000N"). The seq helper must still hand report-agent a purely
+  # numeric value that advances across calls, or every publish on a Darwin
+  # captain silently fails.
+  local dir out first second
+  dir="$TMP_ROOT/seq-bsd"; mkdir -p "$dir/bin"
+  cat > "$dir/bin/date" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  +%s%N) printf '1756280000N\n' ;;
+  +%s) printf '1756280000\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/bin/date"
+  out=$( PATH="$dir/bin:$PATH" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_state_seq; printf "\n"; fm_backend_herdr_state_seq; printf "\n"' "$ROOT" )
+  first=$(printf '%s\n' "$out" | sed -n 1p)
+  second=$(printf '%s\n' "$out" | sed -n 2p)
+  case "$first" in ''|*[!0-9]*) fail "seq must be purely numeric under a BSD-shaped date, got '$first'" ;; esac
+  case "$second" in ''|*[!0-9]*) fail "second seq must be purely numeric under a BSD-shaped date, got '$second'" ;; esac
+  [ "$second" -gt "$first" ] || fail "seq must advance across calls within one process ($first -> $second)"
+  pass "fm_backend_herdr_state_seq: numeric and strictly advancing under a BSD-shaped (no-%N) date"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -4819,4 +4961,14 @@ test_wait_transition_stream_blocked_returns_record
 test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
+test_publish_agent_state_noop_when_already_reported
+test_publish_agent_state_pushes_on_change
+test_publish_agent_state_releases_stale_record_when_no_live_process
+test_publish_agent_state_no_live_process_no_record_publishes_nothing
+test_publish_agent_state_reestablishes_after_restart
+test_publish_agent_state_blocked_raises_toast
+test_publish_agent_state_blocked_no_toast_without_title
+test_publish_agent_state_rejects_unknown_state
+test_publish_agent_state_unparseable_target_returns_error
+test_state_seq_numeric_and_monotonic_on_bsd_date
 test_wait_transition_clean_timeout_returns_1

@@ -845,6 +845,9 @@ test_no_run_grok_uses_isolated_fallback() {
   pass "grok still reads working through its isolated rendered-tail fallback"
 }
 
+# pi is a harness herdr registers itself, so its native agent_status is an
+# independent busy signal (unlike claude, whose native state is firstmate's own
+# U3 report-agent echo - see test_no_run_herdr_native_busy_not_borrowed_for_claude).
 test_no_run_herdr_unknown_uses_backend_capture() {
   command -v jq >/dev/null 2>&1 || { pass "herdr pane fallback skipped without jq"; return; }
   reset_fakes
@@ -852,7 +855,7 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   make_repo_on_branch "$d/wt" fm/feat-herdr
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-herdr.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
-    "backend=herdr" "harness=claude"
+    "backend=herdr" "harness=pi"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
@@ -863,6 +866,29 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   assert_contains "$out" "source: pane" "herdr native busy -> pane source"
   assert_contains "$out" "herdr-native" "the herdr verdict names its native source"
   pass "herdr's native busy verdict reads working with no record present"
+}
+
+# Anti-circularity (Track U3): firstmate publishes each claude crew's own state
+# into herdr's registry via report-agent, so herdr's native agent_status for a
+# claude crew is firstmate's own echo, never an independent signal. With no
+# firstmate record, a claude crew must NOT borrow herdr's native busy (which
+# could latch a wedged crew as busy); the record path still governs when present.
+test_no_run_herdr_native_busy_not_borrowed_for_claude() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr claude anti-echo skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-claude-echo)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-echo
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-echo.meta" "window=default:w1:p9" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_BUSY=1
+  FM_FAKE_HERDR_AGENT_STATUS=working
+  local out; out=$(run_crew_state "$d" feat-herdr-echo)
+  assert_not_contains "$out" "herdr-native" "a claude crew must not borrow herdr's native busy (its own report echo)"
+  pass "a claude crew does not read working from herdr's native busy verdict (U3 anti-echo)"
 }
 
 # Regression (2026-07 herdr false-surface incident, now solved semantically):
@@ -1447,6 +1473,7 @@ test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
+test_no_run_herdr_native_busy_not_borrowed_for_claude
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log

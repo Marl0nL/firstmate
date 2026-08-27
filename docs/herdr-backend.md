@@ -232,7 +232,7 @@ The capture owner requests at least 200 lines from Herdr and trims locally to th
 This generous floor is required for small composer and peek reads.
 
 Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
-The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.
+The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that, and a Claude pane's native state is skipped entirely because it is firstmate's own published echo (see [Restart and liveness behavior](#restart-and-liveness-behavior)).
 A human-blocked permission dialog has no busy banner and still surfaces.
 
 ## Composer and injection safety
@@ -271,8 +271,16 @@ Unlike tmux process-name inspection, native registration can classify Pi without
 A Claude crew registers no agent record on Herdr 0.8.2 / protocol 20 (`agent get` answers `agent_not_found`, `agent list` is empty), whether or not the integration claimed the pane, so its metadata alone is indistinguishable from a restored bare shell's.
 The classifier therefore composes the `pane process-info` reality probe into its `agent_not_found` branch: a pane whose foreground process is a verified harness (per the fleet-wide `fm_harness_process_matches` contract in `bin/fm-session-lock-lib.sh`) classifies `live`, while a bare shell - or an unreadable probe - stays `no-agent`, so a genuine restored husk remains reclaimable and an unprovable read never upgrades to live.
 Every liveness consumer and the husk-reclaim path route through this one classifier, so a live-but-unregistered crew is neither respawned as a duplicate nor closed as a restored shell.
-This recognition is firstmate-internal and publishes nothing into Herdr's own UI, so Herdr's status indicators stay empty for Claude crews until report-agent state-publishing exists.
+This recognition is firstmate-internal; publishing the crew's state into Herdr's own UI is the separate reporter below.
 The dated 0.8.2 measurements and the post-fix four-way liveness acceptance table are recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) "Agent recognition recalibration"; that record's live guard is `FM_HERDR_RECAL_LIVE=1 tests/fm-herdr-recalibration-live-e2e.test.sh`.
+
+Firstmate also publishes each managed Claude crew's state into Herdr's own agent registry so Herdr's attention-sorted agent panel becomes a fleet-wide working/idle/blocked view.
+`bin/fm-spawn.sh` launches crew/scout Claude panes claim-suppressed (`HERDR_ENV=0`, so the integration hook leaves the pane unclaimed), and the watcher's steady-state poll maps each crew's semantic state onto Herdr's `idle|working|blocked` vocabulary and calls `fm_backend_publish_agent_state`, which reconciles against Herdr's currently published `agent_status` and issues `pane report-agent` only on a change (a cheap no-op otherwise, re-established after a server restart); a fresh `blocked` transition also raises a `notification show` toast.
+The publish is reality-gated: it only takes on a pane whose foreground process the U2 probe confirms as a live verified harness, and when the crew is gone (crashed, or a restored bare-shell husk) it instead clears any still-registered firstmate record with `pane release-agent`, returning the pane to `agent_not_found` so the liveness classifier, dead-crew relaunch, and husk reclaim all read reality rather than firstmate's own echo.
+`pane report-agent` takes only on an unclaimed pane, so this is scoped to Claude crews; Herdr registers pi/codex natively, and secondmate supervisor panes stay claimed (their own home reads `HERDR_ENV=1` to detect Herdr).
+Because Herdr's native `agent_status` for a Claude crew is now firstmate's own report echo, `bin/fm-busy-lib.sh` no longer borrows Herdr's native busy verdict for `claude`.
+The three captain-consented global attention settings (`agent_panel_sort = "priority"`, `[ui.toast]`, `[ui.sound]`) are applied idempotently by `bin/fm-herdr-attention-config.sh` (dated backup, validate, reload).
+The dated 0.8.2 report-agent-publishing measurements are recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) "Agent-state publishing (U3)"; that record's live guard is `FM_HERDR_ATTENTION_LIVE=1 tests/fm-herdr-attention-live-e2e.test.sh`.
 
 The session-start sweep uses this probe.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
@@ -352,6 +360,9 @@ tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
+tests/fm-watch-herdr-report.test.sh
+tests/fm-herdr-attention-config.test.sh
+tests/fm-herdr-attention-live-e2e.test.sh
 ```
 
 Real Herdr tests use the named lab helper and default-session tripwire.

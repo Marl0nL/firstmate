@@ -143,6 +143,12 @@ FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
 # at a seeded secondmate home's root, containing exactly that secondmate's id.
 # The primary firstmate home never carries this marker.
 FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
+# The `--source` firstmate uses when it publishes a crew's state into herdr's
+# native agent registry (`pane report-agent`). A stable, firstmate-owned source
+# id distinguishes these reports from herdr's own `herdr:claude` integration
+# source; the home separation the captain sees comes from the pane's workspace,
+# not this source (fm_backend_herdr_publish_agent_state).
+FM_BACKEND_HERDR_STATE_SOURCE="firstmate"
 # The presentation projection is intentionally separate from the authoritative
 # task endpoint record.
 # A per-task journal lives under state/ as <id>.herdr-presentation.
@@ -3180,6 +3186,85 @@ fm_backend_herdr_busy_state() {  # <target>
   fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
   fm_backend_herdr_classify_agent_status \
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")"
+}
+
+# fm_backend_herdr_state_seq: a monotonic-enough `--seq` value for report-agent.
+# Nanosecond wall clock on GNU date, matching the recalibration harness's
+# seq_ns. BSD/macOS date has no %N and emits a literal `N` suffix instead
+# (`1756280000N`), which would hand report-agent a malformed seq on every
+# Darwin captain, so a non-numeric read falls back to the whole-second clock
+# scaled to the same nanosecond magnitude. Either way the value is bumped past
+# the last one this process issued, so repeated calls within one second still
+# advance; herdr uses --seq only to drop an out-of-order report, so a rare
+# backward clock step across processes at worst skips one push, self-healed by
+# the next reconcile.
+fm_backend_herdr_state_seq() {
+  local ns
+  ns=$(date +%s%N 2>/dev/null)
+  case "$ns" in
+    ''|*[!0-9]*) ns=$(( $(date +%s) * 1000000000 )) ;;
+  esac
+  if [ -n "${FM_BACKEND_HERDR_STATE_SEQ_LAST:-}" ] \
+    && [ "$ns" -le "$FM_BACKEND_HERDR_STATE_SEQ_LAST" ]; then
+    ns=$((FM_BACKEND_HERDR_STATE_SEQ_LAST + 1))
+  fi
+  FM_BACKEND_HERDR_STATE_SEQ_LAST=$ns
+  printf '%s' "$ns"
+}
+
+# fm_backend_herdr_publish_agent_state: reconcile <target>'s herdr-published
+# agent state to <state> (idle|working|blocked) so herdr's own attention-sorted
+# agent panel shows the crew's live state. REALITY-GATED: before anything is
+# published, the U2 process probe (fm_backend_herdr_pane_foreground_harness)
+# must confirm a live verified-harness foreground process in the pane, so a
+# published record is always backed by a real live crew and can never fabricate
+# a `live` verdict for the liveness classifier out of firstmate's own echo.
+# When the probe does NOT confirm one (crashed crew, restored bare-shell husk,
+# unreadable probe), nothing is published; instead any still-registered record
+# on the pane is cleared with `pane release-agent`, returning it to
+# agent_not_found so the classifier reads the pane from reality again (dead
+# crews relaunch, husks reclaim). RECONCILING and idempotent on the publish
+# side: it reads herdr's currently published agent_status and issues `pane
+# report-agent` ONLY when it differs, so calling every supervision poll is a
+# cheap no-op once the state is established, and a herdr server restart - which
+# resets the registry to `unknown` - self-heals on the next poll (unknown !=
+# the target state, so it is re-published). `pane report-agent` only takes on
+# an UNCLAIMED pane (verified on 0.8.2); firstmate's claude crews are launched
+# claim-suppressed (HERDR_ENV=0 in bin/fm-spawn.sh) for exactly this. On a
+# FRESH transition into `blocked` it also raises a herdr toast (notification
+# show) so a worker that needs the captain surfaces at once; the toast is
+# best-effort and gated on <toast_title> being non-empty, and fires once
+# because the very report that set `blocked` makes the next poll a reconciled
+# no-op. The caller owns <toast_title>/<toast_body> wording (captain-facing;
+# AGENTS.md section 9). Returns 0 on a no-op or a successful push/release,
+# non-zero only when the target could not be parsed or the push/release call
+# failed.
+fm_backend_herdr_publish_agent_state() {  # <target> <harness> <state> [toast_title] [toast_body]
+  local target=$1 harness=$2 state=$3 toast_title=${4-} toast_body=${5-}
+  case "$state" in idle | working | blocked) ;; *) return 0 ;; esac
+  [ -n "$harness" ] || return 0
+  fm_backend_herdr_parse_target "$target" || return 1
+  local session=$FM_BACKEND_HERDR_SESSION pane=$FM_BACKEND_HERDR_PANE current seq
+  if ! fm_backend_herdr_pane_foreground_harness "$session" "$pane"; then
+    current=$(fm_backend_herdr_agent_status_raw "$session" "$pane")
+    [ -n "$current" ] || return 0
+    seq=$(fm_backend_herdr_state_seq)
+    fm_backend_herdr_cli "$session" pane release-agent "$pane" \
+      --source "$FM_BACKEND_HERDR_STATE_SOURCE" --agent "$harness" \
+      --seq "$seq" >/dev/null 2>&1 || return 1
+    return 0
+  fi
+  current=$(fm_backend_herdr_agent_status_raw "$session" "$pane")
+  [ "$current" = "$state" ] && return 0
+  seq=$(fm_backend_herdr_state_seq)
+  fm_backend_herdr_cli "$session" pane report-agent "$pane" \
+    --source "$FM_BACKEND_HERDR_STATE_SOURCE" --agent "$harness" \
+    --state "$state" --seq "$seq" >/dev/null 2>&1 || return 1
+  if [ "$state" = blocked ] && [ -n "$toast_title" ]; then
+    fm_backend_herdr_cli "$session" notification show "$toast_title" \
+      --body "$toast_body" --sound request >/dev/null 2>&1 || true
+  fi
+  return 0
 }
 
 # fm_backend_herdr_wait_for_working: poll <session>:<pane_id>'s NATIVE
