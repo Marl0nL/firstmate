@@ -1,0 +1,50 @@
+=== secondmate wake-loop stall check: before/after demonstration ===
+BASE  tree: /tmp/fm-stall-demo/base-tree (commit 459c822, before this branch)
+FIXED tree: /var/home/marlon/.no-mistakes/worktrees/08ac01b5fe88/01M13SV38WXPMC1MN7A5ZCKBES (commit 67c60ee, this change)
+
+>>> BEFORE (base): the false-alarm storm on a HEALTHY draining mate
+---------------------------------------------------------------
+SCENARIO 1 [before]: healthy mate, oldest row aged 200s by enqueue, stall threshold 60s
+$ fm-watch-checkpoint.sh --seconds 3   # poll 1: row 40 is oldest
+check: secondmate wake-loop stalled: mate=mate row=40 age=200s
+  => STALL ALARM FIRED
+$ fm-watch-checkpoint.sh --seconds 3   # poll 2: mate drained row 40, row 41 now oldest (loop is ALIVE)
+check: secondmate wake-loop stalled: mate=mate row=41 age=150s
+  => STALL ALARM FIRED
+
+>>> AFTER (fixed): the same healthy draining fixture stays quiet
+---------------------------------------------------------------
+SCENARIO 1 [after]: healthy mate, oldest row aged 200s by enqueue, stall threshold 60s
+$ fm-watch-checkpoint.sh --seconds 3   # poll 1: row 40 is oldest
+checkpoint: no actionable wake within 3s
+  => no stall alarm
+$ fm-watch-checkpoint.sh --seconds 3   # poll 2: mate drained row 40, row 41 now oldest (loop is ALIVE)
+check: rearm-resurface
+  => no stall alarm
+  (check: rearm-resurface is watcher-recovery bookkeeping after the prior bounded checkpoint, unrelated to the stall check)
+
+>>> AFTER (fixed): genuine wedges still surface (no missed alarms)
+---------------------------------------------------------------
+SCENARIO 2 [terminal-done]: wake loop genuinely wedged (frozen row 7, idle pane), last status line(s):
+    | done: routed request answered - then the loop wedged
+$ fm-watch-checkpoint.sh --seconds 5   # threshold 1s: a frozen row must fire
+check: secondmate wake-loop stalled: mate=mate row=7 age=1s
+  => STALL ALARM FIRED
+parent durable wake queue after the checkpoint:
+    | 1787909387	1	check	secondmate-wake-loop-mate-1787909186-7	check: secondmate wake-loop stalled: mate=mate row=7 age=1s
+---------------------------------------------------------------
+SCENARIO 2 [resolved-pause]: wake loop genuinely wedged (frozen row 7, idle pane), last status line(s):
+    | paused: waiting on <external>
+    | resolved: [key=x] cleared
+$ fm-watch-checkpoint.sh --seconds 5   # threshold 1s: a frozen row must fire
+check: secondmate wake-loop stalled: mate=mate row=7 age=2s
+  => STALL ALARM FIRED
+parent durable wake queue after the checkpoint:
+    | 1787909389	1	check	secondmate-wake-loop-mate-1787909187-7	check: secondmate wake-loop stalled: mate=mate row=7 age=2s
+---------------------------------------------------------------
+SCENARIO 3: declared 'paused:' mate with the same frozen row - must stay QUIET
+$ fm-watch-checkpoint.sh --seconds 4   # threshold 1s
+checkpoint: no actionable wake within 4s
+  => no stall alarm
+---------------------------------------------------------------
+=== end of demonstration ===
