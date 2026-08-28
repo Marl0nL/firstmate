@@ -100,7 +100,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # Launch-signature health (bin/fm-launch-health-lib.sh): the ONE owner of "does
 # this live Claude carry the launch flags firstmate gives it, or is it a resumed
 # husk that dropped them". This adapter feeds it a pane's foreground Claude argv
-# and environ so a mate that Herdr resumed WITHOUT --dangerously-skip-permissions
+# so a mate that Herdr resumed WITHOUT --dangerously-skip-permissions
 # (the restored manual-permission-mode stall) is recognized rather than misread
 # as a healthy live agent. See "Restart and liveness behavior" in
 # docs/herdr-backend.md.
@@ -2113,9 +2113,8 @@ EOF
 # restore-on-restart can bring a Claude pane back as a LIVE process (so the
 # foreground-harness probe above reads it live -> alive) yet re-run it WITHOUT
 # --dangerously-skip-permissions, leaving it frozen in manual permission mode.
-# `pane process-info` exposes each foreground process's argv AND pid, so this
-# reads the argv for the causal flag and the local environ (via the pid) for the
-# corroborating spawn markers, and hands both to the shared verdict.
+# `pane process-info` exposes each foreground process's argv, so this reads the
+# argv for the causal flag and hands it to the shared verdict.
 #
 # It mirrors fm_backend_herdr_pane_foreground_harness: it iterates the foreground
 # process group and acts on the first Claude it finds (FM_HARNESS_IS_CLAUDE, set
@@ -2123,19 +2122,18 @@ EOF
 # unreadable process-info body, is `unknown` so an unprovable read never triggers
 # a disruptive cycle - exactly the fail-safe the sweep depends on.
 fm_backend_herdr_pane_claude_launch_health() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out name args pid environ
+  local session=$1 pane_id=$2 out name args
   out=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>&1)
-  while IFS=$'\t' read -r name args pid; do
+  while IFS=$'\t' read -r name args; do
     [ -n "$name$args" ] || continue
     if fm_harness_process_matches "$name" "$args" && [ "$FM_HARNESS_IS_CLAUDE" = 1 ]; then
-      environ=$(fm_launch_health_read_environ "$pid") || environ=
-      fm_launch_health_verdict "$args" "$environ"
+      fm_launch_health_verdict "$args"
       return 0
     fi
   done <<EOF
 $(printf '%s' "$out" | jq -r '
   .result.process_info.foreground_processes[]?
-  | [(.name // ""), ((.argv // []) | join(" ")), ((.pid // "") | tostring)]
+  | [(.name // ""), ((.argv // []) | join(" "))]
   | @tsv' 2>/dev/null)
 EOF
   printf 'unknown'

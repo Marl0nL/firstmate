@@ -43,7 +43,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, and unhealthy supervision    |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
 | `fm-session-lock-lib.sh` | Shared verified-harness process identity: session-lock ancestry walk and holder liveness, plus the fleet-wide `fm_harness_process_matches` vocabulary |
-| `fm-launch-health-lib.sh` | Shared classifier for whether a live Claude carries firstmate's launch signature (`--dangerously-skip-permissions` plus env markers) or was resumed as a manual-permission-mode husk |
+| `fm-launch-health-lib.sh` | Shared classifier for whether a live Claude carries firstmate's launch signature (`--dangerously-skip-permissions` in argv) or was resumed as a manual-permission-mode husk |
 | `fm-claude-stop-autoarm.sh` | Claude Stop `asyncRewake` hook owning tokenless watcher continuity with single-flight exit-2 rewake (docs/watcher-continuity.md) |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
 | `fm-turnend-guard-grok.sh` | Grok Stop-hook adapter for the primary turn-end guard                              |

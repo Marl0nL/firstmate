@@ -182,8 +182,7 @@ test_herdr_agent_state_preserves_husk_classifier() {
 
 # Drive the Herdr launch-health probe with a canned `pane process-info` body so
 # the real jq extraction, harness match, and verdict run without a real Herdr.
-# The environ half reads /proc/<pid>; a non-existent pid keeps environ empty
-# (unreadable), so the argv flag alone decides - exactly the remote/degraded case.
+# The argv permission flag is the verdict's sole authority.
 herdr_launch_health() {  # <process-info-json> -> verdict
   FM_TEST_PROCINFO="$1" bash -c '
     . "$0/bin/backends/herdr.sh"
@@ -208,20 +207,7 @@ test_herdr_launch_health_classifies() {
   out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_launch_health "no-colon"' "$ROOT")
   [ "$out" = unknown ] || fail "an unparseable target should read unknown, got '$out'"
 
-  # The env veto through the real reader: a flag-less Claude whose environ (read
-  # from a fixture /proc via the recorded pid) carries BOTH firstmate markers is
-  # an anomalous shape and must NOT be classified degraded.
-  local proc="$TMP_ROOT/lh-proc"
-  mkdir -p "$proc/770077"
-  printf 'HERDR_ENV=0\000CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false\000' > "$proc/770077/environ"
-  local veto='{"result":{"process_info":{"foreground_processes":[{"name":"claude","argv":["/u/claude","--resume","abc"],"pid":770077}]}}}'
-  out=$(FM_TEST_PROCINFO="$veto" FM_PROC_ROOT_OVERRIDE="$proc" bash -c '
-    . "$0/bin/backends/herdr.sh"
-    fm_backend_herdr_cli() { printf "%s" "$FM_TEST_PROCINFO"; }
-    fm_backend_herdr_agent_launch_health "sess:p1"' "$ROOT")
-  [ "$out" = unknown ] || fail "a flag-less Claude whose environ still carries both markers must read unknown, got '$out'"
-
-  pass "fm_backend_herdr_agent_launch_health: healthy/degraded/unknown from real process-info, with env veto"
+  pass "fm_backend_herdr_agent_launch_health: healthy/degraded/unknown from real process-info argv"
 }
 
 test_agent_launch_health_dispatcher() {
@@ -473,6 +459,63 @@ test_sweep_refuses_manual_mode_husk_with_work_in_flight() {
   pass "sweep: a restored manual-mode mate with work in flight is refused for manual recovery"
 }
 
+# make_shim_root <dir> <log>: a shim repo root whose bin/ symlinks every real
+# bin entry (scripts and the backends dir) but REPLACES fm-control.sh and
+# fm-spawn.sh with logging fakes that succeed. Invoking the shim's
+# fm-bootstrap.sh resolves BOTH its SCRIPT_DIR (the fm-control.sh exit) and
+# FM_ROOT (the fm-spawn.sh respawn) to the shim, so the manual-mode cycle's
+# guarded exit -> --secondmate respawn sequence is observable end to end
+# through the real bootstrap executable without a real endpoint.
+make_shim_root() {
+  local dir=$1 log=$2 shim f
+  shim="$dir/shim"
+  mkdir -p "$shim/bin"
+  for f in "$ROOT"/bin/*; do
+    ln -s "$f" "$shim/bin/$(basename "$f")"
+  done
+  rm "$shim/bin/fm-control.sh" "$shim/bin/fm-spawn.sh"
+  cat > "$shim/bin/fm-control.sh" <<SH
+#!/usr/bin/env bash
+printf 'fm-control %s\n' "\$*" >> '$log'
+exit 0
+SH
+  cat > "$shim/bin/fm-spawn.sh" <<SH
+#!/usr/bin/env bash
+printf 'fm-spawn %s\n' "\$*" >> '$log'
+exit 0
+SH
+  chmod +x "$shim/bin/fm-control.sh" "$shim/bin/fm-spawn.sh"
+  printf '%s\n' "$shim"
+}
+
+test_sweep_cycles_idle_manual_mode_husk_through_exit_and_respawn() {
+  local w fb herdrfb shim cycle_log log flagless out
+  w=$(new_world sweep-manual-mode-cycle)
+  add_herdr_sm_home "$w" sm1 w6:pB >/dev/null
+  fb=$(make_toolchain "$w"); herdrfb=$(make_liveness_herdr "$w")
+  cycle_log="$w/cycle.log"; : > "$cycle_log"
+  shim=$(make_shim_root "$w" "$cycle_log")
+  log="$w/calls.log"; : > "$log"
+  # A live Claude foreground resumed WITHOUT --dangerously-skip-permissions,
+  # and NO child meta in the mate's home: a positively-confirmed idle husk.
+  flagless='{"result":{"process_info":{"foreground_processes":[{"name":"claude","argv":["/u/.local/share/claude/versions/9.9.9/claude","--resume","abc"],"pid":999999991}]}}}'
+
+  out=$(PATH="$herdrfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/home" \
+    FM_TEST_PANE_CMD=zsh FM_TMUX_CALL_LOG="$log" \
+    env FM_TEST_PROCINFO="$flagless" FM_BOOTSTRAP_VERBOSE_FACTS=1 \
+    "$shim/bin/fm-bootstrap.sh" 2>&1)
+
+  assert_contains "$(cat "$cycle_log")" "fm-control sm1 exit" \
+    "the idle degraded mate must be exited through the guarded control plane"
+  assert_contains "$(cat "$cycle_log")" "fm-spawn sm1 --secondmate" \
+    "the exited mate must be respawned with the --secondmate launch path"
+  assert_contains "$out" "BOOTSTRAP_INFO: secondmate sm1 relaunched after restored in manual-permission mode without launch flags (backend=herdr)" \
+    "the successful cycle must be reported as a relaunch fact"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1" \
+    "a successfully cycled mate must not fall back to a manual-recovery report"
+  pass "sweep: an idle restored manual-mode mate is cycled through guarded exit then --secondmate respawn"
+}
+
 test_sweep_leaves_healthy_launched_claude_untouched() {
   local w fb herdrfb log flagged out
   w=$(new_world sweep-manual-mode-healthy)
@@ -690,6 +733,7 @@ test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_refuses_manual_mode_husk_with_work_in_flight
+test_sweep_cycles_idle_manual_mode_husk_through_exit_and_respawn
 test_sweep_leaves_healthy_launched_claude_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate

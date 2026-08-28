@@ -595,9 +595,9 @@ HERDR_ENV=0
 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
 ```
 
-`herdr pane process-info` exposes each foreground process's `argv` (and `pid`), so `fm_backend_agent_launch_health` classifies a live Claude carrying the flag `healthy` and one resumed without it `degraded`; the environ markers corroborate only where the local pid is readable.
-The live guard that provisions a guarded named lab, runs a flag-carrying and a flag-less fake Claude in real panes, and asserts the verdicts (and that interrupting the degraded pane clears the husk) is `tests/fm-secondmate-manual-mode-e2e.test.sh`; the pure classifier decision is pinned portably in `tests/fm-launch-health-lib.test.sh`, and the sweep's degraded-detection and in-flight-work refusal in `tests/fm-secondmate-liveness.test.sh`.
-The four-key global-config editor is validated against the installed Herdr's `config check` by `tests/fm-herdr-attention-config.test.sh` and the live guard `FM_HERDR_ATTENTION_LIVE=1 tests/fm-herdr-attention-live-e2e.test.sh`.
+`herdr pane process-info` exposes each foreground process's `argv` (and `pid`), so `fm_backend_agent_launch_health` classifies a live Claude carrying the flag `healthy` and one resumed without it `degraded`; the argv flag is the verdict's sole signal - the `HERDR_ENV=0` / `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` env prefixes above are launch details the verdict deliberately does not consult, because environment preservation across a Herdr resume is not a verified contract.
+The live guard that provisions a guarded named lab, runs a flag-carrying and a flag-less fake Claude in real panes, and asserts the verdicts (and that interrupting the degraded pane clears the husk) is `tests/fm-secondmate-manual-mode-e2e.test.sh`; the pure classifier decision is pinned portably in `tests/fm-launch-health-lib.test.sh`, and the sweep's degraded-detection, idle-husk cycle, and in-flight-work refusal in `tests/fm-secondmate-liveness.test.sh`.
+The four-key transform is exercised against a fake `herdr` in the portable `tests/fm-herdr-attention-config.test.sh`; the only real `herdr config check` acceptance evidence for the fourth key is the dated measurement above (`config: ok` for `resume_agents_on_restore = false`, with a bogus session key rejected as the control).
 
 ### Launcher workspace placement
 
