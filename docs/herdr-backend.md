@@ -274,6 +274,23 @@ Every liveness consumer and the husk-reclaim path route through this one classif
 This recognition is firstmate-internal; publishing the crew's state into Herdr's own UI is the separate reporter below.
 The dated 0.8.2 measurements and the post-fix four-way liveness acceptance table are recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) "Agent recognition recalibration"; that record's live guard is `FM_HERDR_RECAL_LIVE=1 tests/fm-herdr-recalibration-live-e2e.test.sh`.
 
+### Restored-manual-mode secondmate stall
+
+Herdr's `[session] resume_agents_on_restore` (default `true` on 0.8.2) can bring a supported Claude pane back into its native conversation after a server restart, but the resumed process runs on Herdr's own launch line, dropping every firstmate launch prefix.
+The load-bearing loss is `--dangerously-skip-permissions`: a Claude resumed without it sits in manual permission mode and freezes on its first non-allowlisted command, with nobody watching - a fleet-wide silent stall.
+Because the resumed process is genuinely alive, the classifier above reads it `alive`, so the ordinary dead/missing relaunch never fires for it.
+
+The preferred, durable fix is to disable that resume: firstmate manages `[session] resume_agents_on_restore = false` in the global config through `bin/fm-herdr-attention-config.sh` (the fourth managed key), so a restored pane comes back a plain shell that the existing dead-mate relaunch handles.
+This is beneficial for every managed pane and the captain's own (a resumed flag-less firstmate would stall the same way), and it is fully reversible.
+
+Detection and cycling are the fallback for a home where resume is still on.
+`fm_backend_agent_launch_health` (`bin/fm-backend.sh`, backed by the pure classifier in `bin/fm-launch-health-lib.sh`) refines an `alive` Claude verdict: it reads the foreground process's argv from `pane process-info` for `--dangerously-skip-permissions` and, where the local pid is readable, corroborates with the `HERDR_ENV=0` and `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` spawn markers in `/proc/<pid>/environ`.
+A live Claude carrying the flag is `healthy`; one provably lacking it is `degraded`; every uncertain read is `unknown` and preserves the pane, so a healthy firstmate-launched mate is never cycled.
+The permission flag rides argv and stays authoritative even where the environ is unreadable (a remote pane); the environ markers can only make a `degraded` verdict more conservative, never create one.
+The launch-signature checked here is the causal subset of the launch command owned by `bin/fm-spawn.sh`; only Herdr resumes an agent process across a restart, so every other backend is not-applicable (`unknown`).
+The session-start secondmate-liveness sweep (`bin/fm-bootstrap.sh`) acts on a `degraded` claude/herdr secondmate by cycling it through the guarded `bin/fm-control.sh` exit then a `--secondmate` respawn - the same exit-then-relaunch recovery sequence, one mate at a time - unless the mate's own home holds a crew task in flight, in which case it is refused and reported for manual recovery.
+The dated real-launch argv/environ shape and the `resume_agents_on_restore` config evidence are recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) "Restored-manual-mode detection".
+
 Firstmate also publishes each managed Claude crew's state - and each secondmate supervisor pane's - into Herdr's own agent registry so Herdr's attention-sorted agent panel becomes a fleet-wide working/idle/blocked view.
 `bin/fm-spawn.sh` launches crew/scout AND secondmate supervisor Claude panes claim-suppressed (`HERDR_ENV=0`, so the integration hook leaves the pane unclaimed), and the watcher's steady-state poll maps each pane's semantic state onto Herdr's `idle|working|blocked` vocabulary and calls `fm_backend_publish_agent_state`, which reconciles against Herdr's currently published `agent_status` and issues `pane report-agent` only on a change (a cheap no-op otherwise, re-established after a server restart); a fresh `blocked` transition also raises a `notification show` toast.
 The publish is reality-gated: it only takes on a pane whose foreground process the U2 probe confirms as a live verified harness, and when the agent is gone (crashed, or a restored bare-shell husk such as a stood-down wake-resident advisor) it instead clears any still-registered firstmate record with `pane release-agent`, returning the pane to `agent_not_found` so the liveness classifier, dead-crew relaunch, and husk reclaim all read reality rather than firstmate's own echo.
@@ -364,6 +381,9 @@ tests/fm-afk-pi-herdr-return-e2e.test.sh
 tests/fm-watch-herdr-report.test.sh
 tests/fm-herdr-attention-config.test.sh
 tests/fm-herdr-attention-live-e2e.test.sh
+tests/fm-launch-health-lib.test.sh
+tests/fm-secondmate-liveness.test.sh
+tests/fm-secondmate-manual-mode-e2e.test.sh
 ```
 
 Real Herdr tests use the named lab helper and default-session tripwire.

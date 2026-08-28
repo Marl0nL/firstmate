@@ -1,16 +1,28 @@
 #!/usr/bin/env bash
-# fm-herdr-attention-config.sh - apply the captain-consented Herdr attention
-# settings to the GLOBAL Herdr config so Herdr's own agent panel becomes a
-# fleet-wide attention view for firstmate's report-agent state publishing (Track
-# U phase U3; see docs/verification/runtime-backends.md "Agent-state publishing
-# (U3)" and the captain's scoped consent recorded in
-# data/decisions/herdr-integration-decisions-2026-08-24.md).
+# fm-herdr-attention-config.sh - apply firstmate's managed Herdr GLOBAL config
+# keys. It is the single owner of firstmate's edits to the captain's global Herdr
+# config, so one guarded backup/validate/reload mechanism covers them all rather
+# than competing editors of one file. It touches EXACTLY these four keys and
+# nothing else, in two groups with distinct authorities:
 #
-# This is the ONE authorized global-config edit. It touches EXACTLY three keys
-# and nothing else:
-#   [ui]        agent_panel_sort = "priority"   # attention-sorted agent panel
-#   [ui.toast]  delivery         = "herdr"      # in-app toasts on state change
-#   [ui.sound]  enabled          = true         # background-space state sounds
+#   Attention view (captain-consented; Track U phase U3, see
+#   docs/verification/runtime-backends.md "Agent-state publishing (U3)" and the
+#   captain's scoped consent in data/decisions/herdr-integration-decisions-2026-08-24.md).
+#   These make Herdr's own agent panel a fleet-wide attention view for
+#   firstmate's report-agent state publishing:
+#     [ui]        agent_panel_sort = "priority"   # attention-sorted agent panel
+#     [ui.toast]  delivery         = "herdr"      # in-app toasts on state change
+#     [ui.sound]  enabled          = true         # background-space state sounds
+#
+#   Restart safety (fix for the fleet-wide silent stall after a host restart; see
+#   docs/herdr-backend.md "Restart and liveness behavior"). Disabling Herdr's
+#   resume-on-restart makes a restored Claude pane come back as a plain shell -
+#   the existing dead-mate relaunch path - instead of a live process Herdr resumed
+#   WITHOUT firstmate's launch flags, which would freeze in manual permission mode.
+#   This is beneficial for every managed pane and the captain's own, and is fully
+#   reversible (remove the key or set it true):
+#     [session]   resume_agents_on_restore = false  # no flag-less agent resume
+#
 # It is idempotent (a no-op once applied), takes a dated backup before its first
 # write, validates the result with `herdr config check`, restores the backup on
 # any validation failure, and only then reloads the running server. It never
@@ -24,12 +36,12 @@
 #   fm-herdr-attention-config.sh check
 #   fm-herdr-attention-config.sh --help
 #
-#   apply        (default) back up if needed, apply the three settings, validate,
-#                reload the running server. --no-reload skips the reload (edit and
-#                validate only - used by tests and by hosts with no running
-#                server). A no-op run reports "already applied" and reloads
-#                nothing.
-#   check        report whether the three settings are already applied; make no
+#   apply        (default) back up if needed, apply the four managed keys,
+#                validate, reload the running server. --no-reload skips the reload
+#                (edit and validate only - used by tests and by hosts with no
+#                running server). A no-op run reports "already applied" and
+#                reloads nothing.
+#   check        report whether the four managed keys are already applied; make no
 #                change. Exit 0 = all applied, 10 = one or more differ.
 #
 # Env:
@@ -45,7 +57,7 @@ for arg in "$@"; do
     check) CMD=check ;;
     --no-reload) NO_RELOAD=1 ;;
     -h | --help)
-      sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -71,7 +83,7 @@ fi
 # The pure text transform lives in fm-herdr-attention-config-edit.py: it reads
 # the current config on stdin and writes the desired config on stdout, exiting 0
 # when a change was made, 3 when already applied, 1 on a parse error. It only
-# ever sets the three authorized keys and preserves every other line verbatim.
+# ever sets the four managed keys and preserves every other line verbatim.
 fm_herdr_attention_transform() {
   python3 "$EDIT_PY"
 }
@@ -91,10 +103,10 @@ rc=$?
 case "$rc" in
   3)
     if [ "$CMD" = check ]; then
-      echo "herdr attention settings: already applied ($CONFIG_PATH)"
+      echo "firstmate-managed Herdr settings: already applied ($CONFIG_PATH)"
       exit 0
     fi
-    echo "herdr attention settings already applied; nothing to do ($CONFIG_PATH)"
+    echo "firstmate-managed Herdr settings already applied; nothing to do ($CONFIG_PATH)"
     exit 0
     ;;
   0) ;;
@@ -105,7 +117,7 @@ case "$rc" in
 esac
 
 if [ "$CMD" = check ]; then
-  echo "herdr attention settings: NOT applied - run 'apply' ($CONFIG_PATH)"
+  echo "firstmate-managed Herdr settings: NOT applied - run 'apply' ($CONFIG_PATH)"
   exit 10
 fi
 
@@ -128,11 +140,11 @@ if command -v herdr >/dev/null 2>&1; then
   fi
 else
   echo "warning: herdr not on PATH; skipped 'herdr config check' and reload" >&2
-  echo "applied herdr attention settings to $CONFIG_PATH (backup: $backup)"
+  echo "applied firstmate-managed Herdr settings to $CONFIG_PATH (backup: $backup)"
   exit 0
 fi
 
-echo "applied herdr attention settings to $CONFIG_PATH"
+echo "applied firstmate-managed Herdr settings to $CONFIG_PATH"
 echo "backup: $backup"
 
 if [ "$NO_RELOAD" -eq 1 ]; then

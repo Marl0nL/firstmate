@@ -57,10 +57,23 @@ test_apply_seeds_all_three_settings_and_validates() {
   assert_grep 'agent_panel_sort = "priority"' "$CFG" "agent_panel_sort not set"
   assert_grep 'delivery = "herdr"' "$CFG" "toast delivery not set"
   assert_grep 'enabled = true' "$CFG" "sound not enabled"
+  assert_grep 'resume_agents_on_restore = false' "$CFG" "restart-safety key not set"
   assert_grep 'onboarding = false' "$CFG" "the pre-existing onboarding key must be preserved"
   assert_grep 'config check' "$LOG" "apply must validate with herdr config check"
   assert_grep 'server reload-config' "$LOG" "apply must reload the running server"
-  pass "apply seeds the three settings, preserves other keys, validates, and reloads"
+  pass "apply seeds the four managed keys, preserves other keys, validates, and reloads"
+}
+
+test_seeds_restart_safety_key_independently() {
+  # A config that already has the three attention keys still needs the fourth,
+  # restart-safety key added, and a wrong value is corrected in place.
+  setup_case restart $'[ui]\nagent_panel_sort = "priority"\n\n[ui.toast]\ndelivery = "herdr"\n\n[ui.sound]\nenabled = true\n\n[session]\nresume_agents_on_restore = true\n'
+  PATH="$FB:$PATH" HERDR_CONFIG_PATH="$CFG" FM_FAKE_HERDR_LOG="$LOG" "$HELPER" apply --no-reload >/dev/null 2>&1 \
+    || fail "apply must succeed when only the restart-safety key differs"
+  assert_grep 'resume_agents_on_restore = false' "$CFG" "the restart-safety key must be forced to false"
+  assert_no_grep 'resume_agents_on_restore = true' "$CFG" "the old true value must be gone"
+  [ "$(grep -c '^\[session\]' "$CFG")" = 1 ] || fail "there must be exactly one [session] header"
+  pass "the restart-safety key is managed independently and corrected to false"
 }
 
 test_apply_is_idempotent_no_second_backup() {
@@ -128,6 +141,7 @@ test_no_reload_skips_the_server_reload() {
 }
 
 test_apply_seeds_all_three_settings_and_validates
+test_seeds_restart_safety_key_independently
 test_apply_is_idempotent_no_second_backup
 test_check_reports_state_without_writing
 test_replaces_a_wrong_value_in_place_without_duplicate_tables

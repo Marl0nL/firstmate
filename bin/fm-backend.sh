@@ -927,6 +927,29 @@ fm_backend_agent_alive() {  # <backend> <target>
   esac
 }
 
+# fm_backend_agent_launch_health: a SECOND-STAGE probe that refines an `alive`
+# verdict for a Claude endpoint into whether the live process carries firstmate's
+# launch signature. It exists for the restored-manual-mode stall: after a host
+# restart Herdr can resume a Claude pane as a LIVE process (so fm_backend_agent_state
+# reads `alive`) yet re-run it WITHOUT --dangerously-skip-permissions, freezing it
+# in manual permission mode. Prints exactly one of:
+#   healthy   - the live Claude carries the launch flags; a genuine live mate.
+#   degraded  - the live Claude provably lacks the permission flag; the stall shape.
+#   unknown   - not a readable live Claude, or a backend that cannot produce this
+#               shape. Callers preserve the pane on `unknown`.
+# Only Herdr can resume an agent PROCESS across a restart, so only Herdr can
+# produce the shape; every other backend is `unknown` (not applicable). This is a
+# refinement of `alive`, never a replacement for fm_backend_agent_state: callers
+# read state first and consult this only for an `alive` Claude endpoint.
+fm_backend_agent_launch_health() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    herdr) fm_backend_herdr_agent_launch_health "$target" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_agent_probe_verifiable: 0 when fm_backend_agent_alive can, for this
 # <backend>+<harness> pair, be expected to reach a CONFIDENT alive-or-dead
 # verdict rather than a permanent `unknown`. It is the gate for fm-spawn.sh's

@@ -32,8 +32,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-decision-hold.sh`    | One-release compatibility shim mapping the retired decision commands onto fm-captain-hold.sh |
 | `fm-brief.sh`            | Scaffold ship (explicit `--mode`), scout, secondmate-charter, and Herdr-lab briefs   |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
-| `fm-herdr-attention-config.sh` | Idempotently apply the captain-consented Herdr attention settings (agent panel, toasts, sounds) to the global config, backing up and validating first |
-| `fm-herdr-attention-config-edit.py` | Pure TOML transform behind `fm-herdr-attention-config.sh`: set the three attention keys, preserve everything else |
+| `fm-herdr-attention-config.sh` | Idempotently apply firstmate's four managed Herdr global-config keys (attention panel/toasts/sounds plus `resume_agents_on_restore = false`) to the global config, backing up and validating first |
+| `fm-herdr-attention-config-edit.py` | Pure TOML transform behind `fm-herdr-attention-config.sh`: set the four managed keys, preserve everything else |
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |
 | `fm-install-treehouse.sh`| Install CI's exact-version Treehouse pin for real-Herdr E2E that needs spawn worktrees |
 | `fm-herdr-ci-cleanup.sh` | Snapshot and tear down only job-owned `fm-lab-*` sessions in the Herdr CI lane       |
@@ -43,6 +43,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, and unhealthy supervision    |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
 | `fm-session-lock-lib.sh` | Shared verified-harness process identity: session-lock ancestry walk and holder liveness, plus the fleet-wide `fm_harness_process_matches` vocabulary |
+| `fm-launch-health-lib.sh` | Shared classifier for whether a live Claude carries firstmate's launch signature (`--dangerously-skip-permissions` plus env markers) or was resumed as a manual-permission-mode husk |
 | `fm-claude-stop-autoarm.sh` | Claude Stop `asyncRewake` hook owning tokenless watcher continuity with single-flight exit-2 rewake (docs/watcher-continuity.md) |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
 | `fm-turnend-guard-grok.sh` | Grok Stop-hook adapter for the primary turn-end guard                              |

@@ -591,6 +591,53 @@ report_relaunch() {  # <id> <cause> <where>
   echo "BOOTSTRAP_INFO: secondmate $1 relaunched after $2 ($3)"
 }
 
+# secondmate_has_inflight_children <home>: 0 when the secondmate's home cannot be
+# CONFIRMED idle - it holds at least one crew task record, or its state cannot be
+# read at all; 1 only when the home's state dir is readable and holds no crew
+# meta. A secondmate home never contains a kind=secondmate meta (secondmates do
+# not spawn secondmates), so any state/<child>.meta there is a crew/ship/scout
+# child - work in flight. The conservative default (return 0 on any unreadable or
+# unresolvable home) is deliberate: an automatic manual-mode cycle proceeds only
+# on a positively-confirmed idle home.
+secondmate_has_inflight_children() {  # <home>
+  local home=$1 child
+  [ -n "$home" ] || return 0
+  [ -d "$home/state" ] || return 0
+  for child in "$home"/state/*.meta; do
+    [ -e "$child" ] && return 0
+  done
+  return 1
+}
+
+# secondmate_cycle_manual_mode_husk <meta> <id> <backend> <target>: remediate a
+# Claude secondmate that Herdr resumed WITHOUT its launch flags - a live process
+# frozen in manual permission mode that the dead/missing relaunch never fires
+# for. It cleanly exits the frozen pane through the guarded control plane (which
+# interrupts, submits the exit, and confirms the agent gone) and respawns it with
+# the correct flags: the same exit -> --secondmate recovery sequence, one mate at
+# a time. A home with work in flight is refused and reported for manual recovery
+# rather than disrupted. Appends to SECONDMATE_RESPAWNED_IDS on a successful
+# respawn exactly as the other relaunch paths do.
+secondmate_cycle_manual_mode_husk() {  # <meta> <id> <backend> <target>
+  local meta=$1 id=$2 backend=$3 target=$4 home out
+  home=$(fm_meta_get "$meta" home)
+  [ -n "$home" ] || home=$(fm_meta_get "$meta" worktree)
+  if secondmate_has_inflight_children "$home"; then
+    echo "SECONDMATE_LIVENESS: secondmate $id: skipped: restored in manual-permission mode but has work in flight; needs manual recovery (backend=$backend)"
+    return 0
+  fi
+  if ! "$SCRIPT_DIR/fm-control.sh" "$id" exit >/dev/null 2>&1; then
+    echo "SECONDMATE_LIVENESS: secondmate $id: skipped: could not exit the manual-permission-mode husk for recycling; needs manual recovery (backend=$backend)"
+    return 0
+  fi
+  if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+    SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
+    report_relaunch "$id" "restored in manual-permission mode without launch flags" "backend=$backend"
+  else
+    echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after manual-mode cycle: $(first_line "$out")"
+  fi
+}
+
 secondmate_liveness_sweep() {
   # Idempotent secondmate liveness guarantee - SESSION START ONLY. The detailed
   # state machine and its only recovery-authorizing states are owned by
@@ -599,6 +646,11 @@ secondmate_liveness_sweep() {
   # existing ambiguous processes and every transiently unreadable target while
   # adding the missing-session path the original bare-shell and Herdr-husk sweep
   # lacked.
+  # A live Claude endpoint gets one extra refinement: fm_backend_agent_launch_health
+  # separates a genuinely live mate from one Herdr RESUMED after a host restart
+  # without --dangerously-skip-permissions (frozen in manual permission mode), and
+  # the degraded case is cycled through the guarded exit -> --secondmate path
+  # unless the home has work in flight. See secondmate_cycle_manual_mode_husk.
   # A meta with no window remains owned by secondmate-provisioning recovery.
   # Secondmate homes never contain kind=secondmate meta, so this is naturally a
   # primary-only no-op there. Mid-session liveness remains explicitly out of
@@ -723,7 +775,18 @@ secondmate_liveness_one() {  # <meta> <id>
   esac
   case "$agent_state" in
     alive)
-      if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+      # A live Claude secondmate might be a husk Herdr RESUMED after a host
+      # restart without firstmate's launch flags - a live process frozen in
+      # manual permission mode, the fleet-wide silent stall. Only Claude has this
+      # shape (only its --dangerously-skip-permissions flag gates the freeze) and
+      # only Herdr resumes a process across a restart, so this refinement is
+      # scoped to a claude/herdr endpoint; every other alive mate is genuinely
+      # live. An `unknown` health read (no readable Claude foreground) leaves the
+      # mate untouched, so a healthy mate is never cycled.
+      if [ "$harness" = claude ] && [ "$backend" = herdr ] \
+        && [ "$(fm_backend_agent_launch_health "$backend" "$target" 2>/dev/null)" = degraded ]; then
+        secondmate_cycle_manual_mode_husk "$meta" "$id" "$backend" "$target"
+      elif [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
         echo "BOOTSTRAP_INFO: secondmate $id already live (backend=$backend)"
       fi
       ;;

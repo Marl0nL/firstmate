@@ -2,12 +2,19 @@
 """Pure text transform for bin/fm-herdr-attention-config.sh.
 
 Reads the current Herdr config.toml on stdin and writes the desired config on
-stdout. It sets EXACTLY the three captain-consented attention keys and preserves
-every other line (comments and keys) verbatim:
+stdout. It sets EXACTLY the four firstmate-managed keys and preserves every other
+line (comments and keys) verbatim. Three are the captain-consented attention
+keys; the fourth is the restart-safety key:
 
-    [ui]        agent_panel_sort = "priority"
-    [ui.toast]  delivery         = "herdr"
-    [ui.sound]  enabled          = true
+    [ui]        agent_panel_sort          = "priority"
+    [ui.toast]  delivery                  = "herdr"
+    [ui.sound]  enabled                   = true
+    [session]   resume_agents_on_restore  = false
+
+The restart-safety key disables Herdr's resume-on-restart so a restored Claude
+pane comes back as a plain shell (the existing dead-mate relaunch path) rather
+than a live process resumed WITHOUT firstmate's launch flags - see the .sh header
+and docs/herdr-backend.md "Restart and liveness behavior".
 
 Exit status: 0 = a change was written to stdout; 3 = already applied, nothing
 written; 1 = the current config is not valid TOML (nothing written). The .sh
@@ -27,6 +34,13 @@ DESIRED = [
     ("ui.agent_panel_sort", "priority", "ui", "agent_panel_sort", '"priority"'),
     ("ui.toast.delivery", "herdr", "ui.toast", "delivery", '"herdr"'),
     ("ui.sound.enabled", True, "ui.sound", "enabled", "true"),
+    (
+        "session.resume_agents_on_restore",
+        False,
+        "session",
+        "resume_agents_on_restore",
+        "false",
+    ),
 ]
 
 
