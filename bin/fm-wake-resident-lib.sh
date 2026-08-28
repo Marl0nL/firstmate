@@ -481,13 +481,17 @@ fm_wr_dormant_wake_resident() {  # <config> <state> <name>
 # a dormant wake-resident home (above), OR - defense in depth for the same
 # typed-into-a-shell hazard beyond the wake-resident case - any local secondmate
 # whose recorded endpoint has no live agent (fm_backend_agent_alive = dead:
-# confidently dead or missing). `unknown` is deliberately NOT suppressed: it
-# licenses nothing in either direction, and the doorbell into an unclassifiable
-# idle screen is the existing accepted best-effort. This is bootstrap's own guard
-# before its typed submission; fm-update.sh does not type here (its caller does)
-# and applies only the dormant-wake-resident skip above.
+# confidently dead or missing). A `dead` verdict is only CONFIRMED for a harness
+# with an empirically verified classifier - the same convention fm_wr_residency
+# applies above - because the tmux classifier reads any shell-only pane as dead,
+# and a live raw-launch-command secondmate (e.g. harness=bash) IS a shell; any
+# other harness falls through to nudged. `unknown` is deliberately NOT
+# suppressed: it licenses nothing in either direction, and the doorbell into an
+# unclassifiable idle screen is the existing accepted best-effort. This is
+# bootstrap's own guard before its typed submission; fm-update.sh does not type
+# here (its caller does) and applies only the dormant-wake-resident skip above.
 fm_wr_nudge_suppressed() {  # <config> <state> <name>
-  local config=$1 state=$2 name=$3 meta="$2/$3.meta" backend target
+  local config=$1 state=$2 name=$3 meta="$2/$3.meta" backend target harness
   fm_wr_dormant_wake_resident "$config" "$state" "$name" && return 0
   if [ -f "$meta" ] && grep -q '^remote_host=.' "$meta" 2>/dev/null; then
     return 1
@@ -497,6 +501,11 @@ fm_wr_nudge_suppressed() {  # <config> <state> <name>
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || target=$(fm_meta_get "$meta" window)
   [ -n "$target" ] || return 1
+  harness=$(fm_meta_get "$meta" harness)
+  case "$harness" in
+    claude|codex|opencode|pi|grok) ;;
+    *) return 1 ;;
+  esac
   if [ "$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null)" = dead ]; then
     printf 'no live agent at its endpoint - bare shell, not nudged\n'
     return 0

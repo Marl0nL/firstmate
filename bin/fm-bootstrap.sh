@@ -394,6 +394,16 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry target has no live secondmate metadata"
         continue
       }
+      # Same dormant/bare-shell suppression the fresh send applies: leave the
+      # marker so the nudge retries once the home is live again, but never type
+      # into a dormant wake-resident home or a bare shell this session. This
+      # runs BEFORE the commit-recency check because a dormant home's HEAD
+      # advances while it sleeps (fm-update.sh fast-forwards dormant homes), and
+      # that staleness must stay a quiet skip, not an escalation.
+      if skip=$(fm_wr_nudge_suppressed "$CONFIG" "$STATE" "$id"); then
+        echo "BOOTSTRAP_INFO: skipped $selector: $skip"
+        continue
+      fi
       meta_home=$(fm_meta_get "$meta" home)
       [ -n "$meta_home" ] || meta_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
       if ! validate_secondmate_home "$id" "$meta_home"; then
@@ -410,13 +420,6 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
         continue
       }
-      # Same dormant/bare-shell suppression the fresh send applies: leave the
-      # marker so the nudge retries once the home is live again, but never type
-      # into a dormant wake-resident home or a bare shell this session.
-      if skip=$(fm_wr_nudge_suppressed "$CONFIG" "$STATE" "$id"); then
-        echo "BOOTSTRAP_INFO: skipped $selector: $skip"
-        continue
-      fi
       if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
         rm -f "$marker"
         echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"

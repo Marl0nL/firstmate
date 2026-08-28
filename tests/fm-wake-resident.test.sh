@@ -890,6 +890,23 @@ test_nudge_never_suppresses_a_remote_secondmate() {
   pass "a remote secondmate endpoint is never treated as a local nudge skip"
 }
 
+# A `dead` liveness verdict is only a CONFIRMED bare shell for a harness with an
+# empirically verified classifier: the tmux classifier reads any shell-only pane
+# as dead, and a live secondmate launched via the raw-launch-command escape hatch
+# (harness=bash) IS a shell. Bootstrap's guard must fall through to nudged on
+# that verdict, exactly as fm_wr_residency downgrades the same read - the
+# verified-harness control is test_nudge_guard_blocks_a_bare_shell_but_dormant_skip_does_not.
+test_nudge_keeps_a_dead_verdict_on_an_unverified_harness() {
+  local home
+  home=$(new_world "$TMP/nudge-rawlaunch" advisor)
+  sed -i.bak 's/^harness=claude$/harness=bash/' "$home/state/advisor.meta"
+  rm -f "$home/state/advisor.meta.bak"
+  pose_pane bash
+  assert_contains "$(wr_predicate "$home" fm_wr_nudge_suppressed advisor)" "KEEP" \
+    "a dead verdict from a harness with no verified classifier must not suppress the nudge"
+  pass "a live raw-launch secondmate misread as dead is still nudged"
+}
+
 test_inert_without_config
 test_enable_wires_and_registers_both_shims
 test_message_to_dormant_emits_one_raise_line
@@ -919,4 +936,5 @@ test_nudge_skips_a_dormant_wake_resident
 test_nudge_keeps_a_resident_wake_resident
 test_nudge_guard_blocks_a_bare_shell_but_dormant_skip_does_not
 test_nudge_never_suppresses_a_remote_secondmate
+test_nudge_keeps_a_dead_verdict_on_an_unverified_harness
 test_exit_commands_match_harness_adapters
