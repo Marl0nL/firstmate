@@ -1,0 +1,15 @@
+ok - the poll is inert and silent until a home opts in
+ok - enable wires and registers both check shims through the trust path
+ok - a message to a dormant secondmate produces exactly one throttled raise line
+ok - a resident secondmate's mail is its own to drain, with a main-home backstop past grace
+ok - the in-home shim surfaces a pending message so a resident agent sees it on its own turn
+ok - the first message raises a seeded home that has never been launched
+ok - raise is bin/fm-spawn.sh <name> --secondmate and nothing else
+ok - two wakes arriving together raise exactly one advisor
+ok - an inconclusive liveness read licenses neither a raise nor a duplicate supervisor
+ok - no stand-down while the secondmate has work in flight, with or without --force
+ok - no stand-down while a message is unanswered, even with --force
+ok - no stand-down before the configured quiet period has actually elapsed
+not ok - standdown must record a self-exited agent as a completed stand-down: wake-resident: advisor is already dormant; nothing to stand down (missing: 'already exited; recorded stand-down')
+--- output ---
+wake-resident: advisor is already dormant; nothing to stand down

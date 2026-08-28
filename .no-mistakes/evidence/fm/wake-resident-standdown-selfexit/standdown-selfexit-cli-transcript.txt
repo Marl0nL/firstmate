@@ -1,0 +1,58 @@
+############ BEFORE the fix (base 73c6700) ############
+
+== [base] standdown of an already-self-exited advisor (pane = bare shell, harness=claude)
+  $ fm-wake-resident.sh standdown advisor
+  wake-resident: advisor is already dormant; nothing to stand down
+  (exit 0)
+  state/advisor.wake-resident: (no record written)
+  pane submissions: none
+
+== [base] settle race: agent exits between the liveness read and the keystroke,
+   so the composer refuses to type into what is now a bare shell
+  $ fm-wake-resident.sh standdown advisor
+  fm-wake-resident: could not submit '/exit' to advisor at firstmate:fm-advisor; it is still up
+  (exit 1)
+  state/advisor.wake-resident:
+    raised_at=1787919858
+
+############ AFTER the fix (15af724) ############
+
+== [fix] standdown of an already-self-exited advisor (pane = bare shell, harness=claude)
+  $ fm-wake-resident.sh standdown advisor
+  wake-resident: advisor agent had already exited; recorded stand-down (no exit command sent)
+  (exit 0)
+  state/advisor.wake-resident:
+    dormant_since=1787927058
+  pane submissions: none
+
+== [fix] standdown of an already-self-exited advisor (pane = bare shell, harness=grok)
+  $ fm-wake-resident.sh standdown advisor
+  wake-resident: advisor agent had already exited; recorded stand-down (no exit command sent)
+  (exit 0)
+  state/advisor.wake-resident:
+    dormant_since=1787927058
+  pane submissions: none
+
+== [fix] settle race: agent exits between the liveness read and the keystroke,
+   so the composer refuses to type into what is now a bare shell
+  $ fm-wake-resident.sh standdown advisor
+  wake-resident: advisor agent had already exited; recorded stand-down (no exit command sent)
+  (exit 0)
+  state/advisor.wake-resident:
+    raised_at=1787919858
+    dormant_since=1787927059
+
+== [fix] guard: a genuine send failure while the agent is still resident
+  $ fm-wake-resident.sh standdown advisor
+  fm-wake-resident: could not submit '/exit' to advisor at firstmate:fm-advisor; it is still up
+  (exit 1)
+  state/advisor.wake-resident:
+    raised_at=1787919859
+
+== [fix] never-waive: self-exited shape but with an unanswered message
+  $ fm-wake-resident.sh standdown advisor
+  fm-wake-resident: advisor has 1 unanswered message(s) in /tmp/fm-wake-resident.4H9g7x/after-mail/homes/advisor/state/chat-inbox; leaving it up so nothing is dropped
+  (exit 1)
+  state/advisor.wake-resident: (no record written)
+  pane submissions: none
+
