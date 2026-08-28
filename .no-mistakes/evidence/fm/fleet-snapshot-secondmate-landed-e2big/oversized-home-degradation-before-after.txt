@@ -1,0 +1,23 @@
+# A single home whose history (~0.5 MiB) exceeds the per-argument limit everywhere:
+# pre-change the per-home summary child dies on E2BIG first, silently wiping the
+# home to state=unknown with 0 landed; post-fix all 900 entries flow through.
+
+fixture: registered secondmate 'big' with 516525 bytes of backlog history (900 landed rows)
+
+=== BEFORE: pre-change fm-fleet-snapshot.sh (base commit 73c6700) ===
+exit code: 0
+stdout bytes: 6159
+the 900-entry home as the pre-change fleet view saw it (history wiped to unknown):
+  {"id":"big","state":"unknown","reason":"structured home snapshot failed","landed":0}
+  {"records":0,"unreadable":1}
+
+=== AFTER: fixed fm-fleet-snapshot.sh (target ff75eac, working tree) ===
+exit code: 0  (wall: 2.1s)
+stdout bytes: 1456164
+stderr bytes: 0
+oversized secondmate as the fleet view sees it:
+  {"id":"big","state":"no_active_work","summary_valid":true,"landed_count":900,"landed_rows":900}
+secondmate_landed roll-up rows: 900
+first + last landed entries flow through intact:
+  {"id":"landed-00900","title":"Landed entry 00900","home_id":"big","merged_at":null}
+  {"id":"landed-00001","title":"Landed entry 00001","home_id":"big","merged_at":null}

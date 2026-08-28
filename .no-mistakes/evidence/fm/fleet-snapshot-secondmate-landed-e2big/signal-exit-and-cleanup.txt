@@ -1,0 +1,9 @@
+# Signal handling of the new staging tmpdir (trap fixes accepted in review round 1):
+# each signal terminates the snapshot promptly and the EXIT trap removes the
+# staging temp dirs. (Delivered mid-run at t+0.7s of a ~2s snapshot.)
+
+SIGTERM at t+0.7s: staging tmpdirs live before signal: 2; exit code: 143 (1.15s after signal); staging tmpdirs left behind: 0
+SIGHUP at t+0.7s: staging tmpdirs before: 2; exit code: 129 (1.16s after signal); staging tmpdirs left behind: 0
+Ctrl-C-equivalent (process-group SIGINT, job control) at t+0.7s:
+  staging tmpdirs before: 2; exit code: 130 (0.86s after signal)
+  stdout bytes: 0; staging tmpdirs left behind: 0

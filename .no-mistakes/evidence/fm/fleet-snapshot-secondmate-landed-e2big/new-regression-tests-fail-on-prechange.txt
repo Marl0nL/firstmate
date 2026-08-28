@@ -1,0 +1,8 @@
+# The two new regression tests from tests/fm-bearings-snapshot.test.sh, run
+# against a pristine extraction of base commit 73c6700 (pre-change code):
+# both fail there and pass on the fixed working tree (see test-run log).
+
+--- test_oversized_secondmate_projection_survives_arg_limit against base 73c6700 ---
+not ok - oversized projection did not flow through intact: {"id":"big","state":"unknown","landed":0}
+--- test_oversized_status_event_and_decisions_survive_arg_limit against base 73c6700 ---
+not ok - oversized status event or decision set was dropped or nulled: {"task_ids":[],"records":[{"id":"chatty","selected":"structured-home"}]}

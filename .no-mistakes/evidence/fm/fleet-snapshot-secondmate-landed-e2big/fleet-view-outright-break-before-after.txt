@@ -1,0 +1,93 @@
+# The reported defect, reproduced at base commit 73c6700 and fixed at ff75eac
+# Fixture: 8 registered secondmates; each per-home summary (~24 KiB) fits one argv
+# argument, the aggregated roll-up does not, so the pre-change parent accumulator
+# hits E2BIG and the whole fleet view emits nothing.
+
+fixture: 8 registered secondmates, each with ~16374 bytes of history
+(each per-home summary is ~24 KiB - fits one argv argument; the aggregated roll-up of all 8 does not)
+
+=== BEFORE: fm-fleet-snapshot.sh --json at base commit 73c6700 ===
+exit code: 1
+stdout bytes: 0
+stderr:
+  /tmp/fm-bearings.c4nKxa/demo2-baseline-bin/fm-fleet-snapshot.sh: line 1329: /usr/bin/jq: Argument list too long
+  jq: invalid JSON text passed to --argjson
+  Use jq --help for help with command-line options,
+  or see the jq manpage, or online docs  at https://jqlang.org
+  jq: invalid JSON text passed to --argjson
+  Use jq --help for help with command-line options,
+  or see the jq manpage, or online docs  at https://jqlang.org
+  jq: invalid JSON text passed to --argjson
+  Use jq --help for help with command-line options,
+  or see the jq manpage, or online docs  at https://jqlang.org
+  fm-fleet-snapshot: registered secondmate aggregation failed
+
+=== BEFORE: fm-bearings-snapshot.sh (the fleet view) at base commit ===
+exit code: 1
+stdout bytes: 0
+stderr:
+  /tmp/fm-bearings.c4nKxa/demo2-baseline-bin/fm-fleet-snapshot.sh: line 1329: /usr/bin/jq: Argument list too long
+  jq: invalid JSON text passed to --argjson
+  Use jq --help for help with command-line options,
+  or see the jq manpage, or online docs  at https://jqlang.org
+  jq: invalid JSON text passed to --argjson
+  Use jq --help for help with command-line options,
+
+=== AFTER: fm-fleet-snapshot.sh --json with the fix (ff75eac) ===
+exit code: 0
+stdout bytes: 488240
+all eight homes present with full history:
+  {"id":"mate1","state":"no_active_work","landed":50}
+  {"id":"mate2","state":"no_active_work","landed":50}
+  {"id":"mate3","state":"no_active_work","landed":50}
+  {"id":"mate4","state":"no_active_work","landed":50}
+  {"id":"mate5","state":"no_active_work","landed":50}
+  {"id":"mate6","state":"no_active_work","landed":50}
+  {"id":"mate7","state":"no_active_work","landed":50}
+  {"id":"mate8","state":"no_active_work","landed":50}
+secondmate_landed roll-up rows: 400
+
+=== AFTER: fm-bearings-snapshot.sh (the fleet view) with the fix ===
+exit code: 0
+stdout bytes: 3507
+rendered fleet view (first 40 lines):
+  schema: fm-bearings.v1
+  home: fm-bearings.c4nKxa/e2big-fleet
+  generated: "2026-07-11T18:00:00Z"
+  prs: "not_requested (run: /bearings include PRs)"
+  in_flight: []
+  secondmates[8]{id,state,doing,provenance,freshness,age_seconds,contradiction,reason}:
+    mate1,no_active_work,No active child work,structured-home,fresh,0,false,"-"
+    mate2,no_active_work,No active child work,structured-home,fresh,0,false,"-"
+    mate3,no_active_work,No active child work,structured-home,fresh,0,false,"-"
+    mate4,no_active_work,No active child work,structured-home,fresh,0,false,"-"
+    mate5,no_active_work,No active child work,structured-home,fresh,0,false,"-"
+    mate6,no_active_work,No active child work,structured-home,fresh,0,false,"-"
+    mate7,no_active_work,No active child work,structured-home,fresh,0,false,"-"
+    mate8,no_active_work,No active child work,structured-home,fresh,0,false,"-"
+  decisions_open: []
+  landed[6]{id,what,artifact,owner}:
+    m1-0050,Landed entry 0050,"https://example.invalid/acme/repo/pull/50-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",mate1
+    m2-0050,Landed entry 0050,"https://example.invalid/acme/repo/pull/50-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",mate2
+    m3-0050,Landed entry 0050,"https://example.invalid/acme/repo/pull/50-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",mate3
+    m4-0050,Landed entry 0050,"https://example.invalid/acme/repo/pull/50-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",mate4
+    m5-0050,Landed entry 0050,"https://example.invalid/acme/repo/pull/50-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",mate5
+    m6-0050,Landed entry 0050,"https://example.invalid/acme/repo/pull/50-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",mate6
+  gates: []
+  reports: []
+  recorded_prs: []
+  unhealthy_endpoints[8]{id,backend,target,exists,agent}:
+    mate1,tmux,"firstmate:fm-mate1",true,dead
+    mate2,tmux,"firstmate:fm-mate2",true,dead
+    mate3,tmux,"firstmate:fm-mate3",true,dead
+    mate4,tmux,"firstmate:fm-mate4",true,dead
+    mate5,tmux,"firstmate:fm-mate5",true,dead
+    mate6,tmux,"firstmate:fm-mate6",true,dead
+    mate7,tmux,"firstmate:fm-mate7",true,dead
+    mate8,tmux,"firstmate:fm-mate8",true,dead
+  omitted[9]{surface,reveal}:
+    backlog item bodies,"--fields bodies"
+    task paths,"--fields paths"
+    watch/steer actions,"--fields actions"
+    healthy endpoint detail,"--fields endpoints"
+    full scout-report inventory,"--all-reports"
