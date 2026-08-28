@@ -45,9 +45,12 @@
 # standdown refuses - always, with no override - while the secondmate has work in
 # flight or an unanswered message, because leaving it up costs a little quota and
 # standing it down wrongly drops someone's work. --force waives only the quiet-time
-# and busy-pane gates, never those two. It also refuses on a harness whose exit is
-# not a submittable line (grok), rather than half-sending something and reporting
-# success.
+# and busy-pane gates, never those two. When a LIVE agent needs an exit command it
+# refuses on a harness whose exit is not a submittable line (grok), rather than
+# half-sending something and reporting success. But an agent that has ALREADY
+# exited itself, leaving a bare shell, is exactly the state a stand-down wants:
+# standdown records that without any pane submission (on any harness) instead of
+# firing a doomed exit command a bare shell cannot accept.
 #
 # Exit status: 0 on success or an already-in-the-requested-state no-op, 1 on a
 # refusal or failure, 2 on a usage error.
@@ -345,18 +348,10 @@ cmd_standdown() {
   home=$(fm_wr_home "$STATE" "$name" "$DATA") \
     || die "cannot resolve a seeded secondmate home for $name; refusing to act on an unverified path"
 
-  residency=$(fm_wr_residency "$STATE" "$name")
-  case "$residency" in
-    dormant)
-      echo "wake-resident: $name is already dormant; nothing to stand down"
-      return 0
-      ;;
-    unknown)
-      die "cannot confirm whether $name is up (inconclusive liveness read); refusing to type an exit command into an unverified pane"
-      ;;
-  esac
-
-  # The two refusals that --force must never waive.
+  # The two refusals that --force must never waive. They gate a stand-down no
+  # matter what the liveness read below says: a secondmate with its own work in
+  # flight or unanswered mail must be left for that work to finish or that mail to
+  # raise it again, even when its own agent process has already exited.
   if fm_wr_has_inflight_work "$home"; then
     die "$name still has work in flight in $home/state; leaving it up. Let that work finish, or retire the secondmate deliberately with bin/fm-teardown.sh"
   fi
@@ -365,6 +360,31 @@ cmd_standdown() {
   if [ "$pending" -gt 0 ]; then
     die "$name has $pending unanswered message(s) in $inbox; leaving it up so nothing is dropped"
   fi
+
+  # The liveness decision, read after those refusals so a just-exited agent is
+  # seen as gone rather than caught mid-settle. A wake-resident agent that has
+  # already exited itself leaves a bare shell behind (the "Resume this session
+  # with: claude --resume ..." prompt docs/wake-resident.md calls dormant-healthy),
+  # and that IS the outcome a stand-down is trying to reach. So record the
+  # stand-down without any pane submission, rather than typing an exit command a
+  # bare shell cannot accept and then reporting that refusal as a failure. Nothing
+  # is sent on this path, so it also cleanly stands a self-exited agent down on a
+  # harness whose exit is not a submittable line (grok). No exit action is taken
+  # here, so there is nothing to snapshot-and-verify: fm_wr_home already confirmed
+  # the persistent home and its identity marker exist. `unknown` still licenses
+  # nothing in either direction.
+  residency=$(fm_wr_residency "$STATE" "$name")
+  case "$residency" in
+    dormant)
+      fm_wr_record_set "$STATE" "$name" dormant_since "$(fm_wr_now)" || true
+      clear_throttles "$name"
+      echo "wake-resident: $name agent had already exited; recorded stand-down (no exit command sent)"
+      return 0
+      ;;
+    unknown)
+      die "cannot confirm whether $name is up (inconclusive liveness read); refusing to type an exit command into an unverified pane"
+      ;;
+  esac
 
   meta="$STATE/$name.meta"
   backend=$(fm_backend_of_meta "$meta")
@@ -414,6 +434,18 @@ cmd_standdown() {
   # an exit command, it is a sentence typed at the agent.
   if ! FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-send.sh" "$target" "$exit_cmd" >/dev/null; then
     rm -f "$snapshot"
+    # A refused send against a pane that now reads confidently dormant means the
+    # agent self-exited inside the classifier's process-group settle window,
+    # after the liveness read above: the exit command never had a live agent to
+    # reach, and that bare shell is a completed stand-down, not a failure. No
+    # exit action happened, so there is nothing to wait on or snapshot-verify.
+    # Any other verdict keeps the failure.
+    if [ "$(fm_wr_residency "$STATE" "$name")" = dormant ]; then
+      fm_wr_record_set "$STATE" "$name" dormant_since "$(fm_wr_now)" || true
+      clear_throttles "$name"
+      echo "wake-resident: $name agent had already exited; recorded stand-down (no exit command sent)"
+      return 0
+    fi
     die "could not submit '$exit_cmd' to $name at $target; it is still up"
   fi
 
