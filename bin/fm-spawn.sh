@@ -779,9 +779,9 @@ spawn_preshield_start() {
       case "$seen" in *$'\n'"$real"$'\n'*) continue ;; esac
       seen="$seen$real"$'\n'
       if [ -n "$shield_cmd" ]; then
-        ( cd "$path" 2>/dev/null && exec $shield_cmd ) &
+        ( cd "$path" 2>/dev/null && exec $shield_cmd ) </dev/null >/dev/null 2>&1 &
       else
-        ( cd "$path" 2>/dev/null && exec sleep "$ttl" ) &
+        ( cd "$path" 2>/dev/null && exec sleep "$ttl" ) </dev/null >/dev/null 2>&1 &
       fi
       SPAWN_SHIELD_PIDS="$SPAWN_SHIELD_PIDS $!"
     done
