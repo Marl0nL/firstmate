@@ -1053,7 +1053,7 @@ test_perl_fallback_bounds_github_call() {
   fakebin=$(make_fakebin "$home")
   toolbin="$home/toolbin"
   mkdir -p "$toolbin"
-  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find; do
+  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find mktemp rm; do
     ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
   done
   started=$(date +%s)
@@ -1225,6 +1225,134 @@ test_landed_includes_secondmate_home_merges() {
   # Still zero network on this default path.
   [ ! -s "$home/net.log" ] || fail "landed roll-up must make no gh/gh-axi call, got: $(cat "$home/net.log")"
   pass "landed includes secondmate-managed merges alongside main-home merges"
+}
+
+test_oversized_secondmate_projection_survives_arg_limit() {
+  # An oversized-but-valid secondmate home summary must reach jq through a temp
+  # file (--slurpfile), never an argv --argjson. Before the fix, a single
+  # projection larger than the kernel per-argument size limit (~128 KiB; jq
+  # crashes on a single argument well under 256 KiB) failed with "Argument list
+  # too long", degrading the secondmate to unknown and blanking the fleet view.
+  # This fixture drives the aggregated projection to roughly half a megabyte -
+  # comfortably past that limit - and asserts the whole roll-up flows through.
+  local home mate fakebin canonical i pad
+  home=$(make_home oversized-projection)
+  mate="$TMP_ROOT/oversized-projection-home"
+  make_valid_secondmate_home big "$mate"
+  append_secondmate_registry "$home" big "$mate"
+  fm_write_secondmate_meta "$home/state/big.meta" "$mate" "firstmate:fm-big" sample
+  pad=$(printf 'x%.0s' $(seq 1 440))
+  {
+    printf '## In flight\n\n## Queued\n\n## Done\n'
+    i=1
+    while [ "$i" -le 900 ]; do
+      printf -- '- [x] landed-%05d - Landed entry %05d <https://example.invalid/acme/repo/pull/%d-%s> (repo: sample) (kind: ship) (merged 2026-07-01)\n' \
+        "$i" "$i" "$i" "$pad"
+      i=$((i + 1))
+    done
+  } > "$mate/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_SECONDMATE_MAX_BYTES=16777216 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=10000 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "oversized secondmate projection crashed the snapshot"
+  printf '%s' "$canonical" | jq -e '
+    (.secondmate_current.records[] | select(.id == "big")
+      | .current.state == "no_active_work" and .counts.landed == 900 and (.landed | length) == 900)
+    and ((.secondmate_landed.records | length) == 900)
+    and (.secondmate_landed.records | all(.home_id == "big"))
+  ' >/dev/null \
+    || fail "oversized projection did not flow through intact: $(printf '%s' "$canonical" | jq -c '.secondmate_current.records[]|{id,state:.current.state,landed:.counts.landed}')"
+  pass "an oversized secondmate projection flows through aggregation without hitting the argv size limit"
+}
+
+test_oversized_status_event_and_decisions_survive_arg_limit() {
+  # A persistent secondmate's parent status log is uncapped: a single event line
+  # can exceed the kernel per-argument size limit (~128 KiB) and the durable
+  # keyed decision fold can accumulate a large never-resolved open set. Both
+  # must reach jq through temp files, never argv. Before the fix, the oversized
+  # event silently dropped the task row from tasks[] and degraded the secondmate
+  # record to null instead of failing loudly - a wrong snapshot without error.
+  local home mate fakebin canonical pad i
+  home=$(make_home oversized-status-event)
+  mate="$TMP_ROOT/oversized-status-event-home"
+  make_valid_secondmate_home chatty "$mate"
+  append_secondmate_registry "$home" chatty "$mate"
+  fm_write_secondmate_meta "$home/state/chatty.meta" "$mate" "firstmate:fm-chatty" sample
+  pad=$(printf 'x%.0s' $(seq 1 200000))
+  {
+    i=1
+    while [ "$i" -le 40 ]; do
+      printf 'needs-decision [key=ask-%03d]: unresolved captain question %03d\n' "$i" "$i"
+      i=$((i + 1))
+    done
+    printf 'working [key=chatty]: %s\n' "$pad"
+  } > "$home/state/chatty.status"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "oversized status event crashed the snapshot"
+  printf '%s' "$canonical" | jq -e '
+    ([.tasks[] | select(.id == "chatty")] | length) == 1
+    and ([.tasks[] | select(.id == "chatty")][0]
+         | (.paths.status_log.last_event.raw | length) > 131072
+         and (.hints.open_decisions | length) == 40
+         and .hints.pending_decision == true)
+    and ([.secondmate_current.records[] | select(.id == "chatty")] | length) == 1
+    and ([.secondmate_current.records[] | select(.id == "chatty")][0]
+         | .provenance.selected == "structured-home"
+         and .registered == true
+         and (.parent_event.raw | length) > 131072
+         and (.parent_event.open_decisions | length) == 40
+         and (.parent_event.reconciliation.decisions | length) == 40)
+  ' >/dev/null \
+    || fail "oversized status event or decision set was dropped or nulled: $(printf '%s' "$canonical" | jq -c '{task_ids:[.tasks[].id],records:[.secondmate_current.records[] | if type == "object" then {id,selected:.provenance.selected} else . end]}')"
+  pass "an oversized status event line and large open-decision set survive aggregation without argv"
+}
+
+test_normalsize_snapshot_matches_prechange_baseline() {
+  # Byte-for-byte parity between the fixed snapshot and the pre-change
+  # implementation on a normal-size fixture proves the E2BIG refactor (jq
+  # --slurpfile from temp files replacing argv --argjson) left output identical.
+  # The baseline is the committed fm-fleet-snapshot.sh on the default branch;
+  # the test self-skips when no such ref resolves, the baseline cannot run, or
+  # it already matches the working tree (e.g. once this change has landed).
+  # Only fm-fleet-snapshot.sh changed, so both runs share the sibling scripts
+  # and the same FM_ROOT_OVERRIDE, isolating the comparison to this script.
+  local baseref cand bindir f home mate base_bin base_out cur_out
+  baseref=""
+  for cand in ${FM_SNAPSHOT_BASELINE_REF:-} origin/main main; do
+    [ -n "$cand" ] || continue
+    if git -C "$ROOT" rev-parse --verify --quiet "$cand^{commit}" >/dev/null 2>&1; then
+      baseref=$cand; break
+    fi
+  done
+  [ -n "$baseref" ] || { pass "skip: no default-branch ref to diff the pre-change snapshot against"; return; }
+  bindir="$TMP_ROOT/baseline-bin"
+  rm -rf "$bindir"; mkdir -p "$bindir"
+  base_bin="$bindir/fm-fleet-snapshot.sh"
+  git -C "$ROOT" show "$baseref:bin/fm-fleet-snapshot.sh" > "$base_bin" 2>/dev/null \
+    || { pass "skip: no pre-change fm-fleet-snapshot.sh at $baseref"; return; }
+  if cmp -s "$base_bin" "$ROOT/bin/fm-fleet-snapshot.sh"; then
+    pass "skip: working tree fm-fleet-snapshot.sh already matches $baseref"; return
+  fi
+  for f in "$ROOT"/bin/*; do
+    [ "$(basename "$f")" = fm-fleet-snapshot.sh ] && continue
+    ln -sf "$f" "$bindir/$(basename "$f")"
+  done
+  chmod +x "$base_bin"
+  home=$(make_home baseline-parity)
+  mate=$(make_landed_secondmate "$home" pv)
+  append_landed_row "$mate" pv-1 "First landed thing" 2026-07-01
+  append_landed_row "$mate" pv-2 "Second landed thing" 2026-07-02
+  write_parent_secondmate_event "$home" pv "$mate" "wrapping up"
+  base_out=$(FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z "$base_bin" --json 2>/dev/null) \
+    || { pass "skip: pre-change baseline at $baseref could not run against current helper scripts"; return; }
+  cur_out=$(FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "current snapshot failed on the normal-size parity fixture"
+  [ "$base_out" = "$cur_out" ] \
+    || fail "the E2BIG refactor changed normal-size snapshot output vs $baseref"
+  pass "normal-size fleet snapshot output is byte-identical to the pre-change implementation"
 }
 
 test_landed_default_balances_dominant_and_sparse_homes() {
@@ -1956,6 +2084,9 @@ test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
+test_oversized_secondmate_projection_survives_arg_limit
+test_oversized_status_event_and_decisions_survive_arg_limit
+test_normalsize_snapshot_matches_prechange_baseline
 test_landed_default_balances_dominant_and_sparse_homes
 test_landed_default_refills_capacity_after_sparse_homes_exhaust
 test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap
