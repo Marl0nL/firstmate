@@ -446,7 +446,7 @@ fm_backend_herdr_pane_agent_state  -> no-agent                                  
 ```
 
 The blocked toast is delivered only when the global config enables it: with `[ui.toast]` at its default `delivery = "off"`, `notification show` returns `{"reason":"disabled","shown":false}` (the call still succeeds).
-The captain-consented attention config - `agent_panel_sort = "priority"`, `[ui.toast] delivery = "herdr"`, `[ui.sound] enabled = true` - is the ONE authorized global-config edit and is applied by `bin/fm-herdr-attention-config.sh` (dated backup, `herdr config check` validation with restore-on-failure, then `herdr server reload-config`); `herdr --default-config` confirms the three keys and their accepted values (`agent_panel_sort` one of `spaces`/`workspaces`/`priority`).
+The captain-consented attention config - `agent_panel_sort = "priority"`, `[ui.toast] delivery = "herdr"`, `[ui.sound] enabled = true` - is applied by `bin/fm-herdr-attention-config.sh`, the single owner of firstmate's global Herdr config edits (its fourth managed key is recorded under "Restored-manual-mode detection" below), with a dated backup, `herdr config check` validation with restore-on-failure, then `herdr server reload-config`; `herdr --default-config` confirms the three keys and their accepted values (`agent_panel_sort` one of `spaces`/`workspaces`/`priority`).
 The attention-sorted panel floating a blocked crew to the top is a server-global GUI behavior not scriptable from an isolated lab session, so it stays a captain visual confirmation after that helper runs; this harness proves the data the panel sorts on.
 Refresh this section with:
 
@@ -565,6 +565,39 @@ $ herdr pane process-info --pane w1:p2R
 
 So `bin/fm-autostart.sh` consults `pane process-info` (`fm_backend_herdr_pane_process_state`, `fm_backend_herdr_pane_process_cwds`) and never `agent_status` for its duplicate-guard.
 The behavioral contract runs offline against a fake `herdr` in `tests/fm-autostart.test.sh`; the systemd unit and the real boot path cannot run in CI or a worktree, so re-verifying this probe live on the current Herdr floor is a Phase 6 cutover live-smoke item.
+
+### Restored-manual-mode detection (2026-08-28, herdr 0.8.2 / protocol 20)
+
+Measured read-only on the captain's host on 2026-08-28 against the installed Herdr 0.8.2.
+The defect: `[session] resume_agents_on_restore` resumes a Claude pane after a server restart on Herdr's own launch line, dropping firstmate's launch prefixes; a Claude resumed without `--dangerously-skip-permissions` freezes in manual permission mode.
+
+The `resume_agents_on_restore` key exists and is schema-valid on 0.8.2, and its documented default is `true`:
+
+```
+$ herdr --default-config | grep -A2 '\[session\]'
+[session]
+# Resume supported AI-agent panes into their native conversation sessions after
+# ... # resume_agents_on_restore = true
+$ herdr config check                      # against a config carrying resume_agents_on_restore = false
+config: ok
+$ herdr config check                      # against a bogus session key (control)
+config: issues found
+unknown config key session.<bogus>; ignoring key
+```
+
+The healthy launch shape a real firstmate-managed Claude carries (read from a live secondmate supervisor's `/proc`):
+
+```
+$ tr '\0' ' ' < /proc/<pid>/cmdline
+/home/marlon/.local/share/claude/versions/<v> --dangerously-skip-permissions --model <m> --effort <e> ...
+$ grep -E '^(HERDR_ENV|CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION)=' /proc/<pid>/environ  # NUL-split
+HERDR_ENV=0
+CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
+```
+
+`herdr pane process-info` exposes each foreground process's `argv` (and `pid`), so `fm_backend_agent_launch_health` classifies a live Claude carrying the flag `healthy` and one resumed without it `degraded`; the argv flag is the verdict's sole signal - the `HERDR_ENV=0` / `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` env prefixes above are launch details the verdict deliberately does not consult, because environment preservation across a Herdr resume is not a verified contract.
+The live guard that provisions a guarded named lab, runs a flag-carrying and a flag-less fake Claude in real panes, and asserts the verdicts (and that interrupting the degraded pane clears the husk) is `tests/fm-secondmate-manual-mode-e2e.test.sh`; the pure classifier decision is pinned portably in `tests/fm-launch-health-lib.test.sh`, and the sweep's degraded-detection, idle-husk cycle, and in-flight-work refusal in `tests/fm-secondmate-liveness.test.sh`.
+The four-key transform is exercised against a fake `herdr` in the portable `tests/fm-herdr-attention-config.test.sh`; the only real `herdr config check` acceptance evidence for the fourth key is the dated measurement above (`config: ok` for `resume_agents_on_restore = false`, with a bogus session key rejected as the control).
 
 ### Launcher workspace placement
 

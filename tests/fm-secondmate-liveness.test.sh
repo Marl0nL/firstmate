@@ -178,6 +178,51 @@ test_herdr_agent_state_preserves_husk_classifier() {
   pass "fm_backend_herdr_agent_state: preserves missing/no-agent/live/unknown husk behavior"
 }
 
+# --- unit level: fm_backend_agent_launch_health (restored-manual-mode) -------
+
+# Drive the Herdr launch-health probe with a canned `pane process-info` body so
+# the real jq extraction, harness match, and verdict run without a real Herdr.
+# The argv permission flag is the verdict's sole authority.
+herdr_launch_health() {  # <process-info-json> -> verdict
+  FM_TEST_PROCINFO="$1" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() { printf "%s" "$FM_TEST_PROCINFO"; }
+    fm_backend_herdr_agent_launch_health "sess:p1"' "$ROOT"
+}
+
+test_herdr_launch_health_classifies() {
+  local flagged flagless bareshell out
+  flagged='{"result":{"process_info":{"foreground_processes":[{"name":"claude","argv":["/u/.local/share/claude/versions/9.9.9/claude","--dangerously-skip-permissions","--model","m"],"pid":999999990}]}}}'
+  flagless='{"result":{"process_info":{"foreground_processes":[{"name":"claude","argv":["/u/.local/share/claude/versions/9.9.9/claude","--resume","abc-123"],"pid":999999991}]}}}'
+  bareshell='{"result":{"process_info":{"foreground_processes":[{"name":"zsh","argv":["-zsh"],"pid":999999992}]}}}'
+
+  out=$(herdr_launch_health "$flagged")
+  [ "$out" = healthy ] || fail "a live Claude carrying the permission flag should read healthy, got '$out'"
+  out=$(herdr_launch_health "$flagless")
+  [ "$out" = degraded ] || fail "a live Claude resumed without the permission flag should read degraded, got '$out'"
+  out=$(herdr_launch_health "$bareshell")
+  [ "$out" = unknown ] || fail "a pane with no Claude foreground should read unknown, got '$out'"
+  out=$(herdr_launch_health '{"error":{"code":"pane_not_found"}}')
+  [ "$out" = unknown ] || fail "an error body should read unknown, got '$out'"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_launch_health "no-colon"' "$ROOT")
+  [ "$out" = unknown ] || fail "an unparseable target should read unknown, got '$out'"
+
+  pass "fm_backend_herdr_agent_launch_health: healthy/degraded/unknown from real process-info argv"
+}
+
+test_agent_launch_health_dispatcher() {
+  local out
+  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_agent_launch_health() { printf "degraded"; }; fm_backend_agent_launch_health herdr sess:p1' "$ROOT")
+  [ "$out" = degraded ] || fail "the launch-health dispatcher should route Herdr, got '$out'"
+  # Only Herdr can resume an agent process across a restart; every other backend
+  # is not-applicable and must read unknown so the sweep never cycles it.
+  for backend in tmux zellij orca cmux; do
+    out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_launch_health "$1" sess:win' "$ROOT" "$backend")
+    [ "$out" = unknown ] || fail "backend $backend must be not-applicable (unknown) for launch health, got '$out'"
+  done
+  pass "fm_backend_agent_launch_health: routes Herdr and treats every other backend as unknown"
+}
+
 # --- unit level: the generic dispatchers ------------------------------------
 
 test_agent_state_dispatcher_and_compatibility() {
@@ -350,6 +395,145 @@ run_bootstrap() {  # <fakebin> <home> <pane-cmd> <call-log> [extra env...] -> st
   PATH="$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$home" \
     FM_TEST_PANE_CMD="$cmd" FM_TMUX_CALL_LOG="$log" \
     env "$@" "$ROOT/bin/fm-bootstrap.sh" 2>&1
+}
+
+# make_liveness_herdr <dir>: a fake `herdr` that answers just the three reads the
+# sweep's per-secondmate probe makes for a backend=herdr endpoint. FM_TEST_PROCINFO
+# is the `pane process-info` body, so one JSON drives BOTH fm_backend_agent_state
+# (a live Claude foreground -> alive) and fm_backend_agent_launch_health (its argv
+# -> healthy/degraded). Every other herdr call is a silent success, so this can
+# ride alongside the real bootstrap under FM_BACKEND=tmux.
+make_liveness_herdr() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "pane get") printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}" ;;
+  "agent get") printf '{"error":{"code":"agent_not_found"}}\n' ;;
+  "pane process-info") printf '%s\n' "${FM_TEST_PROCINFO:-}" ;;
+  *) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/herdr"
+  printf '%s\n' "$fakebin"
+}
+
+# add_herdr_sm_home <w> <id> <pane> [home-subdir]: a backend=herdr secondmate
+# whose target parses to <session>:<pane> and whose home is a real dir the
+# in-flight check can read.
+add_herdr_sm_home() {
+  local w=$1 id=$2 pane=$3
+  local home="$w/$id"
+  mkdir -p "$home/state"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  {
+    printf 'window=default:%s\n' "$pane"
+    printf 'kind=secondmate\n'
+    printf 'harness=claude\n'
+    printf 'backend=herdr\n'
+    printf 'herdr_session=default\n'
+    printf 'herdr_pane_id=%s\n' "$pane"
+    printf 'home=%s\n' "$home"
+  } > "$w/home/state/$id.meta"
+  printf '%s\n' "$home"
+}
+
+test_sweep_refuses_manual_mode_husk_with_work_in_flight() {
+  local w fb herdrfb log home flagless out
+  w=$(new_world sweep-manual-mode-inflight)
+  home=$(add_herdr_sm_home "$w" sm1 w6:pB)
+  fb=$(make_toolchain "$w"); herdrfb=$(make_liveness_herdr "$w")
+  # A crew child recorded in the secondmate's own home = work in flight.
+  printf 'window=default:w7:pC\nkind=ship\nharness=claude\n' > "$home/state/child1.meta"
+  log="$w/calls.log"; : > "$log"
+  # A live Claude foreground resumed WITHOUT --dangerously-skip-permissions.
+  flagless='{"result":{"process_info":{"foreground_processes":[{"name":"claude","argv":["/u/.local/share/claude/versions/9.9.9/claude","--resume","abc"],"pid":999999991}]}}}'
+
+  out=$(run_bootstrap "$herdrfb:$fb" "$w/home" zsh "$log" FM_TEST_PROCINFO="$flagless")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: restored in manual-permission mode but has work in flight" \
+    "a degraded mate with a crew child in flight must be refused and reported, not cycled"
+  pass "sweep: a restored manual-mode mate with work in flight is refused for manual recovery"
+}
+
+# make_shim_root <dir> <log>: a shim repo root whose bin/ symlinks every real
+# bin entry (scripts and the backends dir) but REPLACES fm-control.sh and
+# fm-spawn.sh with logging fakes that succeed. Invoking the shim's
+# fm-bootstrap.sh resolves BOTH its SCRIPT_DIR (the fm-control.sh exit) and
+# FM_ROOT (the fm-spawn.sh respawn) to the shim, so the manual-mode cycle's
+# guarded exit -> --secondmate respawn sequence is observable end to end
+# through the real bootstrap executable without a real endpoint.
+make_shim_root() {
+  local dir=$1 log=$2 shim f
+  shim="$dir/shim"
+  mkdir -p "$shim/bin"
+  for f in "$ROOT"/bin/*; do
+    ln -s "$f" "$shim/bin/$(basename "$f")"
+  done
+  rm "$shim/bin/fm-control.sh" "$shim/bin/fm-spawn.sh"
+  cat > "$shim/bin/fm-control.sh" <<SH
+#!/usr/bin/env bash
+printf 'fm-control %s\n' "\$*" >> '$log'
+exit 0
+SH
+  cat > "$shim/bin/fm-spawn.sh" <<SH
+#!/usr/bin/env bash
+printf 'fm-spawn %s\n' "\$*" >> '$log'
+exit 0
+SH
+  chmod +x "$shim/bin/fm-control.sh" "$shim/bin/fm-spawn.sh"
+  printf '%s\n' "$shim"
+}
+
+test_sweep_cycles_idle_manual_mode_husk_through_exit_and_respawn() {
+  local w fb herdrfb shim cycle_log log flagless out
+  w=$(new_world sweep-manual-mode-cycle)
+  add_herdr_sm_home "$w" sm1 w6:pB >/dev/null
+  fb=$(make_toolchain "$w"); herdrfb=$(make_liveness_herdr "$w")
+  cycle_log="$w/cycle.log"; : > "$cycle_log"
+  shim=$(make_shim_root "$w" "$cycle_log")
+  log="$w/calls.log"; : > "$log"
+  # A live Claude foreground resumed WITHOUT --dangerously-skip-permissions,
+  # and NO child meta in the mate's home: a positively-confirmed idle husk.
+  flagless='{"result":{"process_info":{"foreground_processes":[{"name":"claude","argv":["/u/.local/share/claude/versions/9.9.9/claude","--resume","abc"],"pid":999999991}]}}}'
+
+  out=$(PATH="$herdrfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/home" \
+    FM_TEST_PANE_CMD=zsh FM_TMUX_CALL_LOG="$log" \
+    env FM_TEST_PROCINFO="$flagless" FM_BOOTSTRAP_VERBOSE_FACTS=1 \
+    "$shim/bin/fm-bootstrap.sh" 2>&1)
+
+  assert_contains "$(cat "$cycle_log")" "fm-control sm1 exit" \
+    "the idle degraded mate must be exited through the guarded control plane"
+  assert_contains "$(cat "$cycle_log")" "fm-spawn sm1 --secondmate" \
+    "the exited mate must be respawned with the --secondmate launch path"
+  assert_contains "$out" "BOOTSTRAP_INFO: secondmate sm1 relaunched after restored in manual-permission mode without launch flags (backend=herdr)" \
+    "the successful cycle must be reported as a relaunch fact"
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1" \
+    "a successfully cycled mate must not fall back to a manual-recovery report"
+  pass "sweep: an idle restored manual-mode mate is cycled through guarded exit then --secondmate respawn"
+}
+
+test_sweep_leaves_healthy_launched_claude_untouched() {
+  local w fb herdrfb log flagged out
+  w=$(new_world sweep-manual-mode-healthy)
+  add_herdr_sm_home "$w" sm1 w6:pB >/dev/null
+  fb=$(make_toolchain "$w"); herdrfb=$(make_liveness_herdr "$w")
+  log="$w/calls.log"; : > "$log"
+  # A live Claude foreground carrying the permission flag: a genuinely healthy mate.
+  flagged='{"result":{"process_info":{"foreground_processes":[{"name":"claude","argv":["/u/.local/share/claude/versions/9.9.9/claude","--dangerously-skip-permissions","--model","m"],"pid":999999990}]}}}'
+
+  out=$(run_bootstrap "$herdrfb:$fb" "$w/home" zsh "$log" FM_TEST_PROCINFO="$flagged")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1" \
+    "a healthy flag-carrying Claude mate must never be reported as degraded"
+
+  out=$(run_bootstrap "$herdrfb:$fb" "$w/home" zsh "$log" FM_TEST_PROCINFO="$flagged" FM_BOOTSTRAP_VERBOSE_FACTS=1)
+  assert_contains "$out" "BOOTSTRAP_INFO: secondmate sm1 already live (backend=herdr)" \
+    "a healthy Herdr Claude mate reads as ordinarily live"
+  pass "sweep: a healthy flag-carrying Claude mate is never classified degraded"
 }
 
 test_sweep_respawns_confirmed_dead_secondmate() {
@@ -543,9 +727,14 @@ test_sweep_noop_with_no_secondmate_meta() {
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
+test_herdr_launch_health_classifies
+test_agent_launch_health_dispatcher
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
+test_sweep_refuses_manual_mode_husk_with_work_in_flight
+test_sweep_cycles_idle_manual_mode_husk_through_exit_and_respawn
+test_sweep_leaves_healthy_launched_claude_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
 test_sweep_never_acts_on_ambiguous_existing_process

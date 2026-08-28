@@ -97,6 +97,16 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-session-lock-lib.sh"
 
+# Launch-signature health (bin/fm-launch-health-lib.sh): the ONE owner of "does
+# this live Claude carry the launch flags firstmate gives it, or is it a resumed
+# husk that dropped them". This adapter feeds it a pane's foreground Claude argv
+# so a mate that Herdr resumed WITHOUT --dangerously-skip-permissions
+# (the restored manual-permission-mode stall) is recognized rather than misread
+# as a healthy live agent. See "Restart and liveness behavior" in
+# docs/herdr-backend.md.
+# shellcheck source=bin/fm-launch-health-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-launch-health-lib.sh"
+
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # events.subscribe (the native pane.agent_status_changed push stream) and its
 # subscription_event schema first shipped at protocol 16 (verified: herdr
@@ -2093,6 +2103,49 @@ $(printf '%s' "$out" | jq -r '
   | @tsv' 2>/dev/null)
 EOF
   return 1
+}
+
+# fm_backend_herdr_pane_claude_launch_health: for the foreground Claude process
+# of <pane_id> in <session>, print whether it carries firstmate's launch
+# signature (bin/fm-launch-health-lib.sh): `healthy`, `degraded`, or `unknown`.
+#
+# This is the reality probe behind the restored-manual-mode detection. Herdr's
+# restore-on-restart can bring a Claude pane back as a LIVE process (so the
+# foreground-harness probe above reads it live -> alive) yet re-run it WITHOUT
+# --dangerously-skip-permissions, leaving it frozen in manual permission mode.
+# `pane process-info` exposes each foreground process's argv, so this reads the
+# argv for the causal flag and hands it to the shared verdict.
+#
+# It mirrors fm_backend_herdr_pane_foreground_harness: it iterates the foreground
+# process group and acts on the first Claude it finds (FM_HARNESS_IS_CLAUDE, set
+# by fm_harness_process_matches). A pane with no Claude foreground, or an
+# unreadable process-info body, is `unknown` so an unprovable read never triggers
+# a disruptive cycle - exactly the fail-safe the sweep depends on.
+fm_backend_herdr_pane_claude_launch_health() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 out name args
+  out=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>&1)
+  while IFS=$'\t' read -r name args; do
+    [ -n "$name$args" ] || continue
+    if fm_harness_process_matches "$name" "$args" && [ "$FM_HARNESS_IS_CLAUDE" = 1 ]; then
+      fm_launch_health_verdict "$args"
+      return 0
+    fi
+  done <<EOF
+$(printf '%s' "$out" | jq -r '
+  .result.process_info.foreground_processes[]?
+  | [(.name // ""), ((.argv // []) | join(" "))]
+  | @tsv' 2>/dev/null)
+EOF
+  printf 'unknown'
+}
+
+# fm_backend_herdr_agent_launch_health: <target> wrapper over the pane probe
+# above, mirroring fm_backend_herdr_agent_state's target parsing. An unparseable
+# target is `unknown` (preserve).
+fm_backend_herdr_agent_launch_health() {  # <target>
+  local target=$1
+  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  fm_backend_herdr_pane_claude_launch_health "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
 }
 
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
