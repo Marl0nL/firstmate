@@ -16,6 +16,7 @@
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
+#                 "BOOTSTRAP_INFO: skipped fm-<id>: <reason>",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
@@ -32,7 +33,11 @@
 #          successful send prints one BOOTSTRAP_INFO line with the exact target
 #          and message sent; a failed send leaves an idempotent retry marker
 #          under state/.secondmate-nudge-pending/ and prints an actionable
-#          NUDGE_SECONDMATES line.
+#          NUDGE_SECONDMATES line. A dormant wake-resident home or a confirmed
+#          bare shell is never sent this nudge on either the fresh or retry
+#          path: bootstrap prints a BOOTSTRAP_INFO skipped line, writes no new
+#          marker, and leaves an existing retry marker in place
+#          (docs/wake-resident.md, "The reread-nudge exemption").
 #          Already-current or no-instruction-change homes are silently left alone.
 #          The secondmate sweep also propagates declared inherited local material
 #          into each validated live secondmate home.
@@ -322,8 +327,18 @@ secondmate_sync() {
   }
 
   secondmate_send_nudge() {
-    local id=$1 home=$2 commit=$3 instr=$4 selector marker out
+    local id=$1 home=$2 commit=$3 instr=$4 selector marker out skip
     selector="fm-$id"
+    # Never type a reread nudge into a dormant wake-resident home or any other
+    # bare shell: the doorbell would run as a stray shell line and, on the marked
+    # plane, strand a pending-reply expectation. A dormant home re-reads AGENTS.md
+    # fresh on its next raise, so it loses nothing. This runs BEFORE the retry
+    # marker is written so a skip records no marker, no inbox record, and no
+    # pending-reply expectation (bin/fm-wake-resident-lib.sh).
+    if skip=$(fm_wr_nudge_suppressed "$CONFIG" "$STATE" "$id"); then
+      echo "BOOTSTRAP_INFO: skipped $selector: $skip"
+      return 0
+    fi
     marker=$(secondmate_nudge_marker_path "$id") || {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe id"
       return 0
@@ -346,7 +361,7 @@ secondmate_sync() {
   }
 
   secondmate_retry_pending_nudges() {
-    local marker id selector home commit message remote expected_marker meta meta_home home_real head out
+    local marker id selector home commit message remote expected_marker meta meta_home home_real head out skip
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
@@ -389,6 +404,16 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry target has no live secondmate metadata"
         continue
       }
+      # Same dormant/bare-shell suppression the fresh send applies: leave the
+      # marker so the nudge retries once the home is live again, but never type
+      # into a dormant wake-resident home or a bare shell this session. This
+      # runs BEFORE the commit-recency check because a dormant home's HEAD
+      # advances while it sleeps (fm-update.sh fast-forwards dormant homes), and
+      # that staleness must stay a quiet skip, not an escalation.
+      if skip=$(fm_wr_nudge_suppressed "$CONFIG" "$STATE" "$id"); then
+        echo "BOOTSTRAP_INFO: skipped $selector: $skip"
+        continue
+      fi
       meta_home=$(fm_meta_get "$meta" home)
       [ -n "$meta_home" ] || meta_home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home || true)
       if ! validate_secondmate_home "$id" "$meta_home"; then

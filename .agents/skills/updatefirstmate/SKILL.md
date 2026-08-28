@@ -32,6 +32,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
    - `nudge-secondmates: fm-<id>...|none`
+   - zero or more `nudge-skipped: fm-<id> - <reason>` lines: an advanced home deliberately left off the nudge list (currently a dormant wake-resident secondmate, which re-reads AGENTS.md fresh on its next raise, so nudging its sleeping shell would do nothing useful)
 
 2. **Re-read AGENTS.md if your own instructions changed.**
    When the updater printed `reread-firstmate: yes`, the tracked instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) just advanced under you.
@@ -46,6 +47,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    Include `FM_HOME=<this-firstmate-home>` unless `FM_HOME` is already set to the active firstmate home.
    This is a gentle steer, not an interruption: the secondmate already got a safe tracked-files fast-forward, and the nudge never forces, tears down, or discards its work.
    A secondmate that was skipped, already current, or has no live metadata is not on the list and needs no nudge.
+   Do not send a nudge to any home named on a `nudge-skipped:` line: it advanced but is deliberately off the list (a dormant wake-resident secondmate picks up the new instructions on its own next raise), so there is nothing to do for it.
 
 4. **Report to the captain in plain outcomes.**
    Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.

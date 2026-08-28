@@ -444,6 +444,75 @@ fm_wr_residency() {  # <state> <name>
   esac
 }
 
+# --- reread-nudge suppression -----------------------------------------------
+#
+# A reread nudge is a TYPED submission into a secondmate's own terminal - the
+# steering doorbell on fm-send's inbox plane. These predicates decide, in one
+# place, which LOCAL endpoints must never receive one, so the bootstrap
+# fleet-update nudge (bin/fm-bootstrap.sh) and fm-update.sh's nudge listing agree
+# on exactly what "skip" means. Both print a short reason token and return 0 when
+# the nudge must be skipped, and return 1 (printing nothing) when it may proceed.
+# <config> and <state> locate this home's wake-resident config and runtime state.
+#
+# A REMOTE secondmate is steered over its remote transport rather than a local
+# typed submission, and wake-residency is a local-process lifecycle, so neither
+# shape applies: a meta carrying remote_host is never suppressed here.
+
+# 0 when <name> is a DORMANT wake-resident secondmate: registered in this home's
+# wake-resident config AND currently dormant (fm_wr_residency). Such a home is
+# deliberately asleep behind a bare shell and re-reads AGENTS.md fresh on its
+# next raise, so the nudge's content is free to it; typing the doorbell into that
+# bare shell only runs a stray shell line, and on the from-firstmate marked plane
+# it strands a pending-reply expectation no dormant agent can ever answer. A
+# wake-resident home that is resident or of unknown residency is NOT skipped here
+# (`unknown` licenses nothing in either direction). This is the shared skip both
+# nudge callers apply.
+fm_wr_dormant_wake_resident() {  # <config> <state> <name>
+  local config=$1 state=$2 name=$3 meta="$2/$3.meta"
+  if [ -f "$meta" ] && grep -q '^remote_host=.' "$meta" 2>/dev/null; then
+    return 1
+  fi
+  fm_wr_load "$config" "$name" || return 1
+  [ "$(fm_wr_residency "$state" "$name")" = dormant ] || return 1
+  printf 'dormant wake-resident - reads instructions fresh on raise\n'
+}
+
+# 0 when the bootstrap fleet-update nudge must NOT type into <name>'s terminal:
+# a dormant wake-resident home (above), OR - defense in depth for the same
+# typed-into-a-shell hazard beyond the wake-resident case - any local secondmate
+# whose recorded endpoint has no live agent (fm_backend_agent_alive = dead:
+# confidently dead or missing). A `dead` verdict is only CONFIRMED for a harness
+# with an empirically verified classifier - the same convention fm_wr_residency
+# applies above - because the tmux classifier reads any shell-only pane as dead,
+# and a live raw-launch-command secondmate (e.g. harness=bash) IS a shell; any
+# other harness falls through to nudged. `unknown` is deliberately NOT
+# suppressed: it licenses nothing in either direction, and the doorbell into an
+# unclassifiable idle screen is the existing accepted best-effort. This is
+# bootstrap's own guard before its typed submission; fm-update.sh does not type
+# here (its caller does) and applies only the dormant-wake-resident skip above.
+fm_wr_nudge_suppressed() {  # <config> <state> <name>
+  local config=$1 state=$2 name=$3 meta="$2/$3.meta" backend target harness
+  fm_wr_dormant_wake_resident "$config" "$state" "$name" && return 0
+  if [ -f "$meta" ] && grep -q '^remote_host=.' "$meta" 2>/dev/null; then
+    return 1
+  fi
+  [ -f "$meta" ] || return 1
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  [ -n "$target" ] || target=$(fm_meta_get "$meta" window)
+  [ -n "$target" ] || return 1
+  harness=$(fm_meta_get "$meta" harness)
+  case "$harness" in
+    claude|codex|opencode|pi|grok) ;;
+    *) return 1 ;;
+  esac
+  if [ "$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null)" = dead ]; then
+    printf 'no live agent at its endpoint - bare shell, not nudged\n'
+    return 0
+  fi
+  return 1
+}
+
 # 0 only when the endpoint is CONFIRMED busy. An unknown busy-state falls back to
 # tmux's shared pane-regex reader and otherwise answers "not confirmed busy" -
 # the other stand-down gates carry the safety, and this one only ever adds a

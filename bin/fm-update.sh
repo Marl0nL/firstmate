@@ -26,6 +26,9 @@
 #   - one status line per target (updated/already current/skipped)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
+#   - nudge-skipped: fm-<id> - <reason>   (zero or more: an advanced home
+#     deliberately left off the nudge list, e.g. a dormant wake-resident
+#     secondmate; docs/wake-resident.md "The reread-nudge exemption")
 #
 # Usage: fm-update.sh [--help]
 set -eu
@@ -37,6 +40,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# fm_wr_nudge_suppressed (dormant wake-resident / bare-shell skip) and the
+# backend liveness reads it composes. Same reuse the bootstrap nudge path makes.
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-wake-resident-lib.sh
+. "$SCRIPT_DIR/fm-wake-resident-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -105,6 +114,29 @@ if [ -f "$SECONDMATES_MD" ]; then
 fi
 
 # --- caller action summary -------------------------------------------------
+# A dormant wake-resident home must not be nudged: it re-reads AGENTS.md fresh on
+# its next raise, and typing a nudge into its bare shell runs a stray shell line
+# and, on the marked plane, strands a pending-reply expectation. Drop those from
+# the nudge list and report each on its own parseable `nudge-skipped:` line so
+# the caller (the /updatefirstmate skill) only nudges homes worth nudging. The
+# bootstrap fleet-update nudge, which types the doorbell itself, adds a further
+# bare-shell guard; here the caller does the typing, so only the deliberate
+# dormant-wake-resident state is annotated (bin/fm-wake-resident-lib.sh
+# fm_wr_dormant_wake_resident). Remote routes are steered over their remote
+# transport and are never suppressed here.
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+FF_NUDGE_LIVE=""
+# Deliberate word-splitting: FF_NUDGE_WINDOWS is a space-separated list of safe
+# fm-<id> selectors.
+# shellcheck disable=SC2086
+for _nudge_sel in $FF_NUDGE_WINDOWS; do
+  _nudge_id=${_nudge_sel#fm-}
+  if _nudge_reason=$(fm_wr_dormant_wake_resident "$CONFIG" "$STATE" "$_nudge_id"); then
+    echo "nudge-skipped: $_nudge_sel - $_nudge_reason"
+  else
+    FF_NUDGE_LIVE="$FF_NUDGE_LIVE $_nudge_sel"
+  fi
+done
 
 echo "reread-firstmate: $reread_firstmate"
-echo "nudge-secondmates:${FF_NUDGE_WINDOWS:- none}"
+echo "nudge-secondmates:${FF_NUDGE_LIVE:- none}"
