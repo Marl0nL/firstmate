@@ -77,9 +77,18 @@
 #                          upstream receipt
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> age=<seconds>s
 #                          the oldest valid row in an endpoint-recorded local
-#                          secondmate home's durable wake queue exceeded
-#                          FM_SECONDMATE_WAKE_STALL_SECS; observation is read-only
-#                          and one parent receipt suppresses repeats for that row
+#                          secondmate home's durable wake queue stayed FROZEN
+#                          (no ack progress) past the doorbell re-ring ladder
+#                          while the pane was neither busy nor in a declared
+#                          paused/captain-held state (FM_SECONDMATE_WAKE_STALL_SECS
+#                          overrides the derived threshold, whose product is
+#                          floored at 60s); age is that frozen duration, and it
+#                          accrues only on unsuppressed polls - a busy or
+#                          paused/captain-held poll re-anchors the freeze clock,
+#                          while a terminal-verb last line (done/failed/blocked/
+#                          needs-decision) deliberately does not suppress.
+#                          Observation is read-only and one parent
+#                          receipt suppresses repeats for that row
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -191,9 +200,11 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # turn-ended and resets the age. Set generously above any legitimate interval
 # between completed turns, including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
-# A local secondmate's foreign queue is checked on every poll, but only after this
-# bounded age can it produce a parent notification.
-SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-60}
+# A local secondmate's foreign queue is checked on every poll, but only after its
+# oldest row stays FROZEN (no ack progress) this long can it produce a parent
+# notification. Left blank so secondmate_wake_stall_tick derives the default from
+# the doorbell re-ring ladder; an explicit FM_SECONDMATE_WAKE_STALL_SECS overrides.
+SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -452,14 +463,57 @@ secondmate_oldest_queue_row() {  # <queue-path>
   ' "$queue" 2>/dev/null || true
 }
 
-# Surface one durable parent check for one unchanged foreign row after its
-# bounded age. The primary marker and queued-key check make repeated watcher
-# cycles converge without a notification storm, while an empty queue removes
-# only this home's marker so a later row can be observed.
+# Surface one durable parent check ONLY for a secondmate whose own wake loop has
+# genuinely stopped advancing, not for one that is merely between turns.
+#
+# The signal is deliberately ack-PROGRESS, not row age. The oldest row in a
+# firstmate's own durable wake queue is drained on that mate's turn cadence,
+# which is naturally slower than any single watcher poll: a healthy mate that is
+# actively supervising its crew leaves the current oldest row unacknowledged for
+# tens of seconds every turn, and the successor that becomes oldest the instant
+# one is acked was usually enqueued long ago, so its raw enqueue-age is already
+# large. Treating "oldest row older than N seconds" as a stall therefore fires
+# once per successive oldest row on a perfectly healthy mate (the observed
+# false-alarm storm: the oldest seq marched 375->376->379->385->388 while the
+# mate drained normally), yet a truly wedged loop - whose oldest row is FROZEN -
+# fires at most once and then dedupes into silence. The two are backwards.
+#
+# So the stall is measured from when the oldest row_key was FIRST observed as
+# oldest (fm_wake_secondmate_progress_*), reset to now whenever it advances. A
+# draining loop resets every poll and never accumulates; only a frozen loop
+# accrues freeze time. The threshold is the doorbell re-ring ladder
+# (fm_task_inbox_grace_secs x fm_task_inbox_ring_max, default 90x3=270s), the
+# point past which the mate's own doorbell would have exhausted re-delivery: a
+# healthy mate always drains inside it, so anything still frozen there has failed
+# to answer its own wake. The derived product is floored at 60s (the pre-derived
+# default), so a zero ladder (grace or ring-max 0, both valid doorbell tunings)
+# cannot turn every observed row into an instant stall; an explicit positive
+# FM_SECONDMATE_WAKE_STALL_SECS still overrides it verbatim.
+#
+# Two health gates keep a frozen-but-healthy shape quiet: a provably busy pane
+# is mid-turn (rows are acked at turn end); and a declared paused/captain-held
+# state is a deliberate stop that carries its own independent bound. A fully idle
+# mate with nothing pending has an empty queue (skipped above) rather than a
+# frozen row. The busy and paused/captain-held gates RE-ANCHOR the freeze clock
+# rather than merely muting the wake: every suppressed poll rewrites the progress
+# marker to now, so freeze time accrues only while the mate is unpaused, idle,
+# and expected to be draining, and a healthy resume from a long pause or turn
+# starts a fresh threshold window instead of firing on its first idle poll.
+# A terminal verb (done/failed/blocked/needs-decision) is deliberately NOT a gate:
+# on a persistent secondmate it is a routine report line, not a lifecycle stop,
+# so a wedge behind it must still surface (missed alarms are the failure the
+# captain rules out). Observation stays read-only on the foreign queue; one
+# parent receipt still suppresses repeats for a given frozen row.
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
   local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason
-  case "$threshold" in ''|*[!0-9]*|0) threshold=60 ;; esac
+  local progress prog_row prog_since last busy
+  case "$threshold" in
+    ''|*[!0-9]*|0)
+      threshold=$(( $(fm_task_inbox_grace_secs) * $(fm_task_inbox_ring_max) ))
+      [ "$threshold" -ge 60 ] || threshold=60
+      ;;
+  esac
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -480,6 +534,7 @@ secondmate_wake_stall_tick() {
     receipt_dir="$STATE/.secondmate-wake-stall-receipts/$task"
     if [ -z "$row" ]; then
       rm -f "$marker"
+      fm_wake_secondmate_progress_clear "$task" || return 1
       if [ -e "$receipt_dir" ] || [ -L "$receipt_dir" ]; then
         [ -d "$receipt_dir" ] && [ ! -L "$receipt_dir" ] || return 1
         rm -rf -- "$receipt_dir" || return 1
@@ -491,9 +546,55 @@ $row
 EOF
     case "$epoch" in ''|*[!0-9]*) continue ;; esac
     case "$seq" in ''|*[!0-9]*) continue ;; esac
-    age=$((now - epoch))
-    [ "$age" -ge "$threshold" ] || continue
     row_key="$epoch-$seq"
+    # Ack-progress tracking: anchor the freeze clock to the first observation of
+    # this exact oldest row_key, and reset it the moment the oldest row advances.
+    prog_row=; prog_since=
+    if progress=$(fm_wake_secondmate_progress_read "$task"); then
+      prog_row=${progress%%$'\t'*}
+      prog_since=${progress#*$'\t'}
+    fi
+    if [ "$prog_row" != "$row_key" ]; then
+      fm_wake_secondmate_progress_write "$task" "$row_key" "$now" || return 1
+      continue
+    fi
+    # A declared pause or captain-held transfer is a deliberate stop with its own
+    # independent bound (the pause-resurface cadence re-surfaces a forgotten one),
+    # and a provably busy pane is one long turn whose rows ack at its end. Either
+    # suppression RE-ANCHORS the freeze clock before the threshold is even
+    # compared, so freeze time accrues only while the mate is unpaused, idle, and
+    # expected to be draining - a resume never inherits pause- or busy-time as
+    # instant stall age. Both reads run only for a frozen (non-advancing) oldest
+    # row; an advancing row already continued above.
+    #
+    # A TERMINAL verb (done/failed/blocked/needs-decision) deliberately does NOT
+    # suppress: for a persistent secondmate a terminal verb is a routine report
+    # event in its reply log (done:/failed: end every routed answer), not a
+    # lifecycle stop, so a wake loop wedged behind a months-old done: line would
+    # otherwise be a permanently missed alarm with nothing else bounding it. The
+    # captain's stated priority is that a false alarm on a legitimately-stopped
+    # mate is acceptable but a missed alarm is not, so a frozen queue behind a
+    # terminal verb still surfaces. The one true lifecycle stop, retirement,
+    # removes the meta and this loop skips the mate entirely.
+    #
+    # The RAW last line (last_status_line) is deliberate: it keeps this
+    # suppression exactly coextensive with the pause-resurface bound, whose
+    # every arm reads the same raw last line (the pane-stale path and
+    # pause_state_class below). last_state_status_line would skip a trailing
+    # resolved: bookkeeping line and re-anchor forever on a pause the resurface
+    # machinery has already cleared - a permanently missed alarm.
+    last=$(last_status_line "$STATE/$task.status")
+    if status_is_paused_or_captain_held "$last"; then
+      fm_wake_secondmate_progress_write "$task" "$row_key" "$now" || return 1
+      continue
+    fi
+    busy=$(fm_busy_classify_meta "$meta" "$task" "$STATE" 2>/dev/null || true)
+    if [ "${busy%% *}" = busy ]; then
+      fm_wake_secondmate_progress_write "$task" "$row_key" "$now" || return 1
+      continue
+    fi
+    age=$((now - prog_since))
+    [ "$age" -ge "$threshold" ] || continue
     receipt="$receipt_dir/$row_key"
     if [ -e "$marker" ] || [ -L "$marker" ]; then
       [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
