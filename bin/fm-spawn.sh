@@ -741,8 +741,8 @@ spawn_endpoint_remedy_line() {
   case "$BACKEND" in
     tmux) printf "tmux kill-window -t '%s'" "$T" ;;
     herdr) printf "herdr pane close '%s' --session '%s'" "${T#*:}" "${T%%:*}" ;;
-    zellij) printf "zellij --session '%s' action close-pane (leftover pane '%s')" "${T%%:*}" "${T#*:}" ;;
-    cmux) printf "cmux close-workspace --workspace '%s' (leftover surface '%s')" "${T%%:*}" "${T#*:}" ;;
+    zellij) printf "zellij --session '%s' action close-pane --pane-id '%s'" "${T%%:*}" "${T#*:}" ;;
+    cmux) printf "cmux close-workspace --workspace '%s'" "${T%%:*}" ;;
     *) printf "remove the leftover %s endpoint '%s'" "$BACKEND" "$T" ;;
   esac
 }
@@ -881,7 +881,7 @@ spawn_abort_cleanup() {
     SPAWN_ENDPOINT_ABORT_CLEANUP=0
     if [ -n "${BACKEND:-}" ] && [ -n "${T:-}" ]; then
       fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
-      if [ "$(fm_backend_agent_alive "$BACKEND" "$T" 2>/dev/null)" != dead ]; then
+      if fm_backend_target_exists "$BACKEND" "$T" 2>/dev/null; then
         echo "warning: could not tear down the $BACKEND endpoint '$T' left by the failed spawn of $ID; remove it before retrying: $(spawn_endpoint_remedy_line)" >&2
       fi
     fi

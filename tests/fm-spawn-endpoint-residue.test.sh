@@ -21,10 +21,11 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-endpoint-residue)
 
 # A stateful fake tmux. new-window records that the window is "present"; a
-# non-sticky kill-window records it "killed" (so list-windows then reports it
-# gone); a sticky kill leaves it present (a teardown that could not be
-# confirmed). Every kill-window is logged so a test can prove teardown was
-# attempted. FM_FAKE_STATE toggles a preexisting window by pre-touching present.
+# non-sticky kill-window records it "killed" (so list-windows and the
+# '#{pane_id}' existence probe then report it gone); a sticky kill leaves it
+# present (a teardown that could not be confirmed). Every kill-window is logged
+# so a test can prove teardown was attempted. FM_FAKE_STATE toggles a
+# preexisting window by pre-touching present.
 make_residue_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -37,6 +38,11 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
   *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_CMD:-}"; exit 0 ;;
   *"#{pane_tty}"*) exit 0 ;;
+  *"#{pane_id}"*)
+    if [ -n "$st" ] && [ -f "$st/present" ] && [ ! -f "$st/killed" ]; then
+      printf '%%1\n'; exit 0
+    fi
+    exit 1 ;;
 esac
 case "${1:-}" in
   list-windows)
@@ -140,7 +146,7 @@ test_unconfirmed_teardown_prints_remedy() {
   read_case "$rec"
   record_meta "$HOME_DIR" owner-c3 "window=firstmate:fm-owner-c3" "worktree=$CONTESTED" \
     "project=$PROJ_DIR" "harness=claude" "kind=ship"
-  out=$(run_spawn "$rec" intruder-d4 "$CONTESTED" FM_FAKE_KILL_STICKY=1 FM_FAKE_PANE_CMD=claude); status=$?
+  out=$(run_spawn "$rec" intruder-d4 "$CONTESTED" FM_FAKE_KILL_STICKY=1); status=$?
   [ "$status" -ne 0 ] || fail "a spawn onto an owned slot must exit non-zero"$'\n'"--- output ---"$'\n'"$out"
   assert_grep "fm-intruder-d4" "$KILL_LOG" "teardown must still be attempted"
   assert_contains "$out" "could not tear down" "an unconfirmed teardown must warn"
