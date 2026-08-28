@@ -1,0 +1,4 @@
+ok - real Herdr: a flag-carrying Claude foreground reads healthy
+ok - real Herdr: a Claude resumed without the permission flag reads degraded
+ok - real Herdr: interrupting a degraded pane returns it to a reclaimable shell
+# all fm-secondmate-manual-mode-e2e checks passed

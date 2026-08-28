@@ -1,0 +1,43 @@
+$ cat config.toml   # throwaway seed shaped like the real config; resume-on-restore ON (the stall-causing 0.8.2 default)
+# captain custom comment
+onboarding = false
+
+[session]
+resume_agents_on_restore = true
+
+$ herdr --version
+herdr 0.8.2
+
+$ HERDR_CONFIG_PATH=config.toml bin/fm-herdr-attention-config.sh check; echo exit=$?
+firstmate-managed Herdr settings: NOT applied - run 'apply' (/tmp/fm-config-real-check.xjanvt/config.toml)
+exit=10
+
+$ HERDR_CONFIG_PATH=config.toml bin/fm-herdr-attention-config.sh apply --no-reload; echo exit=$?
+applied firstmate-managed Herdr settings to /tmp/fm-config-real-check.xjanvt/config.toml
+backup: /tmp/fm-config-real-check.xjanvt/config.toml.fm-backup-20260829-021147
+note: --no-reload set; run 'herdr server reload-config' to apply to the running server
+exit=0
+
+$ cat config.toml   # after apply: resume_agents_on_restore forced to false, attention keys added, other lines preserved
+# captain custom comment
+onboarding = false
+
+[session]
+resume_agents_on_restore = false
+
+[ui]
+agent_panel_sort = "priority"
+
+[ui.toast]
+delivery = "herdr"
+
+[ui.sound]
+enabled = true
+
+$ HERDR_CONFIG_PATH=config.toml herdr config check; echo exit=$?   # REAL binary accepts the edited config
+config: ok
+exit=0
+
+$ HERDR_CONFIG_PATH=config.toml bin/fm-herdr-attention-config.sh check; echo exit=$?   # now reads applied
+firstmate-managed Herdr settings: already applied (/tmp/fm-config-real-check.xjanvt/config.toml)
+exit=0
