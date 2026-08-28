@@ -380,6 +380,67 @@ test_no_standdown_before_the_idle_threshold() {
   pass "no stand-down before the configured quiet period has actually elapsed"
 }
 
+test_standdown_records_a_self_exited_agent() {
+  local home out sub lease_before meta_before
+  home=$(new_world "$TMP/selfexit" advisor)
+  sub="$TMP/selfexit/homes/advisor"
+  wr "$home" enable advisor --idle-secs 1800 >/dev/null
+  # The agent has already exited itself: the pane is a bare shell, exactly the
+  # dormant-healthy shape a self-exited claude leaves behind. No quiet backdating,
+  # to prove the quiet-time gate is irrelevant once the agent is already gone.
+  pose_pane bash
+  : > "$FM_FAKE_SEND_LOG"
+  lease_before=$(cat "$TMP/selfexit/lease")
+  meta_before=$(cat "$home/state/advisor.meta")
+
+  out=$(wr "$home" standdown advisor)
+  assert_contains "$out" "already exited; recorded stand-down" \
+    "standdown must record a self-exited agent as a completed stand-down: $out"
+
+  # Nothing is typed at a bare shell - the whole point of the fix.
+  [ ! -s "$FM_FAKE_SEND_LOG" ] || fail "a self-exited stand-down must send nothing: $(cat "$FM_FAKE_SEND_LOG")"
+  assert_grep "dormant_since=" "$home/state/advisor.wake-resident" "a self-exited stand-down must record dormancy"
+
+  # An exit is not a teardown, on this path exactly as on the submitted-exit one.
+  assert_present "$sub" "a self-exited stand-down removed the secondmate home"
+  assert_present "$sub/.fm-secondmate-home" "a self-exited stand-down removed the seeded-home marker"
+  assert_grep "keep-me" "$sub/data/backlog.md" "a self-exited stand-down damaged the secondmate backlog"
+  assert_present "$TMP/selfexit/lease" "a self-exited stand-down released the treehouse lease"
+  [ "$(cat "$TMP/selfexit/lease")" = "$lease_before" ] || fail "a self-exited stand-down altered the lease record"
+  [ "$(cat "$home/state/advisor.meta")" = "$meta_before" ] || fail "a self-exited stand-down rewrote the task meta"
+  assert_present "$home/state/advisor.status" "a self-exited stand-down removed the status file"
+  assert_grep "advisor" "$home/data/secondmates.md" "a self-exited stand-down unregistered the secondmate"
+  pass "a stand-down of an already-self-exited agent records dormancy with no pane submission"
+}
+
+test_self_exited_standdown_still_refuses_work_and_mail() {
+  local home out sub
+  home=$(new_world "$TMP/selfexit-refuse" advisor)
+  sub="$TMP/selfexit-refuse/homes/advisor"
+  wr "$home" enable advisor >/dev/null
+  # Self-exited shape, but with the two never-waive conditions present: the
+  # already-exited success path must run AFTER those refusals, never around them.
+  pose_pane bash
+
+  # Unanswered mail: refuse, record nothing, send nothing.
+  printf '{}' > "$sub/state/chat-inbox/m1.json"
+  : > "$FM_FAKE_SEND_LOG"
+  out=$(wr "$home" standdown advisor) \
+    && fail "a self-exited stand-down must still refuse an unanswered message: $out"
+  assert_contains "$out" "unanswered message" "the refusal did not name the reason: $out"
+  assert_absent "$home/state/advisor.wake-resident" "a refused self-exited stand-down must record no dormancy"
+  [ ! -s "$FM_FAKE_SEND_LOG" ] || fail "a refused stand-down must send nothing"
+  rm -f "$sub/state/chat-inbox/m1.json"
+
+  # Work in flight: refuse, even though the agent process itself is already gone.
+  fm_write_meta "$sub/state/child-task.meta" "worktree=$sub/wt" "kind=ship"
+  out=$(wr "$home" standdown advisor --force) \
+    && fail "a self-exited stand-down must still refuse work in flight, even with --force: $out"
+  assert_contains "$out" "still has work in flight" "the refusal did not name the reason: $out"
+  assert_absent "$home/state/advisor.wake-resident" "a refused self-exited stand-down must record no dormancy"
+  pass "the already-exited success path still refuses work in flight and unanswered mail"
+}
+
 test_standdown_preserves_home_and_lease() {
   local home out sub lease_before meta_before
   home=$(new_world "$TMP/standdown" advisor)
@@ -699,6 +760,8 @@ test_raise_refuses_on_inconclusive_liveness
 test_no_standdown_with_work_in_flight
 test_no_standdown_with_unanswered_message
 test_no_standdown_before_the_idle_threshold
+test_standdown_records_a_self_exited_agent
+test_self_exited_standdown_still_refuses_work_and_mail
 test_standdown_preserves_home_and_lease
 test_persistence_invariant_catches_a_loss
 test_next_message_wakes_it_again

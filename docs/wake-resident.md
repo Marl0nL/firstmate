@@ -62,7 +62,8 @@ Both shims are written and registered through `bin/fm-check-lib.sh`'s trust path
    Once nothing is pending, nothing of its own is in flight, its pane is not busy, and `idle-secs` have passed, the poll offers a stand-down.
 7. **Stand-down.**
    `bin/fm-wake-resident.sh standdown <name>` submits the harness's own exit command and stops there.
-   Back to step 1, with the same home.
+   If the agent has already exited itself - leaving the bare shell of step 1 - there is nothing to submit, so the stand-down simply records the dormancy.
+   Either way, back to step 1, with the same home.
 
 ## Stand-down is not teardown
 
@@ -94,7 +95,8 @@ Refusals are deliberately asymmetric: leaving a secondmate up costs a little quo
 | An unanswered message in the inbox | Stand-down refuses. **`--force` does not waive this.** |
 | The pane is confirmed busy | Stand-down refuses; `--force` waives. |
 | Fewer than `idle-secs` quiet | Stand-down refuses; `--force` waives. |
-| Harness has no submittable exit command (grok) | Stand-down refuses outright, rather than half-sending something and reporting success. |
+| The agent has already exited itself (a bare shell) | Stand-down **succeeds** with no pane submission: it records the dormancy, because that bare shell is exactly the state a stand-down is trying to reach. This works on any harness, grok included, since nothing is sent. The work-in-flight and unanswered-message refusals above still apply first. |
+| A **live** agent on a harness whose exit is not a submittable line (grok) | Stand-down refuses outright, rather than half-sending something and reporting success. |
 | The agent does not confirm its exit in time | Stand-down fails and leaves it alone. It never escalates to a kill. |
 | Liveness read is inconclusive | Both raise and stand-down refuse. |
 | A raise is already in flight | The second raise refuses. One claim, one agent. |
@@ -156,13 +158,13 @@ The secondmate's own charter has to say it is wake-resident, because the agent n
 
 ## Verification
 
-2026-07-31, this branch:
+2026-08-28, this branch:
 
 ```
 $ bash tests/fm-wake-resident.test.sh | grep -c '^ok - '
-22
+24
 ```
 
 The suite drives the real `fm-wake-resident.sh` and `fm-wake-resident-poll.sh` against a format-aware fake tmux whose pane can be posed as a live agent, a bare shell, or an unreadable interpreter, with the launch and the keystroke stubbed through `FM_ROOT_OVERRIDE`.
 
-The cases, in order: inert with no config; both shims wired and registered; one throttled raise line for a dormant secondmate with mail; a resident secondmate's mail left to its own shim until `grace-secs`; the in-home shim surfacing a pending entry; the first message raising a seeded home that has never been launched and so has no metadata yet; a raise going through `fm-spawn.sh <name> --secondmate` and nothing else; two wakes producing exactly one advisor, both simultaneously and sequentially; a raise refused on an inconclusive liveness read; **no stand-down with work in flight, with or without `--force`**; no stand-down with an unanswered message; no stand-down before the quiet threshold; **an idle stand-down leaving the treehouse lease, the home, `state/<name>.meta`, the backlog, the status file and the registry entry byte-identical**; the persistence invariant catching a removed identity marker, a truncated backlog and a removed home while treating an appended status line as normal growth; the next message waking it again; a refusal on a harness with no submittable exit; leaving the agent alone when its exit never confirms; `disable` removing the wiring and nothing else; silence in away mode; unsafe, malformed and duplicate records dropped; **the liveness sweep leaving a dormant wake-resident secondmate asleep** (with a control case proving the same fixture without a record IS respawned); and the executable exit-command table agreeing with `harness-adapters`.
+The cases, in order: inert with no config; both shims wired and registered; one throttled raise line for a dormant secondmate with mail; a resident secondmate's mail left to its own shim until `grace-secs`; the in-home shim surfacing a pending entry; the first message raising a seeded home that has never been launched and so has no metadata yet; a raise going through `fm-spawn.sh <name> --secondmate` and nothing else; two wakes producing exactly one advisor, both simultaneously and sequentially; a raise refused on an inconclusive liveness read; **no stand-down with work in flight, with or without `--force`**; no stand-down with an unanswered message; no stand-down before the quiet threshold; **a stand-down of an already-self-exited agent recording dormancy with no pane submission while leaving the home, lease, meta, backlog, status and registry intact**, and that same self-exited path still refusing work in flight and an unanswered message before it can succeed; **an idle stand-down leaving the treehouse lease, the home, `state/<name>.meta`, the backlog, the status file and the registry entry byte-identical**; the persistence invariant catching a removed identity marker, a truncated backlog and a removed home while treating an appended status line as normal growth; the next message waking it again; a refusal on a harness with no submittable exit; leaving the agent alone when its exit never confirms; `disable` removing the wiring and nothing else; silence in away mode; unsafe, malformed and duplicate records dropped; **the liveness sweep leaving a dormant wake-resident secondmate asleep** (with a control case proving the same fixture without a record IS respawned); and the executable exit-command table agreeing with `harness-adapters`.
