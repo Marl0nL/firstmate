@@ -505,7 +505,7 @@ secondmate_oldest_queue_row() {  # <queue-path>
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
   local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason
-  local progress prog_row prog_since last_state busy
+  local progress prog_row prog_since last busy
   case "$threshold" in
     ''|*[!0-9]*|0)
       threshold=$(( $(fm_task_inbox_grace_secs) * $(fm_task_inbox_ring_max) ))
@@ -574,8 +574,15 @@ EOF
     # mate is acceptable but a missed alarm is not, so a frozen queue behind a
     # terminal verb still surfaces. The one true lifecycle stop, retirement,
     # removes the meta and this loop skips the mate entirely.
-    last_state=$(last_state_status_line "$STATE/$task.status")
-    if status_is_paused_or_captain_held "$last_state"; then
+    #
+    # The RAW last line (last_status_line) is deliberate: it keeps this
+    # suppression exactly coextensive with the pause-resurface bound, whose
+    # every arm reads the same raw last line (the pane-stale path and
+    # pause_state_class below). last_state_status_line would skip a trailing
+    # resolved: bookkeeping line and re-anchor forever on a pause the resurface
+    # machinery has already cleared - a permanently missed alarm.
+    last=$(last_status_line "$STATE/$task.status")
+    if status_is_paused_or_captain_held "$last"; then
       fm_wake_secondmate_progress_write "$task" "$row_key" "$now" || return 1
       continue
     fi

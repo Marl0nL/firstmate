@@ -621,6 +621,37 @@ test_secondmate_wake_loop_terminal_verb_wedge_notifies() {
   pass "a wedged secondmate wake loop behind a terminal-verb last line still surfaces"
 }
 
+# Paused-resolved read-skew regression: the tick must read the RAW last status
+# line so a self-closed pause does not mask a wedge. A mate declares paused:,
+# then the blocking key self-closes via the documented fm-brief self-close path,
+# leaving resolved: as the raw last line. The pause-resurface machinery reads
+# that raw line, sees not-paused, clears its tracking, and never arms the ~1h
+# bound - so if the tick instead read last_state_status_line, it would skip the
+# trailing resolved: line, still see paused:, and re-anchor forever: a genuine
+# wedge with no alarm from any channel. The wedge must surface here.
+test_secondmate_wake_loop_resolved_pause_wedge_notifies() {
+  local dir state sub fakebin out
+  dir=$(make_case secondmate-wake-resolved-pause)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  _secondmate_gate_fake_tmux "$fakebin"
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 200 ))" > "$sub/state/.wake-queue"
+  printf 'paused: waiting on <external>\nresolved: [key=x] cleared\n' > "$state/mate.status"
+  prime_status_seen "$state" "$state/mate.status" \
+    || fail "could not prime the resolved: status seen marker"
+  out="$dir/watch.out"
+  _run_secondmate_gate_checkpoint "$dir" "$state" 1 5 "$out"
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$out" >/dev/null \
+    || fail "a wedge behind a self-closed pause was a missed alarm (did not surface): $(cat "$out")"
+  [ -s "$state/.wake-queue" ] || fail "the resolved-pause wedge notification was not durable"
+  pass "a wedged wake loop behind a pause cleared by a trailing resolved: line still surfaces"
+}
+
 # The reported false-fire class at its root: freeze time must not accrue through
 # a declared pause and then fire on the healthy resume. Every suppressed poll
 # re-anchors the freeze clock, so once the mate lifts the pause and starts
@@ -1313,6 +1344,7 @@ test_secondmate_wake_loop_draining_queue_is_quiet
 test_secondmate_wake_loop_busy_pane_is_quiet
 test_secondmate_wake_loop_declared_wait_is_quiet
 test_secondmate_wake_loop_terminal_verb_wedge_notifies
+test_secondmate_wake_loop_resolved_pause_wedge_notifies
 test_secondmate_wake_loop_pause_resume_does_not_false_fire
 test_secondmate_wake_loop_wedged_with_unread_doorbell_notifies
 test_secondmate_wake_loop_threshold_derives_from_doorbell_ladder
