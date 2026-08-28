@@ -101,6 +101,12 @@ SH
 #!/usr/bin/env bash
 set -u
 printf 'send %s\n' "$*" >> "$FM_FAKE_SEND_LOG"
+# The settle race: the agent exited between the stand-down's liveness read and
+# the keystroke, so the composer refuses to type into what is now a bare shell.
+if [ -n "${FM_FAKE_SEND_REFUSE_SHELL:-}" ]; then
+  printf 'bash\n' > "$FM_FAKE_PANE_COMMAND_FILE"
+  exit 1
+fi
 [ -z "${FM_FAKE_SEND_FAIL:-}" ] || exit 1
 # A submitted exit command leaves the pane at a bare shell - unless the test is
 # posing the case where the agent accepts the keystroke and keeps running.
@@ -441,6 +447,53 @@ test_self_exited_standdown_still_refuses_work_and_mail() {
   pass "the already-exited success path still refuses work in flight and unanswered mail"
 }
 
+test_standdown_records_a_settle_race_self_exit() {
+  local home out sub
+  home=$(new_world "$TMP/settle" advisor)
+  sub="$TMP/settle/homes/advisor"
+  wr "$home" enable advisor --idle-secs 1800 >/dev/null
+  make_quiet "$home" advisor 7200
+  # The settle race: the agent exits right as the stand-down starts, so the
+  # liveness read still says resident, and the exit command then meets a bare
+  # shell the composer refuses to type into.
+  pose_pane claude
+  : > "$FM_FAKE_SEND_LOG"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$FAKE_ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_DATA_OVERRIDE="$home/data" FM_FAKE_SEND_REFUSE_SHELL=1 \
+    "$WR" standdown advisor 2>&1) \
+    || fail "a send refused by a now-dormant pane must complete the stand-down: $out"
+  assert_contains "$out" "already exited; recorded stand-down" \
+    "the settle-race stand-down did not report the self-exited outcome: $out"
+  assert_grep "dormant_since=" "$home/state/advisor.wake-resident" \
+    "the settle-race stand-down must record dormancy"
+  assert_present "$sub" "the settle-race stand-down removed the secondmate home"
+  assert_present "$sub/.fm-secondmate-home" "the settle-race stand-down removed the seeded-home marker"
+  assert_grep "keep-me" "$sub/data/backlog.md" "the settle-race stand-down damaged the secondmate backlog"
+  assert_present "$TMP/settle/lease" "the settle-race stand-down released the treehouse lease"
+  assert_present "$home/state/advisor.meta" "the settle-race stand-down dropped the task meta"
+  pass "a send refusal whose re-read finds a bare shell records the stand-down instead of failing"
+}
+
+test_standdown_send_failure_still_fails_while_resident() {
+  local home out
+  home=$(new_world "$TMP/sendfail" advisor)
+  wr "$home" enable advisor --idle-secs 1800 >/dev/null
+  make_quiet "$home" advisor 7200
+  # A genuine send failure with the agent still alive: the pane never flips to a
+  # bare shell, so the re-read still says resident and the failure must stand.
+  pose_pane claude
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$FAKE_ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_DATA_OVERRIDE="$home/data" FM_FAKE_SEND_FAIL=1 FM_FAKE_SEND_NO_EXIT=1 \
+    "$WR" standdown advisor 2>&1) \
+    && fail "a send failure against a still-resident agent must still fail: $out"
+  assert_contains "$out" "it is still up" "the failure did not name the reason: $out"
+  assert_no_grep "dormant_since=" "$home/state/advisor.wake-resident" \
+    "a failed stand-down against a resident agent must record no dormancy"
+  pass "a send failure whose re-read still sees a resident agent stays a failure"
+}
+
 test_standdown_preserves_home_and_lease() {
   local home out sub lease_before meta_before
   home=$(new_world "$TMP/standdown" advisor)
@@ -762,6 +815,8 @@ test_no_standdown_with_unanswered_message
 test_no_standdown_before_the_idle_threshold
 test_standdown_records_a_self_exited_agent
 test_self_exited_standdown_still_refuses_work_and_mail
+test_standdown_records_a_settle_race_self_exit
+test_standdown_send_failure_still_fails_while_resident
 test_standdown_preserves_home_and_lease
 test_persistence_invariant_catches_a_loss
 test_next_message_wakes_it_again

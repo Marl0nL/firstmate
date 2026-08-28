@@ -434,6 +434,18 @@ cmd_standdown() {
   # an exit command, it is a sentence typed at the agent.
   if ! FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-send.sh" "$target" "$exit_cmd" >/dev/null; then
     rm -f "$snapshot"
+    # A refused send against a pane that now reads confidently dormant means the
+    # agent self-exited inside the classifier's process-group settle window,
+    # after the liveness read above: the exit command never had a live agent to
+    # reach, and that bare shell is a completed stand-down, not a failure. No
+    # exit action happened, so there is nothing to wait on or snapshot-verify.
+    # Any other verdict keeps the failure.
+    if [ "$(fm_wr_residency "$STATE" "$name")" = dormant ]; then
+      fm_wr_record_set "$STATE" "$name" dormant_since "$(fm_wr_now)" || true
+      clear_throttles "$name"
+      echo "wake-resident: $name agent had already exited; recorded stand-down (no exit command sent)"
+      return 0
+    fi
     die "could not submit '$exit_cmd' to $name at $target; it is still up"
   fi
 
