@@ -317,8 +317,18 @@ secondmate_sync() {
   }
 
   secondmate_send_nudge() {
-    local id=$1 home=$2 commit=$3 instr=$4 selector marker out
+    local id=$1 home=$2 commit=$3 instr=$4 selector marker out skip
     selector="fm-$id"
+    # Never type a reread nudge into a dormant wake-resident home or any other
+    # bare shell: the doorbell would run as a stray shell line and, on the marked
+    # plane, strand a pending-reply expectation. A dormant home re-reads AGENTS.md
+    # fresh on its next raise, so it loses nothing. This runs BEFORE the retry
+    # marker is written so a skip records no marker, no inbox record, and no
+    # pending-reply expectation (bin/fm-wake-resident-lib.sh).
+    if skip=$(fm_wr_nudge_suppressed "$CONFIG" "$STATE" "$id"); then
+      echo "BOOTSTRAP_INFO: skipped $selector: $skip"
+      return 0
+    fi
     marker=$(secondmate_nudge_marker_path "$id") || {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe id"
       return 0
@@ -341,7 +351,7 @@ secondmate_sync() {
   }
 
   secondmate_retry_pending_nudges() {
-    local marker id selector home commit message remote expected_marker meta meta_home home_real head out
+    local marker id selector home commit message remote expected_marker meta meta_home home_real head out skip
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
@@ -400,6 +410,13 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
         continue
       }
+      # Same dormant/bare-shell suppression the fresh send applies: leave the
+      # marker so the nudge retries once the home is live again, but never type
+      # into a dormant wake-resident home or a bare shell this session.
+      if skip=$(fm_wr_nudge_suppressed "$CONFIG" "$STATE" "$id"); then
+        echo "BOOTSTRAP_INFO: skipped $selector: $skip"
+        continue
+      fi
       if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
         rm -f "$marker"
         echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"

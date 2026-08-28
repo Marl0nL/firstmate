@@ -801,6 +801,95 @@ test_exit_commands_match_harness_adapters() {
   pass "the executable exit-command table agrees with harness-adapters"
 }
 
+# Evaluate a reread-nudge suppression predicate against the current fixture pane,
+# exactly as bin/fm-bootstrap.sh's nudge path and bin/fm-update.sh's nudge listing
+# call it. Echoes "SUPPRESS: <reason>" or "KEEP". <fn> is fm_wr_dormant_wake_resident
+# (the shared skip both callers apply) or fm_wr_nudge_suppressed (bootstrap's own
+# guard, which additionally refuses a bare shell before its typed submission).
+wr_predicate() {  # <home> <fn> <name>
+  local home=$1 fn=$2 name=$3
+  bash -c '
+    root=$1; home=$2; fn=$3; name=$4
+    . "$root/bin/fm-backend.sh"
+    . "$root/bin/fm-secondmate-registry-lib.sh"
+    . "$root/bin/fm-wake-resident-lib.sh"
+    if r=$("$fn" "$home/config" "$home/state" "$name"); then
+      printf "SUPPRESS: %s\n" "$r"
+    else
+      printf "KEEP\n"
+    fi
+  ' _ "$ROOT" "$home" "$fn" "$name" 2>&1
+}
+
+# A dormant wake-resident home is asleep behind a bare shell and re-reads AGENTS.md
+# fresh on its next raise, so both the bootstrap fleet-update nudge and
+# fm-update.sh's nudge listing must drop it - typing the doorbell into that bare
+# shell would run a stray shell line and, on the marked plane, strand a
+# pending-reply expectation. The predicate is pure-read, so a skip creates no
+# steering inbox record and no pending-reply record by construction.
+test_nudge_skips_a_dormant_wake_resident() {
+  local home
+  home=$(new_world "$TMP/nudge-dormant" advisor)
+  wr "$home" enable advisor >/dev/null
+  pose_pane bash   # asleep behind a bare shell -> residency reads dormant
+  assert_contains "$(wr_predicate "$home" fm_wr_dormant_wake_resident advisor)" \
+    "SUPPRESS: dormant wake-resident - reads instructions fresh on raise" \
+    "the shared skip must drop a dormant wake-resident home from the nudge"
+  assert_contains "$(wr_predicate "$home" fm_wr_nudge_suppressed advisor)" \
+    "SUPPRESS: dormant wake-resident - reads instructions fresh on raise" \
+    "bootstrap's guard must also drop a dormant wake-resident home"
+  assert_absent "$home/state/advisor.inbox" "a suppressed nudge must write no steering inbox record"
+  pass "a dormant wake-resident home is dropped from both nudge paths"
+}
+
+# A resident wake-resident agent is a live agent that should re-read on an
+# instruction change, so neither predicate suppresses it: it is nudged exactly as
+# any live secondmate is today.
+test_nudge_keeps_a_resident_wake_resident() {
+  local home
+  home=$(new_world "$TMP/nudge-resident" advisor)
+  wr "$home" enable advisor >/dev/null
+  pose_pane claude   # a live agent -> residency reads resident
+  assert_contains "$(wr_predicate "$home" fm_wr_dormant_wake_resident advisor)" "KEEP" \
+    "a resident wake-resident home is not treated as dormant"
+  assert_contains "$(wr_predicate "$home" fm_wr_nudge_suppressed advisor)" "KEEP" \
+    "a resident wake-resident home is nudged exactly as today"
+  pass "a resident wake-resident home is nudged exactly as today"
+}
+
+# An ordinary (not wake-resident) secondmate whose agent has exited leaves a bare
+# shell. Bootstrap's own guard must refuse to type a nudge into it (the 2026-08-10
+# typed-into-shell hazard); fm-update.sh's dormant-only skip must NOT over-skip it,
+# because there the caller - not fm-update - does the typing, and the endpoint may
+# yet be relaunched.
+test_nudge_guard_blocks_a_bare_shell_but_dormant_skip_does_not() {
+  local home
+  home=$(new_world "$TMP/nudge-bareshell" advisor)
+  pose_pane bash   # agent exited, endpoint is a live pane at a bare shell
+  assert_contains "$(wr_predicate "$home" fm_wr_nudge_suppressed advisor)" \
+    "SUPPRESS: no live agent at its endpoint" \
+    "bootstrap's guard refuses to type a nudge into a bare shell"
+  assert_contains "$(wr_predicate "$home" fm_wr_dormant_wake_resident advisor)" "KEEP" \
+    "the dormant-only skip does not over-skip an ordinary bare shell"
+  pass "the bare-shell guard is bootstrap-only; the dormant-only skip leaves ordinary shells on the list"
+}
+
+# A remote secondmate is steered over its remote transport, never a local typed
+# submission, and wake-residency is a local-process lifecycle - so neither skip
+# applies even while the local pane reads as a bare shell.
+test_nudge_never_suppresses_a_remote_secondmate() {
+  local home
+  home=$(new_world "$TMP/nudge-remote" advisor)
+  wr "$home" enable advisor >/dev/null
+  pose_pane bash
+  printf 'remote_host=example.net\n' >> "$home/state/advisor.meta"
+  assert_contains "$(wr_predicate "$home" fm_wr_dormant_wake_resident advisor)" "KEEP" \
+    "a remote secondmate is never suppressed by the shared skip"
+  assert_contains "$(wr_predicate "$home" fm_wr_nudge_suppressed advisor)" "KEEP" \
+    "a remote secondmate is never suppressed by bootstrap's guard"
+  pass "a remote secondmate endpoint is never treated as a local nudge skip"
+}
+
 test_inert_without_config
 test_enable_wires_and_registers_both_shims
 test_message_to_dormant_emits_one_raise_line
@@ -826,4 +915,8 @@ test_disable_leaves_the_home_intact
 test_poll_is_silent_in_away_mode
 test_unsafe_and_unknown_records_are_dropped
 test_liveness_sweep_exempts_a_dormant_wake_resident
+test_nudge_skips_a_dormant_wake_resident
+test_nudge_keeps_a_resident_wake_resident
+test_nudge_guard_blocks_a_bare_shell_but_dormant_skip_does_not
+test_nudge_never_suppresses_a_remote_secondmate
 test_exit_commands_match_harness_adapters

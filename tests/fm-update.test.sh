@@ -291,8 +291,44 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+# --- T12: a dormant wake-resident secondmate is annotated, not nudged -------
+# A wake-resident secondmate asleep behind a bare shell re-reads AGENTS.md fresh
+# on its next raise, so nudging it would only type into a dead pane (and, on the
+# marked plane, strand a reply expectation). It fast-forwards like any other home
+# but is dropped from the nudge list and reported on its own nudge-skipped line,
+# while a live sibling in the same run is still nudged exactly as before. With no
+# live backend endpoint in this fixture, the wake-resident home's residency reads
+# as dormant - the deliberate asleep-behind-a-bare-shell state the skip exists for.
+test_dormant_wake_resident_annotated_not_nudged() {
+  local w out nudge_line fakebin
+  w=$(new_world t12)
+  add_sm "$w" sm1
+  add_sm "$w" napper
+  mkdir -p "$w/home/config"
+  printf 'napper idle-secs=1800 grace-secs=300\n' > "$w/home/config/wake-resident.conf"
+  bump_origin "$w" instr
+  # A fake tmux that reports every endpoint absent, so the wake-resident home's
+  # residency reads as dormant deterministically rather than leaking whatever tmux
+  # server happens to run in the test environment. sm1 is not wake-resident, so its
+  # nudge decision never consults the backend at all.
+  fakebin=$(fm_fakebin "$w")
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" PATH="$fakebin:$PATH" "$UPDATE" 2>/dev/null)
+
+  assert_contains "$out" "secondmate napper: updated " "the dormant home still fast-forwards"
+  assert_contains "$out" "nudge-skipped: fm-napper - dormant wake-resident - reads instructions fresh on raise" \
+    "the dormant wake-resident home is reported on its own skip line"
+  nudge_line=$(printf '%s\n' "$out" | grep '^nudge-secondmates:')
+  assert_contains "$nudge_line" "fm-sm1" "the live sibling is still nudged exactly as before"
+  assert_not_contains "$nudge_line" "napper" "the dormant wake-resident home is dropped from the nudge list"
+  pass "T12 dormant wake-resident secondmate is annotated and dropped from the nudge list"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
+test_dormant_wake_resident_annotated_not_nudged
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped
 test_idempotent_already_current
