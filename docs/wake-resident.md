@@ -173,7 +173,7 @@ The secondmate's own charter has to say it is wake-resident, because the agent n
 
 ```
 $ bash tests/fm-wake-resident.test.sh | grep -c '^ok - '
-26
+31
 ```
 
 The suite drives the real `fm-wake-resident.sh` and `fm-wake-resident-poll.sh` against a format-aware fake tmux whose pane can be posed as a live agent, a bare shell, or an unreadable interpreter, with the launch and the keystroke stubbed through `FM_ROOT_OVERRIDE`.

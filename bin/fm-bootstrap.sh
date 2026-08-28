@@ -16,6 +16,7 @@
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
+#                 "BOOTSTRAP_INFO: skipped fm-<id>: <reason>",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
@@ -32,7 +33,11 @@
 #          successful send prints one BOOTSTRAP_INFO line with the exact target
 #          and message sent; a failed send leaves an idempotent retry marker
 #          under state/.secondmate-nudge-pending/ and prints an actionable
-#          NUDGE_SECONDMATES line.
+#          NUDGE_SECONDMATES line. A dormant wake-resident home or a confirmed
+#          bare shell is never sent this nudge on either the fresh or retry
+#          path: bootstrap prints a BOOTSTRAP_INFO skipped line, writes no new
+#          marker, and leaves an existing retry marker in place
+#          (docs/wake-resident.md, "The reread-nudge exemption").
 #          Already-current or no-instruction-change homes are silently left alone.
 #          The secondmate sweep also propagates declared inherited local material
 #          into each validated live secondmate home.

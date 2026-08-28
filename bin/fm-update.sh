@@ -26,6 +26,9 @@
 #   - one status line per target (updated/already current/skipped)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
+#   - nudge-skipped: fm-<id> - <reason>   (zero or more: an advanced home
+#     deliberately left off the nudge list, e.g. a dormant wake-resident
+#     secondmate; docs/wake-resident.md "The reread-nudge exemption")
 #
 # Usage: fm-update.sh [--help]
 set -eu
