@@ -80,11 +80,13 @@
 #                          secondmate home's durable wake queue stayed FROZEN
 #                          (no ack progress) past the doorbell re-ring ladder
 #                          while the pane was neither busy nor in a declared
-#                          pause/terminal state (FM_SECONDMATE_WAKE_STALL_SECS
+#                          paused/captain-held state (FM_SECONDMATE_WAKE_STALL_SECS
 #                          overrides the derived threshold, whose product is
 #                          floored at 60s); age is that frozen duration, and it
 #                          accrues only on unsuppressed polls - a busy or
-#                          declared-stop poll re-anchors the freeze clock.
+#                          paused/captain-held poll re-anchors the freeze clock,
+#                          while a terminal-verb last line (done/failed/blocked/
+#                          needs-decision) deliberately does not suppress.
 #                          Observation is read-only and one parent
 #                          receipt suppresses repeats for that row
 # For normal supervision, resume the session-start primary-harness protocol
