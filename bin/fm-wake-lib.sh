@@ -1223,6 +1223,57 @@ fm_wake_secondmate_stall_marker_write() { # <task> <row-key>
   fi
 }
 
+# Ack-progress ("freeze") tracking for the secondmate wake-loop stall check.
+# The marker records which foreign queue row was oldest and WHEN that row first
+# became the oldest one this parent observed, as "<row-key>\t<since-epoch>". The
+# stall is measured from since-epoch (how long the loop has made no progress),
+# NOT from the row's own enqueue epoch: a healthy mate that drains one row lets
+# the next-oldest become oldest, and that successor was usually enqueued long ago,
+# so its enqueue-age is already large the instant it surfaces. Anchoring to the
+# observation time is what lets a draining loop (oldest row advancing every poll)
+# never accumulate freeze time, while a wedged loop (oldest row frozen) does.
+# fm-watch.sh's secondmate_wake_stall_tick owns the freeze decision; these are
+# just its symlink-safe atomic reader/writer/clearer.
+fm_wake_secondmate_progress_read() { # <task> -> "<row-key>\t<since-epoch>"
+  local task=$1 marker line row_key since
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  marker="$STATE/.secondmate-wake-progress-$task"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  IFS= read -r line < "$marker" 2>/dev/null || return 1
+  row_key=${line%%$'\t'*}
+  since=${line#*$'\t'}
+  case "$row_key" in ''|*[!0-9-]*) return 1 ;; esac
+  case "$since" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\t%s' "$row_key" "$since"
+}
+
+fm_wake_secondmate_progress_write() { # <task> <row-key> <since-epoch>
+  local task=$1 row_key=$2 since=$3 marker tmp
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$row_key" in ''|*[!0-9-]*) return 1 ;; esac
+  case "$since" in ''|*[!0-9]*) return 1 ;; esac
+  marker="$STATE/.secondmate-wake-progress-$task"
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  fi
+  tmp=$(mktemp "$STATE/.secondmate-wake-progress.XXXXXX") || return 1
+  if ! printf '%s\t%s\n' "$row_key" "$since" > "$tmp" || ! chmod 0600 "$tmp" \
+    || ! _fm_atomic_replace "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_wake_secondmate_progress_clear() { # <task>
+  local task=$1 marker
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  marker="$STATE/.secondmate-wake-progress-$task"
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    rm -f -- "$marker" || return 1
+  fi
+}
+
 fm_wake_secondmate_stall_receipt_write() { # <task> <row-key>
   local task=$1 row_key=$2 root task_dir receipt tmp
   case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac

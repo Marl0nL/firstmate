@@ -267,9 +267,9 @@ SH
     FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$out" 2> "$dir/watch.err" || true
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 5 > "$out" 2> "$dir/watch.err" || true
   grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$out" >/dev/null \
-    || fail "an aged foreign row did not wake the parent checkpoint: $(cat "$out"); err=$(cat "$dir/watch.err"); meta=$(cat "$state/mate.meta"); foreign=$(cat "$sub/state/.wake-queue")"
+    || fail "a foreign row frozen past the threshold did not wake the parent checkpoint: $(cat "$out"); err=$(cat "$dir/watch.err"); meta=$(cat "$state/mate.meta"); foreign=$(cat "$sub/state/.wake-queue")"
   [ -s "$state/.wake-queue" ] || fail "the parent notification was not durable"
   stall_count=$(grep -c 'secondmate-wake-loop-mate-' "$state/.wake-queue" || true)
   [ "$stall_count" -eq 1 ] || fail "the first parent checkpoint did not publish exactly one stall notification"
@@ -435,6 +435,201 @@ test_empty_prefix_mate_preserves_other_mate_receipt() {
   cmp -s "$row_before" "$stalled/state/.wake-queue" \
     || fail "overlapping mate receipt checks changed the foreign row"
   pass "empty prefix mate cleanup preserves another mate's stall receipt"
+}
+
+# Shared fake tmux for the secondmate wake-loop gate cases: the tick itself reads
+# no pane, but the surrounding watcher loop lists windows and captures panes.
+_secondmate_gate_fake_tmux() {  # <fakebin>
+  cat > "$1/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' "${FM_FAKE_TMUX_WINDOW:-}" ;;
+  capture-pane) cat "${FM_FAKE_TMUX_CAPTURE:-/dev/null}" 2>/dev/null ;;
+  display-message) printf '0\n' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$1/tmux"
+}
+
+_run_secondmate_gate_checkpoint() {  # <dir> <state> <threshold> <seconds> <outfile>
+  PATH="$1/fakebin:$PATH" FM_HOME="$1" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$2" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_CAPTURE="$1/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS="$3" FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_TASK_INBOX_GRACE_SECS=999999 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds "$4" > "$5" 2> "$5.err" || true
+}
+
+# The observed false-alarm class in one test: a healthy mate DRAINING its own
+# queue keeps the oldest row aged by enqueue time even though the loop is alive.
+# The stall must be measured from when a row was first seen oldest (freeze), not
+# from its enqueue age, and must reset the instant the oldest advances. The
+# threshold here (5s) stays above the run length (2s) so a row that merely sits
+# one checkpoint cannot reach it: the only way to fire is to wrongly use enqueue
+# age.
+test_secondmate_wake_loop_draining_queue_is_quiet() {
+  local dir state sub fakebin out
+  dir=$(make_case secondmate-wake-draining)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  _secondmate_gate_fake_tmux "$fakebin"
+  # An old-by-enqueue row (200s). Under the buggy age rule this fires at once;
+  # under freeze anchoring it is merely first-observed on this checkpoint.
+  printf '%s\t40\tcheck\trow-a\tcheck: row a\n' "$(( $(date +%s) - 200 ))" > "$sub/state/.wake-queue"
+  out="$dir/watch-a.out"
+  _run_secondmate_gate_checkpoint "$dir" "$state" 5 2 "$out"
+  ! grep -F 'secondmate wake-loop stalled' "$out" >/dev/null \
+    || fail "an old-by-enqueue but freshly-observed row fired before it was ever seen frozen"
+  [ ! -s "$state/.wake-queue" ] || fail "a freshly-observed foreign row published a durable stall wake"
+
+  # The mate acks row 40; row 41 (also old by enqueue) becomes the oldest. A
+  # frozen-age rule keeps firing on each successor; freeze anchoring resets.
+  printf '%s\t41\tcheck\trow-b\tcheck: row b\n' "$(( $(date +%s) - 150 ))" > "$sub/state/.wake-queue"
+  out="$dir/watch-b.out"
+  _run_secondmate_gate_checkpoint "$dir" "$state" 5 2 "$out"
+  ! grep -F 'secondmate wake-loop stalled' "$out" >/dev/null \
+    || fail "the oldest row advancing (a draining loop) still produced a stall notification"
+  [ ! -s "$state/.wake-queue" ] || fail "a draining mate published a durable stall wake"
+  pass "a between-turns, draining secondmate wake loop never trips the stall check"
+}
+
+# A provably busy pane is one long turn whose queue rows ack at its end, not a
+# stall. The same frozen row that fires when the pane reads idle must stay quiet
+# while a valid busy record is present.
+test_secondmate_wake_loop_busy_pane_is_quiet() {
+  local dir state sub fakebin out gen now epoch
+  dir=$(make_case secondmate-wake-busy)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  _secondmate_gate_fake_tmux "$fakebin"
+  now=$(date +%s)
+  epoch=$(( now - 200 ))
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$sub/state/.wake-queue"
+  gen=g1busytest
+  printf '%s\n' "$gen" > "$state/mate.busy-gen"
+  printf 'v1 gen=%s seq=1 state=busy source=claude-hook event=UserPromptSubmit ts=%s\n' \
+    "$gen" "$now" > "$state/mate.busy-state"
+  out="$dir/watch-busy.out"
+  _run_secondmate_gate_checkpoint "$dir" "$state" 1 4 "$out"
+  ! grep -F 'secondmate wake-loop stalled' "$out" >/dev/null \
+    || fail "a provably busy secondmate pane produced a stall notification"
+  [ ! -s "$state/.wake-queue" ] || fail "a busy secondmate pane published a durable stall wake"
+
+  # Prove the busy record is what suppressed it: flip it to idle and the same
+  # frozen row now surfaces.
+  printf 'v1 gen=%s seq=2 state=idle source=claude-hook event=Stop ts=%s\n' \
+    "$gen" "$now" > "$state/mate.busy-state"
+  out="$dir/watch-idle.out"
+  _run_secondmate_gate_checkpoint "$dir" "$state" 1 4 "$out"
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$out" >/dev/null \
+    || fail "an idle-recorded frozen loop was wrongly suppressed by the busy gate: $(cat "$out")"
+  pass "a busy secondmate pane suppresses the stall check while an idle one still surfaces"
+}
+
+# A declared external wait or terminal state is a deliberate stop, so a frozen
+# queue behind it is expected, not a stall.
+test_secondmate_wake_loop_declared_wait_is_quiet() {
+  local dir state sub fakebin out verb
+  for verb in paused blocked; do
+    dir=$(make_case "secondmate-wake-$verb")
+    state="$dir/state"
+    sub="$dir/secondmate"
+    fakebin="$dir/fakebin"
+    mkdir -p "$sub/state"
+    printf 'mate\n' > "$sub/.fm-secondmate-home"
+    printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+      "$sub" > "$state/mate.meta"
+    _secondmate_gate_fake_tmux "$fakebin"
+    printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 200 ))" > "$sub/state/.wake-queue"
+    printf '%s: waiting on the captain in sequence\n' "$verb" > "$state/mate.status"
+    # Mark the status already-surfaced so the generic signal scan does not
+    # preempt the gate under test with a signal wake for the new status file.
+    prime_status_seen "$state" "$state/mate.status" \
+      || fail "could not prime the $verb: status seen marker"
+    out="$dir/watch.out"
+    _run_secondmate_gate_checkpoint "$dir" "$state" 1 4 "$out"
+    ! grep -F 'secondmate wake-loop stalled' "$out" >/dev/null \
+      || fail "a declared $verb: secondmate produced a stall notification: $(cat "$out")"
+    [ ! -s "$state/.wake-queue" ] || fail "a declared $verb: secondmate published a durable stall wake"
+  done
+  pass "a declared paused/blocked secondmate suppresses the stall check"
+}
+
+# The genuine stall the brief names: an active mate whose own wake loop is wedged
+# mid-processing - a frozen queue behind an unread parent doorbell, an idle pane,
+# and a working (non-paused, non-terminal) state - must still surface.
+test_secondmate_wake_loop_wedged_with_unread_doorbell_notifies() {
+  local dir state sub fakebin out
+  dir=$(make_case secondmate-wake-wedged)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  mkdir -p "$sub/state" "$state/mate.inbox"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  _secondmate_gate_fake_tmux "$fakebin"
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 200 ))" > "$sub/state/.wake-queue"
+  # An unread parent instruction sitting in the mate's steering inbox, and a
+  # working state - the mate is supposed to be looping, but its queue is frozen.
+  printf 'FM v1 body\n' > "$state/mate.inbox/001.msg"
+  printf 'working: coordinating the runtime-SA change\n' > "$state/mate.status"
+  # Isolate the stall check from the generic signal scan for the new status file.
+  prime_status_seen "$state" "$state/mate.status" \
+    || fail "could not prime the working: status seen marker"
+  out="$dir/watch.out"
+  _run_secondmate_gate_checkpoint "$dir" "$state" 1 5 "$out"
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$out" >/dev/null \
+    || fail "a wedged wake loop with an unread doorbell did not surface: $(cat "$out")"
+  [ -s "$state/.wake-queue" ] || fail "the genuine-stall notification was not durable"
+  pass "a wedged secondmate wake loop with an unread doorbell still surfaces"
+}
+
+# One frozen mate fixture, checked with no explicit FM_SECONDMATE_WAKE_STALL_SECS
+# override under a small vs a large doorbell re-ring ladder: the derived frozen
+# threshold IS the ladder product (grace x ring-max), so the same frozen row
+# surfaces under a 2x1=2s ladder yet stays quiet under a 600x6 ladder within a
+# short run. Proves the threshold is derived, not a constant.
+_secondmate_ladder_case() {  # <name> <grace> <ring-max> <seconds> <outfile>
+  local dir state sub fakebin
+  dir=$(make_case "$1")
+  state="$dir/state"; sub="$dir/secondmate"; fakebin="$dir/fakebin"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  _secondmate_gate_fake_tmux "$fakebin"
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 200 ))" > "$sub/state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_TASK_INBOX_GRACE_SECS="$2" FM_TASK_INBOX_RING_MAX="$3" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds "$4" > "$5" 2> "$5.err" || true
+}
+
+test_secondmate_wake_loop_threshold_derives_from_doorbell_ladder() {
+  local out
+  out="$TMP_ROOT/ladder-small.out"
+  _secondmate_ladder_case secondmate-wake-ladder-small 2 1 6 "$out"
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$out" >/dev/null \
+    || fail "the derived doorbell-ladder threshold (2x1=2s) did not surface a frozen row: $(cat "$out")"
+
+  out="$TMP_ROOT/ladder-large.out"
+  _secondmate_ladder_case secondmate-wake-ladder-large 600 6 3 "$out"
+  ! grep -F 'secondmate wake-loop stalled' "$out" >/dev/null \
+    || fail "a large derived threshold (600x6) surfaced a row frozen for only a few seconds: $(cat "$out")"
+  pass "the frozen-stall threshold derives from the doorbell re-ring ladder, not a constant"
 }
 
 test_drain_asserts_watcher_liveness() {
@@ -999,6 +1194,11 @@ test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt
+test_secondmate_wake_loop_draining_queue_is_quiet
+test_secondmate_wake_loop_busy_pane_is_quiet
+test_secondmate_wake_loop_declared_wait_is_quiet
+test_secondmate_wake_loop_wedged_with_unread_doorbell_notifies
+test_secondmate_wake_loop_threshold_derives_from_doorbell_ladder
 test_self_announced_append_guards
 test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
