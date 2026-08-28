@@ -177,7 +177,7 @@ test_shields_reaped_on_failure_exit() {
 # skip a recorded path that no longer exists, and never double-shield one path a
 # secondmate records as both worktree= and home=.
 test_enumeration_covers_worktree_and_home_skips_vanished() {
-  local rec out status owned sm gone up_owned up_sm up_gone up_sm_count
+  local rec out status owned sm gone up_owned up_gone up_sm_count
   rec=$(make_case enumerate)
   read_case "$rec"
   owned="$CASE_DIR/owned-wt"; sm="$CASE_DIR/sm-home"; gone="$CASE_DIR/vanished-wt"
