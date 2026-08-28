@@ -309,7 +309,12 @@ if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
 fi
 case "$*" in
   list-windows*)
-    sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta
+    # Windows exist for whatever the EFFECTIVE state dir records: the agent
+    # liveness classifier greps list-windows before it reads the pane, and the
+    # product resolves metas through FM_STATE_OVERRIDE, so a fixture that listed
+    # only FM_HOME/state would pose an override-state endpoint as missing while
+    # its pane answers as a live agent.
+    sed -n 's/^window=[^:]*://p' "${FM_STATE_OVERRIDE:-${FM_HOME:?}/state}"/*.meta 2>/dev/null
     exit 0
     ;;
   *display-message*'#{pane_current_command}'*) printf '%s\n' codex; exit 0 ;;
