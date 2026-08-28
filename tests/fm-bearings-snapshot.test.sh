@@ -1266,6 +1266,50 @@ test_oversized_secondmate_projection_survives_arg_limit() {
   pass "an oversized secondmate projection flows through aggregation without hitting the argv size limit"
 }
 
+test_oversized_status_event_and_decisions_survive_arg_limit() {
+  # A persistent secondmate's parent status log is uncapped: a single event line
+  # can exceed the kernel per-argument size limit (~128 KiB) and the durable
+  # keyed decision fold can accumulate a large never-resolved open set. Both
+  # must reach jq through temp files, never argv. Before the fix, the oversized
+  # event silently dropped the task row from tasks[] and degraded the secondmate
+  # record to null instead of failing loudly - a wrong snapshot without error.
+  local home mate fakebin canonical pad i
+  home=$(make_home oversized-status-event)
+  mate="$TMP_ROOT/oversized-status-event-home"
+  make_valid_secondmate_home chatty "$mate"
+  append_secondmate_registry "$home" chatty "$mate"
+  fm_write_secondmate_meta "$home/state/chatty.meta" "$mate" "firstmate:fm-chatty" sample
+  pad=$(printf 'x%.0s' $(seq 1 200000))
+  {
+    i=1
+    while [ "$i" -le 40 ]; do
+      printf 'needs-decision [key=ask-%03d]: unresolved captain question %03d\n' "$i" "$i"
+      i=$((i + 1))
+    done
+    printf 'working [key=chatty]: %s\n' "$pad"
+  } > "$home/state/chatty.status"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "oversized status event crashed the snapshot"
+  printf '%s' "$canonical" | jq -e '
+    ([.tasks[] | select(.id == "chatty")] | length) == 1
+    and ([.tasks[] | select(.id == "chatty")][0]
+         | (.paths.status_log.last_event.raw | length) > 131072
+         and (.hints.open_decisions | length) == 40
+         and .hints.pending_decision == true)
+    and ([.secondmate_current.records[] | select(.id == "chatty")] | length) == 1
+    and ([.secondmate_current.records[] | select(.id == "chatty")][0]
+         | .provenance.selected == "structured-home"
+         and .registered == true
+         and (.parent_event.raw | length) > 131072
+         and (.parent_event.open_decisions | length) == 40
+         and (.parent_event.reconciliation.decisions | length) == 40)
+  ' >/dev/null \
+    || fail "oversized status event or decision set was dropped or nulled: $(printf '%s' "$canonical" | jq -c '{task_ids:[.tasks[].id],records:[.secondmate_current.records[] | if type == "object" then {id,selected:.provenance.selected} else . end]}')"
+  pass "an oversized status event line and large open-decision set survive aggregation without argv"
+}
+
 test_normalsize_snapshot_matches_prechange_baseline() {
   # Byte-for-byte parity between the fixed snapshot and the pre-change
   # implementation on a normal-size fixture proves the E2BIG refactor (jq
@@ -2041,6 +2085,7 @@ test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_oversized_secondmate_projection_survives_arg_limit
+test_oversized_status_event_and_decisions_survive_arg_limit
 test_normalsize_snapshot_matches_prechange_baseline
 test_landed_default_balances_dominant_and_sparse_homes
 test_landed_default_refills_capacity_after_sparse_homes_exhaust
