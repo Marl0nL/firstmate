@@ -115,7 +115,7 @@ The in-flight predicate is deliberately identical to `fm-teardown.sh`'s secondma
 - **Quiet time and a drained inbox.**
   The poll records the newest message mtime it has seen (`last_seen_msg`) *before* anything is drained, so a stand-down can never measure quiet time from an inbox that has since been emptied.
 - **Inconclusive liveness.**
-  `unknown` licenses nothing in either direction, for the same reason `bin/fm-bootstrap.sh`'s secondmate-liveness sweep acts only on a confident `dead`.
+  `unknown` licenses nothing in either direction, for the same reason `bin/fm-bootstrap.sh`'s secondmate-liveness sweep acts only on a confident verdict, never an ambiguous one.
 
 ## The liveness-sweep exemption
 

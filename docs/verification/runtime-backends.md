@@ -446,7 +446,7 @@ fm_backend_herdr_pane_agent_state  -> no-agent                                  
 ```
 
 The blocked toast is delivered only when the global config enables it: with `[ui.toast]` at its default `delivery = "off"`, `notification show` returns `{"reason":"disabled","shown":false}` (the call still succeeds).
-The captain-consented attention config - `agent_panel_sort = "priority"`, `[ui.toast] delivery = "herdr"`, `[ui.sound] enabled = true` - is the ONE authorized global-config edit and is applied by `bin/fm-herdr-attention-config.sh` (dated backup, `herdr config check` validation with restore-on-failure, then `herdr server reload-config`); `herdr --default-config` confirms the three keys and their accepted values (`agent_panel_sort` one of `spaces`/`workspaces`/`priority`).
+The captain-consented attention config - `agent_panel_sort = "priority"`, `[ui.toast] delivery = "herdr"`, `[ui.sound] enabled = true` - is applied by `bin/fm-herdr-attention-config.sh`, the single owner of firstmate's global Herdr config edits (its fourth managed key is recorded under "Restored-manual-mode detection" below), with a dated backup, `herdr config check` validation with restore-on-failure, then `herdr server reload-config`; `herdr --default-config` confirms the three keys and their accepted values (`agent_panel_sort` one of `spaces`/`workspaces`/`priority`).
 The attention-sorted panel floating a blocked crew to the top is a server-global GUI behavior not scriptable from an isolated lab session, so it stays a captain visual confirmation after that helper runs; this harness proves the data the panel sorts on.
 Refresh this section with:
 

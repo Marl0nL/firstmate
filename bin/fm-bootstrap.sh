@@ -45,6 +45,11 @@
 #          fm_backend_agent_state: skipped distinguishes an existing ambiguous
 #          process, an unreadable target, and an unverified backend; respawn
 #          failed names whether the endpoint was missing or agent-less.
+#          A live claude/herdr mate whose fm_backend_agent_launch_health verdict
+#          is degraded (resumed by Herdr without its launch flags, frozen in
+#          manual permission mode) is cycled through the guarded exit and a
+#          --secondmate respawn; its skipped reasons name work in flight or a
+#          failed exit, and its respawn-failed cause is the manual-mode cycle.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
