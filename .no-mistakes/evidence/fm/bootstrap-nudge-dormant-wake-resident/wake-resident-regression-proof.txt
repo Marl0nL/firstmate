@@ -1,0 +1,12 @@
+Regression proof for the round-1 review fix "dead-verdict-trusted-for-unverified-harness":
+the new predicate test in tests/fm-wake-resident.test.sh was run against the
+pre-review-fix tree (194a07b, extracted via git archive) with only the test file
+copied forward. It fails there and passes at target HEAD (b15c26c).
+
+At 194a07b (fix absent):
+  not ok - a dead verdict from a harness with no verified classifier must not suppress the nudge (missing: 'KEEP')
+  suite exit: 1
+
+At target b15c26c (fix present):
+  ok - a live raw-launch secondmate misread as dead is still nudged
+  suite exit: 0  (see fm-wake-resident-suite.txt for the full transcript)

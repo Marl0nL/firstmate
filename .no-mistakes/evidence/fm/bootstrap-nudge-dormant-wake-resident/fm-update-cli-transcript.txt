@@ -1,0 +1,7 @@
+$ fm-update.sh   # one live secondmate (fm-sm1), one dormant wake-resident (fm-napper)
+firstmate: updated 192ea4b..e5105a7 (instructions changed: AGENTS.md, bin, .agents/skills)
+secondmate napper: updated 192ea4b..e5105a7 (instructions changed: AGENTS.md, bin, .agents/skills)
+secondmate sm1: updated 192ea4b..e5105a7 (instructions changed: AGENTS.md, bin, .agents/skills)
+nudge-skipped: fm-napper - dormant wake-resident - reads instructions fresh on raise
+reread-firstmate: yes
+nudge-secondmates: fm-sm1

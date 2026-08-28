@@ -1,0 +1,31 @@
+ok - the poll is inert and silent until a home opts in
+ok - enable wires and registers both check shims through the trust path
+ok - a message to a dormant secondmate produces exactly one throttled raise line
+ok - a resident secondmate's mail is its own to drain, with a main-home backstop past grace
+ok - the in-home shim surfaces a pending message so a resident agent sees it on its own turn
+ok - the first message raises a seeded home that has never been launched
+ok - raise is bin/fm-spawn.sh <name> --secondmate and nothing else
+ok - two wakes arriving together raise exactly one advisor
+ok - an inconclusive liveness read licenses neither a raise nor a duplicate supervisor
+ok - no stand-down while the secondmate has work in flight, with or without --force
+ok - no stand-down while a message is unanswered, even with --force
+ok - no stand-down before the configured quiet period has actually elapsed
+ok - a stand-down of an already-self-exited agent records dormancy with no pane submission
+ok - the already-exited success path still refuses work in flight and unanswered mail
+ok - a send refusal whose re-read finds a bare shell records the stand-down instead of failing
+ok - a send failure whose re-read still sees a resident agent stays a failure
+ok - an idle stand-down exits the process and leaves home, lease, meta, backlog and status intact
+ok - the persistence invariant catches removal and truncation, and treats growth as normal
+ok - the next message wakes it again through the same path
+ok - stand-down refuses a harness whose exit is not a submittable line, rather than half-sending it
+ok - a stand-down whose exit never confirms leaves the agent alone instead of killing it
+ok - disable removes the wiring and nothing else
+ok - the poll goes silent in away mode rather than queueing work the daemon cannot authorize
+ok - unsafe names, globs, bad values, and duplicate records are dropped rather than guessed at
+ok - the session-start liveness sweep leaves a dormant wake-resident secondmate asleep
+ok - a dormant wake-resident home is dropped from both nudge paths
+ok - a resident wake-resident home is nudged exactly as today
+ok - the bare-shell guard is bootstrap-only; the dormant-only skip leaves ordinary shells on the list
+ok - a remote secondmate endpoint is never treated as a local nudge skip
+ok - a live raw-launch secondmate misread as dead is still nudged
+ok - the executable exit-command table agrees with harness-adapters

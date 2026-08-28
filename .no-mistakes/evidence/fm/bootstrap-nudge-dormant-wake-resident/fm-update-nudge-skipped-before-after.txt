@@ -1,0 +1,25 @@
+End-to-end demo: fm-update.sh caller action summary with a dormant wake-resident secondmate
+===========================================================================================
+
+World built by /tmp/fm-update-demo.sh against each commit's real bin/fm-update.sh:
+- napper: wake-resident secondmate whose endpoint is absent (residency reads dormant).
+- sm1: ordinary live sibling secondmate.
+Both homes are behind an instruction change; output below is verbatim, as the
+/updatefirstmate skill parses it.
+
+=== BASE 9b0620a (before the change) ===
+--- fm-update.sh output (verbatim) ---
+firstmate: updated 0cfa0e6..1906a9c (instructions changed: AGENTS.md, bin, .agents/skills)
+secondmate napper: updated 0cfa0e6..1906a9c (instructions changed: AGENTS.md, bin, .agents/skills)
+secondmate sm1: updated 0cfa0e6..1906a9c (instructions changed: AGENTS.md, bin, .agents/skills)
+reread-firstmate: yes
+nudge-secondmates: fm-napper fm-sm1
+
+=== TARGET 3cb109c (this change) ===
+--- fm-update.sh output (verbatim) ---
+firstmate: updated bac9839..711d015 (instructions changed: AGENTS.md, bin, .agents/skills)
+secondmate napper: updated bac9839..711d015 (instructions changed: AGENTS.md, bin, .agents/skills)
+secondmate sm1: updated bac9839..711d015 (instructions changed: AGENTS.md, bin, .agents/skills)
+nudge-skipped: fm-napper - dormant wake-resident - reads instructions fresh on raise
+reread-firstmate: yes
+nudge-secondmates: fm-sm1

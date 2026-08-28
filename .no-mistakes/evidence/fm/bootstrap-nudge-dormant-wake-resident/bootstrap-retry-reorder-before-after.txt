@@ -1,0 +1,16 @@
+Scenario: dormant wake-resident secondmate 'napper' (endpoint absent) holds a
+pending reread-nudge marker recorded at commit c1; its home HEAD advanced to c2
+while dormant. Bootstrap's retry path runs on session start.
+
+=== base-9b0620a (before this change) ===
+NUDGE_SECONDMATES: secondmate napper: send failed: retry target is not at recorded instruction commit
+retry marker: retained (nudge still retries once the home is live again)
+
+=== pre-review-fix-194a07b (suppression after commit check) ===
+NUDGE_SECONDMATES: secondmate napper: send failed: retry target is not at recorded instruction commit
+retry marker: retained (nudge still retries once the home is live again)
+
+=== target-HEAD (suppression before commit check) ===
+BOOTSTRAP_INFO: skipped fm-napper: dormant wake-resident - reads instructions fresh on raise
+retry marker: retained (nudge still retries once the home is live again)
+

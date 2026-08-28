@@ -1,0 +1,11 @@
+ok - T1 main + secondmate fast-forward (single-parent), reread + nudge signalled
+ok - T3 reread gates on instruction surface, nudge on advancement
+ok - T12 dormant wake-resident secondmate is annotated and dropped from the nudge list
+ok - T4 dirty secondmate skipped, local edit preserved
+ok - T5 diverged secondmate skipped, local commit preserved
+ok - T6 idempotent: a second run is a no-op
+ok - T7 registry backstop resolves, dedups meta+registry, excludes the firstmate repo
+ok - T9 firstmate off its default branch is skipped, not forced
+ok - T10 firstmate detached HEAD is skipped
+ok - T11 unsafe secondmate home is not fast-forwarded
+# all fm-update tests passed

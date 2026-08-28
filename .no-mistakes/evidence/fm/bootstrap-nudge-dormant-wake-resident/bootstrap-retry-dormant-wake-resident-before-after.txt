@@ -1,0 +1,32 @@
+End-to-end demo: bootstrap reread-nudge retry path vs a dormant wake-resident secondmate
+======================================================================================
+
+World built by /tmp/fm-retry-demo.sh against each commit's real bin/fm-bootstrap.sh:
+- napper: wake-resident, endpoint absent (dormant), holds a pending nudge retry marker
+  recorded at commit c2; its home was fast-forwarded to c3 while it slept.
+- sm-live: ordinary live codex secondmate, behind at c2, crosses an instruction change.
+Fake tmux models the endpoints (napper's window absent, sm-live's pane runs codex).
+
+=== BASE 9b0620a (before the change) ===
+--- nudge-relevant bootstrap output ---
+NUDGE_SECONDMATES: secondmate napper: send failed: retry target is not at recorded instruction commit
+BOOTSTRAP_INFO: nudged fm-sm-live with 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
+--- state after bootstrap ---
+napper retry marker: RETAINED (will retry once the home is live again)
+napper steering inbox: none (no stranded pending-reply expectation)
+
+=== MID 194a07b (guard added, before the review-round retry-order fix) ===
+--- nudge-relevant bootstrap output ---
+NUDGE_SECONDMATES: secondmate napper: send failed: retry target is not at recorded instruction commit
+BOOTSTRAP_INFO: nudged fm-sm-live with 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
+--- state after bootstrap ---
+napper retry marker: RETAINED (will retry once the home is live again)
+napper steering inbox: none (no stranded pending-reply expectation)
+
+=== TARGET 3cb109c (this change) ===
+--- nudge-relevant bootstrap output ---
+BOOTSTRAP_INFO: skipped fm-napper: dormant wake-resident - reads instructions fresh on raise
+BOOTSTRAP_INFO: nudged fm-sm-live with 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
+--- state after bootstrap ---
+napper retry marker: RETAINED (will retry once the home is live again)
+napper steering inbox: none (no stranded pending-reply expectation)
