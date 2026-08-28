@@ -90,7 +90,7 @@ make_case() {
 }
 
 read_case() {
-  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR CONTESTED FAKEBIN_DIR KILL_LOG FAKE_STATE <<EOF
+  IFS='|' read -r _ HOME_DIR PROJ_DIR CONTESTED FAKEBIN_DIR KILL_LOG FAKE_STATE <<EOF
 $1
 EOF
 }
@@ -150,7 +150,7 @@ test_unconfirmed_teardown_prints_remedy() {
   [ "$status" -ne 0 ] || fail "a spawn onto an owned slot must exit non-zero"$'\n'"--- output ---"$'\n'"$out"
   assert_grep "fm-intruder-d4" "$KILL_LOG" "teardown must still be attempted"
   assert_contains "$out" "could not tear down" "an unconfirmed teardown must warn"
-  assert_contains "$out" "tmux kill-window -t 'firstmate:fm-intruder-d4'" "the warning must carry the exact one-line remedy naming the leftover"
+  assert_contains "$out" "tmux kill-window -t '=firstmate:=fm-intruder-d4'" "the warning must carry the exact one-line remedy naming the leftover"
   pass "fm-spawn: an unconfirmed endpoint teardown prints the exact one-line remedy"
 }
 
@@ -167,6 +167,7 @@ test_retry_on_residue_gives_actionable_message() {
   assert_contains "$out" "already exists" "the refusal must report the duplicate window"
   assert_contains "$out" "fm-stuck-e5" "the refusal must name the leftover window"
   assert_contains "$out" "tmux kill-window -t" "the refusal must carry the exact remedy command"
+  [ ! -s "$KILL_LOG" ] || fail "a dup refusal must never auto-kill the pre-existing window (it may belong to a live task)"
   pass "fm-spawn: a retry on a leftover window is refused with an actionable, named remedy"
 }
 

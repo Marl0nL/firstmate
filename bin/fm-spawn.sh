@@ -734,14 +734,18 @@ parse_orca_worktree_result() {
 }
 
 # spawn_endpoint_remedy_line: the exact one-line command to remove the leftover
-# endpoint named by $BACKEND/$T, printed only when automatic teardown could not be
-# confirmed. $T is "<session/container>:<pane/window/surface>"; for tmux that is
-# session:window, for the others session:pane (closing the only pane closes its tab).
+# endpoint named by $BACKEND/$T, printed only when automatic teardown could not
+# be confirmed. $T is "<session/container>:<pane/window/surface>". tmux targets
+# the window with '=' exact-match (a bare name would prefix-match a sibling live
+# window); herdr closes the pane, which closes its tab; zellij must close the
+# TAB by its create-time id (ZELLIJ_TAB_ID, in scope whenever this prints -
+# closing a zellij tab's only pane leaves an empty ghost tab that still blocks
+# the label); cmux closes the whole workspace.
 spawn_endpoint_remedy_line() {
   case "$BACKEND" in
-    tmux) printf "tmux kill-window -t '%s'" "$T" ;;
+    tmux) printf "tmux kill-window -t '=%s:=%s'" "${T%%:*}" "${T#*:}" ;;
     herdr) printf "herdr pane close '%s' --session '%s'" "${T#*:}" "${T%%:*}" ;;
-    zellij) printf "zellij --session '%s' action close-pane --pane-id '%s'" "${T%%:*}" "${T#*:}" ;;
+    zellij) printf "zellij --session '%s' action close-tab-by-id '%s'" "${T%%:*}" "${ZELLIJ_TAB_ID:-}" ;;
     cmux) printf "cmux close-workspace --workspace '%s'" "${T%%:*}" ;;
     *) printf "remove the leftover %s endpoint '%s'" "$BACKEND" "$T" ;;
   esac
