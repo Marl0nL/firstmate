@@ -89,7 +89,7 @@ fm_backend_tmux_container_ensure() {
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
   local ses=$1 wname=$2 proj_abs=$3 wid
   if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
-    echo "error: window $ses:$wname already exists" >&2
+    echo "error: window $ses:$wname already exists; a previous spawn likely left it behind. Remove it before retrying: tmux kill-window -t '$ses:$wname'" >&2
     return 1
   fi
   wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1

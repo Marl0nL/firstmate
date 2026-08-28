@@ -2246,7 +2246,7 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
       [ -n "$dup" ] || continue
       dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
       if [ -z "$dup_pane" ] || ! fm_backend_herdr_tab_is_husk "$session" "$dup_pane"; then
-        echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
+        echo "error: herdr tab '$label' (tab $dup) already exists in workspace $wsid (session $session) and is not a reclaimable husk; a previous spawn may have left it behind. Remove it before retrying: herdr tab close $dup --session $session" >&2
         return 1
       fi
       dup_tab_ids="${dup_tab_ids}${dup}"$'\n'

@@ -568,7 +568,9 @@ test_create_task_refuses_duplicate_label() {
   status=$?
   [ "$status" -ne 0 ] || fail "create_task should refuse an existing tab label (herdr itself does not enforce uniqueness)"
   assert_contains "$out" "already exists" "create_task did not report the duplicate label"
-  pass "fm_backend_herdr_create_task: refuses a duplicate tab label (herdr's own tab create has no uniqueness check)"
+  assert_contains "$out" "tab w1:t2" "the refusal must name the leftover tab id"
+  assert_contains "$out" "herdr tab close w1:t2 --session fmtest" "the refusal must carry the exact remedy command for the leftover"
+  pass "fm_backend_herdr_create_task: refuses a duplicate tab label with an actionable, named remedy"
 }
 
 # --- restored-layout husk close-and-replace (herdr session.json restore) -----
