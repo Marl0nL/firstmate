@@ -556,11 +556,13 @@ test_secondmate_wake_loop_busy_pane_is_quiet() {
   pass "a busy secondmate pane re-anchors the freeze clock and an idle one surfaces only after a fresh window"
 }
 
-# A declared external wait or terminal state is a deliberate stop, so a frozen
-# queue behind it is expected, not a stall.
+# A declared external wait (paused) or a verified captain-held transfer is a
+# deliberate stop that carries its own independent bound, so a frozen queue
+# behind it is expected, not a stall. A terminal verb is deliberately NOT
+# suppressed - that is the separate terminal-verb-wedge test below.
 test_secondmate_wake_loop_declared_wait_is_quiet() {
   local dir state sub fakebin out verb
-  for verb in paused blocked; do
+  for verb in paused captain-held; do
     dir=$(make_case "secondmate-wake-$verb")
     state="$dir/state"
     sub="$dir/secondmate"
@@ -582,7 +584,41 @@ test_secondmate_wake_loop_declared_wait_is_quiet() {
       || fail "a declared $verb: secondmate produced a stall notification: $(cat "$out")"
     [ ! -s "$state/.wake-queue" ] || fail "a declared $verb: secondmate published a durable stall wake"
   done
-  pass "a declared paused/blocked secondmate suppresses the stall check"
+  pass "a declared paused/captain-held secondmate suppresses the stall check"
+}
+
+# F1 regression (captain-commissioned adversarial review, FIX-FIRST): a terminal
+# verb is a ROUTINE report line in a persistent secondmate's reply log
+# (done:/failed: end every routed answer), not a lifecycle stop, so a wake loop
+# wedged behind such a last line must STILL surface - otherwise a months-old
+# done: line silently disables stall detection forever, a missed alarm the
+# captain rules out. Only paused/captain-held (with an independent ~1h bound)
+# suppress; done/failed/blocked/needs-decision all fire on a genuine freeze.
+test_secondmate_wake_loop_terminal_verb_wedge_notifies() {
+  local dir state sub fakebin out verb
+  for verb in "done" "failed" "blocked" "needs-decision"; do
+    dir=$(make_case "secondmate-wake-term-$verb")
+    state="$dir/state"
+    sub="$dir/secondmate"
+    fakebin="$dir/fakebin"
+    mkdir -p "$sub/state"
+    printf 'mate\n' > "$sub/.fm-secondmate-home"
+    printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+      "$sub" > "$state/mate.meta"
+    _secondmate_gate_fake_tmux "$fakebin"
+    printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 200 ))" > "$sub/state/.wake-queue"
+    # The mate's last log line is a terminal report verb, but its own wake loop
+    # is wedged with a frozen queue row and an idle pane.
+    printf '%s: routed request answered - then the loop wedged\n' "$verb" > "$state/mate.status"
+    prime_status_seen "$state" "$state/mate.status" \
+      || fail "could not prime the $verb: status seen marker"
+    out="$dir/watch.out"
+    _run_secondmate_gate_checkpoint "$dir" "$state" 1 5 "$out"
+    grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$out" >/dev/null \
+      || fail "a wedge behind a $verb: last line was a missed alarm (did not surface): $(cat "$out")"
+    [ -s "$state/.wake-queue" ] || fail "the $verb: wedge notification was not durable"
+  done
+  pass "a wedged secondmate wake loop behind a terminal-verb last line still surfaces"
 }
 
 # The reported false-fire class at its root: freeze time must not accrue through
@@ -1276,6 +1312,7 @@ test_empty_prefix_mate_preserves_other_mate_receipt
 test_secondmate_wake_loop_draining_queue_is_quiet
 test_secondmate_wake_loop_busy_pane_is_quiet
 test_secondmate_wake_loop_declared_wait_is_quiet
+test_secondmate_wake_loop_terminal_verb_wedge_notifies
 test_secondmate_wake_loop_pause_resume_does_not_false_fire
 test_secondmate_wake_loop_wedged_with_unread_doorbell_notifies
 test_secondmate_wake_loop_threshold_derives_from_doorbell_ladder

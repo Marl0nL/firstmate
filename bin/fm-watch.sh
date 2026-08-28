@@ -488,17 +488,20 @@ secondmate_oldest_queue_row() {  # <queue-path>
 # cannot turn every observed row into an instant stall; an explicit positive
 # FM_SECONDMATE_WAKE_STALL_SECS still overrides it verbatim.
 #
-# Three health gates keep a frozen-but-healthy shape quiet: a provably busy pane
-# is mid-turn (rows are acked at turn end); a declared paused/captain-held or
-# terminal state is a deliberate stop; and a fully idle mate with nothing pending
-# has an empty queue (skipped above) rather than a frozen row. The busy and
-# declared-state gates RE-ANCHOR the freeze clock rather than merely muting the
-# wake: every suppressed poll rewrites the progress marker to now, so freeze
-# time accrues only while the mate is unpaused, idle, and expected to be
-# draining, and a healthy resume from a long pause or turn starts a fresh
-# threshold window instead of firing on its first idle poll. Observation stays
-# read-only on the foreign queue; one parent receipt still suppresses repeats for
-# a given frozen row.
+# Two health gates keep a frozen-but-healthy shape quiet: a provably busy pane
+# is mid-turn (rows are acked at turn end); and a declared paused/captain-held
+# state is a deliberate stop that carries its own independent bound. A fully idle
+# mate with nothing pending has an empty queue (skipped above) rather than a
+# frozen row. The busy and paused/captain-held gates RE-ANCHOR the freeze clock
+# rather than merely muting the wake: every suppressed poll rewrites the progress
+# marker to now, so freeze time accrues only while the mate is unpaused, idle,
+# and expected to be draining, and a healthy resume from a long pause or turn
+# starts a fresh threshold window instead of firing on its first idle poll.
+# A terminal verb (done/failed/blocked/needs-decision) is deliberately NOT a gate:
+# on a persistent secondmate it is a routine report line, not a lifecycle stop,
+# so a wedge behind it must still surface (missed alarms are the failure the
+# captain rules out). Observation stays read-only on the foreign queue; one
+# parent receipt still suppresses repeats for a given frozen row.
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
   local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason
@@ -553,15 +556,26 @@ EOF
       fm_wake_secondmate_progress_write "$task" "$row_key" "$now" || return 1
       continue
     fi
-    # A declared pause, captain-held transfer, or terminal state is a deliberate
-    # stop, and a provably busy pane is one long turn whose rows ack at its end.
-    # Either suppression RE-ANCHORS the freeze clock before the threshold is
-    # even compared, so freeze time accrues only while the mate is unpaused,
-    # idle, and expected to be draining - a resume never inherits pause- or
-    # busy-time as instant stall age. Both reads run only for a frozen (non-
-    # advancing) oldest row; an advancing row already continued above.
+    # A declared pause or captain-held transfer is a deliberate stop with its own
+    # independent bound (the pause-resurface cadence re-surfaces a forgotten one),
+    # and a provably busy pane is one long turn whose rows ack at its end. Either
+    # suppression RE-ANCHORS the freeze clock before the threshold is even
+    # compared, so freeze time accrues only while the mate is unpaused, idle, and
+    # expected to be draining - a resume never inherits pause- or busy-time as
+    # instant stall age. Both reads run only for a frozen (non-advancing) oldest
+    # row; an advancing row already continued above.
+    #
+    # A TERMINAL verb (done/failed/blocked/needs-decision) deliberately does NOT
+    # suppress: for a persistent secondmate a terminal verb is a routine report
+    # event in its reply log (done:/failed: end every routed answer), not a
+    # lifecycle stop, so a wake loop wedged behind a months-old done: line would
+    # otherwise be a permanently missed alarm with nothing else bounding it. The
+    # captain's stated priority is that a false alarm on a legitimately-stopped
+    # mate is acceptable but a missed alarm is not, so a frozen queue behind a
+    # terminal verb still surfaces. The one true lifecycle stop, retirement,
+    # removes the meta and this loop skips the mate entirely.
     last_state=$(last_state_status_line "$STATE/$task.status")
-    if status_is_paused_or_captain_held "$last_state" || status_is_terminal_verb "$last_state"; then
+    if status_is_paused_or_captain_held "$last_state"; then
       fm_wake_secondmate_progress_write "$task" "$row_key" "$now" || return 1
       continue
     fi
