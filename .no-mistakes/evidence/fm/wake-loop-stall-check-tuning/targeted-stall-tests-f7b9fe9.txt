@@ -1,0 +1,17 @@
+# Targeted secondmate wake-loop stall tests at target commit f7b9fe9
+# (10 stall-check tests from tests/fm-wake-queue.test.sh, driven end-to-end
+#  through bin/fm-watch-checkpoint.sh; extracted into a /tmp runner so the
+#  rest of the wake-queue suite is not run)
+
+ok - foreign secondmate queue stalls notify once, remain byte-stable, and stay quiet when empty or healthy
+ok - secondmate stall markers reject symlinks without touching their targets
+ok - stall publication acknowledgement closes the pre-marker crash window
+ok - empty prefix mate cleanup preserves another mate's stall receipt
+ok - a between-turns, draining secondmate wake loop never trips the stall check
+ok - a busy secondmate pane re-anchors the freeze clock and an idle one surfaces only after a fresh window
+ok - a declared paused/blocked secondmate suppresses the stall check
+ok - a declared pause re-anchors the freeze clock so a healthy resume never false-fires
+ok - a wedged secondmate wake loop with an unread doorbell still surfaces
+ok - the frozen-stall threshold derives from the doorbell re-ring ladder, floored at 60s, not a constant
+
+# overall exit: 0

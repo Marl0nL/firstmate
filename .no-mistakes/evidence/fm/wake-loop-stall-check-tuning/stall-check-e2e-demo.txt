@@ -1,0 +1,24 @@
+================================================================
+SCENARIO 1 - the observed false-alarm class: a HEALTHY secondmate
+draining its own wake queue between turns. Each successive oldest
+row is old by enqueue time (200s/150s), the loop is alive.
+================================================================
+--- watcher checkpoint poll (oldest row seq=40, enqueued 200s ago) ---
+checkpoint: no actionable wake within 2s
+--- mate acks row 40; next poll (oldest advanced to seq=41, enqueued 150s ago) ---
+check: rearm-resurface
+RESULT: quiet - no "secondmate wake-loop stalled" notification for the healthy draining mate
+
+================================================================
+SCENARIO 2 - a GENUINE stall: idle pane, working: state, an unread
+parent doorbell in the inbox, and the same oldest row frozen with
+no ack progress past the threshold.
+================================================================
+--- watcher checkpoint (threshold 1s, row seq=7 frozen across polls) ---
+check: secondmate wake-loop stalled: mate=mate row=7 age=1s
+--- durable parent wake queue after the alarm ---
+1787898647	1	check	secondmate-wake-loop-mate-1787898446-7	check: secondmate wake-loop stalled: mate=mate row=7 age=1s
+--- a later checkpoint: the same frozen row must NOT re-fire (one-shot) ---
+check: rearm-resurface
+--- foreign queue byte-check: the mate's own queue was never rewritten ---
+1787898446	7	check	routed	check: routed row

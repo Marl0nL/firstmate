@@ -1,0 +1,14 @@
+# Regression direction proof: the new tests fail before their fix and pass after.
+# Old code trees were extracted read-only via `git archive` into /tmp and the
+# NEW test functions from this branch were run against them.
+
+## 1. Base commit 459c822 (before the whole change) - the core false-alarm class:
+##    new test test_secondmate_wake_loop_draining_queue_is_quiet
+not ok - an old-by-enqueue but freshly-observed row fired before it was ever seen frozen
+
+## 2. Intermediate commit c343b37 (before the review-round fix) - freeze time
+##    accrued through a declared pause and fired on the healthy resume:
+##    new test test_secondmate_wake_loop_pause_resume_does_not_false_fire
+not ok - pause-phase freeze accrual fired on the healthy resume: check: secondmate wake-loop stalled: mate=mate row=7 age=8s
+
+## 3. Target commit f7b9fe9: both tests pass (see targeted-stall-tests-f7b9fe9.txt)
