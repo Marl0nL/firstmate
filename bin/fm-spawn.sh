@@ -884,7 +884,7 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_ENDPOINT_ABORT_CLEANUP" = 1 ]; then
     SPAWN_ENDPOINT_ABORT_CLEANUP=0
     if [ -n "${BACKEND:-}" ] && [ -n "${T:-}" ]; then
-      fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
+      fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null || true
       if fm_backend_target_exists "$BACKEND" "$T" 2>/dev/null; then
         echo "warning: could not tear down the $BACKEND endpoint '$T' left by the failed spawn of $ID; remove it before retrying: $(spawn_endpoint_remedy_line)" >&2
       fi
@@ -2502,7 +2502,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # slot); the shields have done their job and must not linger into the launch.
   spawn_preshield_stop
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within 60s; the spawn's endpoint was cleaned up - re-run the spawn, or run 'treehouse get' manually to diagnose the worktree pool" >&2
     exit 1
   fi
 
