@@ -892,6 +892,40 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   done
   exit "$rc"
 fi
+# Positional arity, checked before indexing POS at all so a missing or extra
+# positional is a usage refusal, not a bash "unbound variable" trace: the
+# arity contract differs per form (usage() above owns the authoritative
+# synopsis), so each form is checked against its own rule rather than a
+# blanket count.
+[ "${#POS[@]}" -ge 1 ] || {
+  echo "error: missing required <task-id>" >&2
+  usage >&2
+  exit 1
+}
+if [ "$RELAUNCH" -eq 1 ]; then
+  [ "${#POS[@]}" -eq 1 ] || {
+    echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
+    usage >&2
+    exit 1
+  }
+elif [ "$KIND" = secondmate ]; then
+  [ "${#POS[@]}" -le 3 ] || {
+    echo "error: --secondmate spawn takes <task-id>, an optional <firstmate-home>, and an optional legacy harness positional; unexpected extra argument(s)" >&2
+    usage >&2
+    exit 1
+  }
+else
+  [ "${#POS[@]}" -ge 2 ] || {
+    echo "error: spawn requires <task-id> <project-dir>; missing <project-dir>" >&2
+    usage >&2
+    exit 1
+  }
+  [ "${#POS[@]}" -le 3 ] || {
+    echo "error: spawn takes <task-id> <project-dir> and an optional legacy harness positional; unexpected extra argument(s)" >&2
+    usage >&2
+    exit 1
+  }
+fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -988,10 +1022,6 @@ FIRSTMATE_HOME=
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
 if [ "$RELAUNCH" -eq 1 ]; then
-  [ "${#POS[@]}" -eq 1 ] || {
-    echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
-    exit 1
-  }
   RELAUNCH_META="$STATE/$ID.meta"
   [ -f "$RELAUNCH_META" ] || {
     echo "error: --relaunch needs an existing task record; no $RELAUNCH_META" >&2
