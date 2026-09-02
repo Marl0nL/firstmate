@@ -33,7 +33,14 @@
 #   worktree, and clears the previous harness's per-task wiring before arming
 #   the new incarnation.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
-#   positional harness arg still works for back-compat.
+#   positional harness arg still works for back-compat, but only in the LAST
+#   positional slot, after <project-dir> or <firstmate-home>. A --secondmate
+#   spawn that puts a bare adapter name before the home is refused as ambiguous:
+#   that name is read as the harness, which leaves the home no slot to land in.
+#   Positional counts are checked per form before anything is created, so a
+#   missing or extra positional refuses with the synopsis forms above and leaves
+#   no worktree, task metadata, or endpoint behind. -h/--help still prints this
+#   whole block.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
