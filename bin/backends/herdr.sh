@@ -2192,7 +2192,7 @@ fm_backend_herdr_agent_alive() {  # <target>
 # fm_backend_herdr_create_task just created, on the failure paths where it has
 # to give the label back so a retry starts clean - but NEVER at the cost of the
 # workspace itself. Closing a workspace's LAST remaining tab deletes the whole
-# workspace on real herdr (docs/herdr-backend.md "Default workspace lifecycle"),
+# workspace on real herdr (docs/herdr-backend.md "Watching and task containers"),
 # and these paths run AFTER the husks this tab replaced were already closed, so
 # the replacement can legitimately be the only tab left. Re-list and close only
 # when the workspace demonstrably still has another tab; when the tab list is
@@ -2238,7 +2238,7 @@ fm_backend_herdr_close_residue_tab() {  # <session> <workspace_id> <tab_id> <lab
 # Ordering is deliberate: the REPLACEMENT tab is created FIRST, and the husk
 # is closed only AFTER that succeeds - never the reverse. Closing a
 # workspace's LAST remaining tab deletes the whole workspace on real herdr
-# (docs/herdr-backend.md "Default workspace lifecycle"), and a session-restore husk
+# (docs/herdr-backend.md "Watching and task containers"), and a session-restore husk
 # can legitimately be that workspace's only tab (e.g. its own seeded default
 # tab was already pruned, long before the restart, by a prior real task tab
 # existing alongside it). Herdr's lack of label-uniqueness enforcement is

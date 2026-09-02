@@ -150,11 +150,13 @@
 #   what it cannot cover.
 #   The lease guard can only refuse AFTER `treehouse get` has already leased (and,
 #   for a slot the pool wrongly judged free, reset) the worktree. To stop that
-#   reset at its source, a ship/scout spawn first holds every worktree this home
-#   records (each task's worktree= and each secondmate's home=) with a cheap shield
-#   process cwd'd inside it, so the pool - which judges a slot free from live
-#   process cwd - cannot hand out an owned slot; the shields are reaped the instant
-#   the get resolves and on every exit path (spawn_preshield_start/stop).
+#   reset at its source, a fresh ship/scout spawn that acquires through treehouse
+#   (never a --relaunch, and never backend=orca, which brings its own worktree)
+#   first holds every worktree this home records (each task's worktree= and each
+#   secondmate's home=) with a cheap shield process cwd'd inside it, so the pool -
+#   which judges a slot free from live process cwd - cannot hand out an owned slot;
+#   the shields are reaped the instant the get resolves and on every exit path
+#   (spawn_preshield_start/stop).
 #   FM_SPAWN_SHIELD_TTL bounds each shield's self-exit (default 300s - the
 #   backstop must outlast the FULL acquisition wait below, which allows 60 polls
 #   whose per-poll cost on the active-probe backends is seconds, not the 1s
