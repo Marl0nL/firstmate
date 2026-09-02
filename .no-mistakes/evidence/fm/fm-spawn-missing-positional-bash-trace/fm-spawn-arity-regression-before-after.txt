@@ -1,0 +1,33 @@
+Regression proof: the two new tests fail on base commit 43ead08 with the exact reported
+symptoms and pass on target commit 694d2a7. The base run uses a symlink mirror of the
+repo whose ONLY replaced file is bin/fm-spawn.sh (base version); everything else is the
+target tree, so the test bytes are identical in both runs.
+
+======================================================================
+BEFORE - target tests vs BASE bin/fm-spawn.sh
+======================================================================
+$ bash tests/fm-task-delivery.test.sh
+ok - fm-spawn: a ship spawn requires a valid explicit mode and yolo before anything is created
+not ok - missing-project-dir refusal did not name the missing positional (missing: 'missing <project-dir>')
+--- output ---
+/tmp/fm-mirror.OAD7rF/bin/fm-spawn.sh: line 1073: POS[1]: unbound variable
+
+$ bash tests/fm-task-delivery.test.sh   # secondmate-ambiguity case only
+not ok - ambiguous --secondmate refusal did not name the ambiguity (missing: 'no slot for a third positional')
+--- output ---
+error: no firstmate home supplied or registered for sm-arity-1
+
+======================================================================
+AFTER - the same tests vs the TARGET bin/fm-spawn.sh
+======================================================================
+$ bash tests/fm-task-delivery.test.sh
+ok - fm-spawn: a ship spawn requires a valid explicit mode and yolo before anything is created
+ok - fm-spawn: missing or extra positionals are refused with a usage error, not a bash trace
+ok - fm-spawn: --secondmate refuses a harness-first third positional and keeps the home-first order
+ok - fm-spawn: scout and secondmate spawns refuse ship delivery flags
+ok - fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree
+ok - fm-spawn: a rigor downgrade against the registered posture is announced, never blocked
+ok - fm-spawn: a scout spawn resolves no delivery posture from the registry
+ok - fm-promote: promotion requires the delivery contract and records it exactly once
+ok - fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw
+# all fm-task-delivery tests passed

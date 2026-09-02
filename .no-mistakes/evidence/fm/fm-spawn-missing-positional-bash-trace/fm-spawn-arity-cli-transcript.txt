@@ -1,0 +1,86 @@
+
+========================================================================
+BEFORE  (base 43ead08)  omitting the required <project-dir>
+========================================================================
+
+$ fm-spawn.sh arity-a1 --mode no-mistakes --yolo off
+/tmp/fm-spawn-base.vvKLAc/fm-spawn.sh: line 1073: POS[1]: unbound variable
+[exit 1]
+
+========================================================================
+AFTER   (target 694d2a7)  the same invocation, now a usage error
+========================================================================
+
+$ fm-spawn.sh arity-a1 --mode no-mistakes --yolo off
+error: spawn requires <task-id> <project-dir>; missing <project-dir>
+Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+       fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+       fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+       fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+[exit 1]
+
+========================================================================
+AFTER   every other bad arity, per spawn form
+========================================================================
+
+$ fm-spawn.sh --mode no-mistakes --yolo off
+error: missing required <task-id>
+Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+       fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+       fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+       fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+[exit 1]
+
+$ fm-spawn.sh arity-a2 /tmp/fm-arity-demo.buMJTL/projects/proj claude extra-stray --mode no-mistakes --yolo off
+error: spawn takes <task-id> <project-dir> and an optional legacy harness positional; unexpected extra argument(s)
+Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+       fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+       fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+       fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+[exit 1]
+
+$ fm-spawn.sh arity-a3 /tmp/fm-arity-demo.buMJTL/projects/proj --relaunch
+error: --relaunch takes the task id only; its project or home comes from the task's own record
+Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+       fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+       fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+       fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+[exit 1]
+
+$ fm-spawn.sh sm-arity-1 claude /tmp/fm-arity-demo.buMJTL/no-such-home --secondmate
+error: --secondmate read 'claude' as a harness name, which leaves no slot for a third positional ('/tmp/fm-arity-demo.buMJTL/no-such-home'); the supported positional order is <task-id> <firstmate-home> <harness>, home first, or name the harness with --harness
+Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+       fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+       fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+       fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+[exit 1]
+
+========================================================================
+AFTER   good arity still passes straight through to the later checks
+========================================================================
+  (each of these fails on something OTHER than arity, so the new check is not over-refusing)
+
+$ fm-spawn.sh sm-arity-2 /tmp/fm-arity-demo.buMJTL/no-such-home claude --secondmate
+error: firstmate home does not exist or is not a directory: /tmp/fm-arity-demo.buMJTL/no-such-home
+[exit 1]
+
+$ fm-spawn.sh arity-ok /tmp/fm-arity-demo.buMJTL/projects/proj
+error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md
+[exit 1]
+
+$ fm-spawn.sh arity-ok /tmp/fm-arity-demo.buMJTL/projects/proj claude
+error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md
+[exit 1]
+
+========================================================================
+NO SIDE EFFECT   nothing created by any refused spawn
+========================================================================
+  $HOME/state contents : []
+  $HOME/data  contents : []
+  project dir contents : []
+
+========================================================================
+REFUSAL STAYS ON SCREEN   bounded synopsis on refusal, full header on --help
+========================================================================
+  lines printed by a refusal : 5
+  lines printed by --help    : 202
