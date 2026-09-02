@@ -218,6 +218,58 @@ The blocking and bounded-follow-up mechanisms were validated across six harnesse
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 | Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
 
+### Claude declared-timeout bound and continuity renewal, 2026-09-02
+
+Verified against Claude Code 2.1.258 on Linux, in a throwaway scratch project (never a live firstmate home), before choosing the auto-arm's declared-timeout renewal over a raised or absent hook `timeout`.
+
+Live enforcement check: a scratch `.claude/settings.json` registered one Stop hook with `"asyncRewake": true, "timeout": 20` whose command logged its start, a heartbeat every 2 seconds, and any SIGTERM.
+One `claude -p "reply with just: ok" --dangerously-skip-permissions` run produced:
+
+```text
+start 1788316912 pid=86462 pgid=86462
+beat 1788316912
+...
+beat 1788316930
+TERM 1788316932
+```
+
+The hook received SIGTERM exactly 20 seconds after start - the declared value, enforced by signal, matching the production `signal=TERM ... dur=28800s` rows in `state/.watch-cycle-exits.log`.
+
+Bundle facts, read from the installed `~/.local/share/claude/versions/2.1.258` binary's embedded source:
+
+- The hook schema accepts any positive `timeout` (`timeout:A().positive().optional()`), and the command-hook effective timeout is `Ct=e.timeout?e.timeout*1000:dd` with `var dd=600000`: an ABSENT timeout means Claude's own 600-second default, not unbounded, and no unbounded setting exists.
+- At expiry the shell-command wrapper's kill path SIGTERMs the child and its whole process group, with a SIGKILL backstop (`process.kill(-n,"SIGKILL")`), which is what took the foregrounded arm and watcher down together at 28800 seconds.
+- The kill timer is cleared when the hook process exits, so a hook that closes its own children and exits before the bound leaves nothing behind for the timer to kill - and, equally, any child left running after the hook exits would never be reaped by the harness, which is why the renewal closes arm and watcher before exiting.
+
+Conclusion recorded: no timeout value can make an idle Claude park survive indefinitely - absent is a 600-second default, any declared value schedules a kill, and a larger value only moves the cliff - so continuity comes from the pre-deadline renewal in `bin/fm-claude-stop-autoarm.sh` instead.
+The renewal's exit-2 rewake is the same mechanism as the production actionable rewake, whose multi-hour-park delivery the cycle ledger already evidences (for example a 3.8-hour park closed by `reason=actionable-check` and handled within a minute).
+
+Live renewal demonstration, same date and build: a throwaway `renewal-lab` home (never a live firstmate home) carrying the real `bin/fm-claude-stop-autoarm.sh` and the real `bin/fm-watch-arm.sh`, with a stub `bin/fm-watch.sh` that publishes the watcher lock, its pid-identity, and a 1-second beacon and then parks.
+Its `.claude/settings.json` registered the auto-arm as the only Stop hook with `"asyncRewake": true, "timeout": 60` and `"env": { "FM_CLAUDE_AUTOARM_RENEWAL_BUDGET": "30" }`, so one declared bound covered a renewal budget half its size.
+One real interactive Claude Code 2.1.258 session ran in tmux, was sent a single message, and was then left idle with no further human input.
+
+The home's cycle ledger recorded consecutive renewals rather than the pre-fix interruption, trimmed here to the identifying fields:
+
+```text
+started_at=1788319278 ended_at=1788319307 exit_code=143 signal=TERM reason=continuity-renewal beacon_age=1 successor=stop-renewal
+started_at=1788319344 ended_at=1788319373 exit_code=143 signal=TERM reason=continuity-renewal beacon_age=1 successor=stop-renewal
+started_at=1788319376 ended_at=1788319405 exit_code=143 signal=TERM reason=continuity-renewal beacon_age=1 successor=stop-renewal
+started_at=1788319410 ended_at=1788319439 exit_code=143 signal=TERM reason=continuity-renewal beacon_age=1 successor=stop-renewal
+```
+
+Every cycle ran 29 seconds and closed on its own 30-second budget, inside the declared 60-second bound, and every close was announced by the pid-matched renewal marker - so the classification is `reason=continuity-renewal successor=stop-renewal`, never the `reason=arm-interrupted successor=none` the harness kill produced before this change.
+The gaps between cycles were 37, 3, and 5 seconds, each one bounded model turn: the session transcript shows every renewal arriving as a single `Stop hook feedback` wake that the model ended immediately without a captain turn.
+At 168 seconds after the demo started - 2.8x the declared 60-second bound, where the pre-fix arm died once at 60 seconds and never re-armed - the watcher lock still named a live pid with a beacon 1 to 2 seconds old.
+After `tmux kill-server` no lab process survived, so the renewal leaves no orphaned arm or watcher behind when the session ends.
+
+Deterministic entry points:
+
+```sh
+tests/fm-claude-stop-autoarm.test.sh
+tests/fm-watcher-lock.test.sh
+tests/fm-turnend-guard.test.sh
+```
+
 ### Cursor primary park, 2026-08-13
 
 Cursor was validated as a primary on 2026-08-13 against the installed CLI on macOS 26.5.2 arm64 with tmux 3.6a, in a throwaway firstmate home on a private tmux socket, never against a live home and never with a user-scope hook.

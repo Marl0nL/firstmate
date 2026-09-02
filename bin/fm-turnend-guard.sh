@@ -54,8 +54,8 @@
 #      for the auto-arm to claim this home (state/.claude-autoarm.lock owner
 #      alive, with a supervision decision still open rather than a claim its own
 #      ledger entry or recorded pid-identity already settles as finished) or to
-#      record a fresh actionable exit-2 outcome
-#      (state/.claude-autoarm-epoch) for this event epoch - either proof allows
+#      record a fresh actionable exit-2 rewake or declared-timeout renewal
+#      outcome (state/.claude-autoarm-epoch) for this event epoch - either proof allows
 #      without consuming a continuation, so one event epoch yields exactly one recovery turn;
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
 #      while later fresh failed epochs consume it instead of resetting it;
@@ -281,7 +281,11 @@ autoarm_owns_recovery() {
   fi
   outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in
-    rewake)
+    # A fresh renewal epoch is the auto-arm's declared-timeout handoff: the
+    # closed cycle already owns exactly one benign continuation, and the next
+    # Stop-owned firing re-arms, so it is owned recovery exactly like a fresh
+    # actionable rewake and must not consume a blocked-stop count.
+    rewake|renewal)
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
       if [ "$age" -lt "$EPOCH_FRESH" ]; then
         [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true

@@ -7,7 +7,7 @@
 # classify. Reliability depends on arming through a mechanism that SURVIVES the
 # call and NOTIFIES on exit, so firstmate must run this script as the harness's
 # own tracked background task (e.g. run_in_background), or - for a Claude
-# primary - inside the Stop asyncRewake hook's foreground process tree
+# primary - as a waited child inside the Stop asyncRewake hook's process tree
 # (bin/fm-claude-stop-autoarm.sh), where the harness owns the process group and
 # the hook's exit-2 rewake is the notification. Run it as its own standalone
 # background task, never bundled onto the tail of another command.
@@ -47,7 +47,11 @@
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
-# lock identity before and after close, and successor disposition. The separate
+# lock identity before and after close, and successor disposition. A signal
+# close announced through the pid-matched Claude renewal marker
+# (fm_autoarm_renewal_request/claim in bin/fm-wake-lib.sh) is classified
+# reason=continuity-renewal with the requested successor token; an unannounced
+# signal close remains reason=arm-interrupted successor=none. The separate
 # state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
 # log and is never written here.
 #
@@ -338,11 +342,26 @@ attach_and_wait() {
   done
 }
 
+# A signal close is anonymous by default, but the Claude Stop hook's
+# declared-timeout renewal announces itself first: it writes the pid-matched
+# renewal marker (fm_autoarm_renewal_request in bin/fm-wake-lib.sh) before it
+# TERMs this arm, so the ledger records the handoff as continuity-renewal with
+# the requested successor token instead of arm-interrupted with none.
+# shellcheck disable=SC2329 # Invoked only from the trap-driven handlers below.
+classify_signal_close() {  # <rc> <signal>
+  local rc=$1 signal=$2
+  if fm_autoarm_renewal_claim "$STATE" "$ARM_PID"; then
+    cycle_log_append "$rc" "$signal" continuity-renewal "$FM_AUTOARM_RENEWAL_SUCCESSOR"
+  else
+    cycle_log_append "$rc" "$signal" arm-interrupted none
+  fi
+}
+
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
 handle_attached_signal() {
   local signal=$1 rc=$2
   trap - HUP TERM INT
-  cycle_log_append "$rc" "$signal" arm-interrupted none
+  classify_signal_close "$rc" "$signal"
   exit "$rc"
 }
 
@@ -465,7 +484,7 @@ handle_arm_signal() {
     kill -TERM "$child" 2>/dev/null || true
     wait "$child" 2>/dev/null || true
   fi
-  cycle_log_append "$rc" "$signal" arm-interrupted none
+  classify_signal_close "$rc" "$signal"
   cleanup_child
   exit "$rc"
 }

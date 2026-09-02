@@ -1808,6 +1808,33 @@ test_hook_claude_mode_stale_rewake_epoch_blocks() {
   pass "fm-turnend-guard --claude: stale rewake epoch does not allow a blind stop"
 }
 
+# The auto-arm's declared-timeout renewal hands continuity to the next
+# Stop-owned firing through one benign turn; the guard must read a fresh
+# outcome=renewal epoch as that owned recovery instead of consuming the bounded
+# block budget meant for genuinely blind stops.
+test_hook_claude_mode_allows_on_fresh_renewal_epoch() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-renewal-epoch")
+  : > "$dir/state/task1.meta"
+  printf 'epoch=3 owner_pid=999 outcome=renewal updated_at=%s\n' "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  out=$(run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "--claude mode must allow the stop whose declared-timeout renewal the auto-arm already owns"
+  [ -z "$out" ] || fail "--claude renewal-epoch allow produced output: $out"
+  assert_absent "$dir/state/.turnend-claude-blocks" "renewal-epoch allow consumed the guard's block budget"
+  pass "fm-turnend-guard --claude: fresh renewal epoch is owned recovery without a consumed block"
+}
+
+test_hook_claude_mode_stale_renewal_epoch_blocks() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-stale-renewal")
+  : > "$dir/state/task1.meta"
+  printf 'epoch=3 owner_pid=999 outcome=renewal updated_at=1\n' > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "--claude mode must not treat an ancient renewal epoch as this event's recovery"
+  pass "fm-turnend-guard --claude: stale renewal epoch does not allow a blind stop"
+}
+
 test_hook_claude_mode_budget_without_verified_failure_keeps_blocking() {
   local dir out status i
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget")
@@ -2014,6 +2041,8 @@ test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
+test_hook_claude_mode_allows_on_fresh_renewal_epoch
+test_hook_claude_mode_stale_renewal_epoch_blocks
 test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
 test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch

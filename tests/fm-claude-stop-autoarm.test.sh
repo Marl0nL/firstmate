@@ -160,6 +160,35 @@ printf 'stale: fixture-win actionable\n'
 exit 0
 SH
       ;;
+    parks)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+trap 'echo "TERM $$" >> "$FM_HOME/state/arm-terminated"; exit 143' TERM
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+while :; do sleep 1; done
+SH
+      ;;
+    parks-afk)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+: > "$FM_HOME/state/.afk"
+trap 'echo "TERM $$" >> "$FM_HOME/state/arm-terminated"; exit 143' TERM
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+while :; do sleep 1; done
+SH
+      ;;
+    parks-idle)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+rm -f "$FM_HOME/state/task.meta"
+trap 'echo "TERM $$" >> "$FM_HOME/state/arm-terminated"; exit 143' TERM
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+while :; do sleep 1; done
+SH
+      ;;
     *)
       echo "unknown arm fixture: $kind" >&2
       return 2
@@ -702,8 +731,8 @@ test_arming_claim_is_never_reclaimed() {
   sleep 60 &
   pid=$!
   record_autoarm_owner "$dir" "$pid"
-  # An owner foregrounds the arm for the whole watcher cycle, so "arming" is in
-  # progress no matter how old its ledger entry is.
+  # An owner waits on its arm child for the whole watcher cycle, so "arming" is
+  # in progress no matter how old its ledger entry is.
   record_autoarm_epoch "$dir" 464 "$pid" arming
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   kill "$pid" 2>/dev/null || true
@@ -835,6 +864,308 @@ test_terminal_check_claim_is_never_reclaimed() {
   pass "auto-arm: the guard's terminal-check claim is never reclaimed"
 }
 
+# --- declared-timeout continuity renewal ---------------------------------------
+# Claude Code enforces the hook's declared timeout by SIGTERMing the whole
+# hook-owned process group, watcher included, and no unbounded timeout exists
+# (verified 2026-09-02 on Claude 2.1.258; docs/turnend-guard.md). A park that
+# reached the bound therefore closed as arm-interrupted successor=none and left
+# the home blind until the session's next real turn end - observed as ~9.4
+# unsupervised hours in the main home and an undeliverable ~24h timed resume in
+# a secondmate home. These cases pin the pre-deadline renewal handoff and the
+# gates that keep it inert for an away, idle, non-owner, or alarmed home.
+
+test_renewal_at_deadline_rewakes_with_benign_banner() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/renewal")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" parks
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=2
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  expect_code 2 "$status" "a parked arm at the renewal deadline must hand off through one exit-2 turn"
+  assert_contains "$out" "watcher continuity renewal" "renewal must carry its distinct benign banner"
+  assert_contains "$out" "end the turn" "renewal banner must direct one bounded turn"
+  assert_not_contains "$out" "firstmate watcher wake" "renewal must not masquerade as an actionable wake"
+  assert_not_contains "$out" "automatic supervision mechanism is broken" "renewal must not read as a failure"
+  [ "$(epoch_outcome "$dir")" = renewal ] || fail "epoch must record outcome=renewal, got: $(epoch_outcome "$dir")"
+  assert_present "$dir/state/arm-terminated" "renewal did not close the parked arm"
+  assert_absent "$dir/state/.claude-autoarm-renewal" "renewal left its marker behind"
+  assert_absent "$dir/state/.claude-autoarm.lock" "renewal left the owner lock held"
+  assert_absent "$dir/state/.turnend-claude-blocks" "renewal consumed the guard's block budget"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "renewal recorded a failure notice"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 1 ] || fail "renewal must not retry the arm after the deadline"
+  pass "auto-arm: declared-timeout renewal closes the park and hands off through one benign rewake"
+}
+
+test_renewal_inert_when_afk_appears_mid_park() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/renewal-afk")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" parks-afk
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=2
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  expect_code 0 "$status" "a renewal deadline while away mode owns triage must not rewake"
+  [ -z "$out" ] || fail "AFK renewal produced output: $out"
+  [ "$(epoch_outcome "$dir")" = afk ] || fail "AFK renewal must record outcome=afk, got: $(epoch_outcome "$dir")"
+  assert_present "$dir/state/arm-terminated" "AFK renewal left the parked arm running toward the group kill"
+  pass "auto-arm: renewal deadline under away mode closes the park silently"
+}
+
+test_renewal_inert_when_need_vanished_mid_park() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/renewal-idle")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" parks-idle
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=2
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  expect_code 0 "$status" "a renewal deadline with nothing left to supervise must not rewake"
+  [ -z "$out" ] || fail "idle renewal produced output: $out"
+  [ "$(epoch_outcome "$dir")" = clean ] || fail "idle renewal must record outcome=clean, got: $(epoch_outcome "$dir")"
+  assert_present "$dir/state/arm-terminated" "idle renewal left the parked arm running toward the group kill"
+  pass "auto-arm: renewal deadline in a home gone idle closes the park silently"
+}
+
+test_renewal_suppressed_after_attended_alarm() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/renewal-post-alarm")
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
+  write_arm_fixture "$dir" parks
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=2
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  expect_code 0 "$status" "a renewal after the attended fail-open must not continue"
+  [ -z "$out" ] || fail "post-alarm renewal produced output: $out"
+  [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "post-alarm renewal must record failed-suppressed, got: $(epoch_outcome "$dir")"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "post-alarm renewal cleared the attended alarm"
+  pass "auto-arm: renewal cannot defeat the attended fail-open suppression"
+}
+
+test_renewal_budget_does_not_widen_owner_gate() {
+  local dir other out status
+  dir=$(make_primary_dir "$TMP_ROOT/renewal-other-owner")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" parks
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  other=$!
+  printf '%s\n' "$other" > "$dir/state/.lock"
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=2
+  out=$(printf '%s\n' '{"session_id":"s"}' | FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  expect_code 0 "$status" "a tiny renewal budget must not let a non-owner session arm or rewake"
+  [ ! -e "$dir/state/arm-ran" ] || fail "non-owner session armed under a renewal budget"
+  pass "auto-arm: the renewal budget leaves the owner gate unchanged for a non-owner session"
+}
+
+test_no_renewal_before_deadline() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/renewal-early")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=3600
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  expect_code 2 "$status" "an actionable close well before the deadline must translate normally"
+  assert_contains "$out" "firstmate watcher wake" "pre-deadline close lost its ordinary wake banner"
+  assert_not_contains "$out" "watcher continuity renewal" "a pre-deadline close must never renew"
+  assert_absent "$dir/state/.claude-autoarm-renewal" "a pre-deadline close left a renewal marker"
+  pass "auto-arm: renewal never fires ahead of its deadline"
+}
+
+# The timeout-boundary regression with the REAL arm wrapper: the renewal close
+# must land in the lifecycle ledger as continuity-renewal with a successor
+# disposition, never as the anonymous arm-interrupted successor=none the group
+# kill used to leave, and the closed watcher must not survive as an orphan.
+install_real_arm_with_parked_watcher() {
+  local dir=$1
+  cp "$ROOT/bin/fm-watch-arm.sh" "$dir/bin/fm-watch-arm.sh"
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+# Parked stand-in for the real watcher: publish a verifiable singleton lock and
+# a fresh beacon, then block the way a quiet park does.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-wake-lib.sh"
+mkdir -p "$STATE/.watch.lock"
+printf '%s\n' "$$" > "$STATE/.watch.lock/pid"
+printf '%s\n' "$FM_HOME" > "$STATE/.watch.lock/fm-home"
+printf '%s\n' "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-watch.sh" > "$STATE/.watch.lock/watcher-path"
+fm_pid_identity "$$" > "$STATE/.watch.lock/pid-identity"
+trap 'exit 143' TERM
+while :; do touch "$STATE/.last-watcher-beat"; sleep 1; done
+SH
+  chmod +x "$dir/bin/fm-watch.sh"
+}
+
+test_renewal_ledger_records_continuity_not_interrupt() {
+  local dir out status ledger watcher_pid
+  dir=$(make_primary_dir "$TMP_ROOT/renewal-ledger")
+  : > "$dir/state/task.meta"
+  install_real_arm_with_parked_watcher "$dir"
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=3
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  expect_code 2 "$status" "the real arm's renewal close must hand off through one exit-2 turn"
+  assert_contains "$out" "watcher continuity renewal" "real-arm renewal lost its benign banner"
+  [ "$(epoch_outcome "$dir")" = renewal ] || fail "real-arm renewal must record outcome=renewal, got: $(epoch_outcome "$dir")"
+  ledger=$(cat "$dir/state/.watch-cycle-exits.log" 2>/dev/null || true)
+  assert_contains "$ledger" "reason=continuity-renewal" "the timeout-boundary close was not classified as a renewal"
+  assert_contains "$ledger" "successor=stop-renewal" "the renewal row did not record its successor disposition"
+  assert_not_contains "$ledger" "reason=arm-interrupted" "the renewal read as an anonymous interrupt"
+  watcher_pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+  if [ -n "$watcher_pid" ]; then
+    ! kill -0 "$watcher_pid" 2>/dev/null || fail "renewal left an orphan watcher (pid $watcher_pid)"
+  fi
+  pass "auto-arm: the real arm records the renewal close with a successor, never arm-interrupted/none"
+}
+
+# A secondmate is a Claude primary in its own home with the same tracked hook,
+# so the renewal must work there identically with no per-home configuration.
+test_renewal_active_in_marked_secondmate_home() {
+  local dir out status
+  dir=$(make_secondmate_dir "$TMP_ROOT/renewal-secondmate")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" parks
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=2
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  expect_code 2 "$status" "a marked secondmate home must get the same declared-timeout renewal"
+  assert_contains "$out" "watcher continuity renewal" "secondmate renewal lost its benign banner"
+  [ "$(epoch_outcome "$dir")" = renewal ] || fail "secondmate renewal must record outcome=renewal, got: $(epoch_outcome "$dir")"
+  assert_present "$dir/state/arm-terminated" "secondmate renewal did not close the parked arm"
+  pass "auto-arm: declared-timeout renewal works identically in a marked secondmate home"
+}
+
+# The timeout Claude Code declares for the auto-arm Stop entry, read out of the
+# tracked registration it consumes. jq is optional on this project's hosts and a
+# missing optional tool must never take the rest of this suite down with it, so
+# this walks the registration's brace structure instead of its line shape: the
+# innermost object carrying this hook's command is the one whose "timeout"
+# governs it, and a purely cosmetic reflow - that object put on one line, or
+# split differently - is a semantically identical edit that must keep resolving
+# to the same number rather than silently reading as "no declared timeout".
+declared_stop_hook_timeout() {
+  awk '
+    { text = text $0 " " }
+    END {
+      depth = 0
+      for (i = 1; i <= length(text); i++) {
+        c = substr(text, i, 1)
+        if (c == "{") { start[++depth] = i; continue }
+        if (c != "}" || depth == 0) continue
+        object = substr(text, start[depth], i - start[depth] + 1)
+        depth--
+        if (object ~ /fm-claude-stop-autoarm\.sh/ \
+          && match(object, /"timeout"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+          found = substr(object, RSTART, RLENGTH)
+          sub(/^[^0-9]*/, "", found)
+          print found
+          exit
+        }
+      }
+    }
+  ' "$ROOT/.claude/settings.json"
+}
+
+# The renewal only closes the blind spot while the effective budget stays BELOW
+# the timeout declared for this hook in the tracked .claude/settings.json, and
+# that bound now lives in two files. Pin the relationship through behavior: read
+# the declared timeout out of the registration Claude Code actually consumes,
+# prove the hook refuses a budget that large instead of parking past the deadline
+# the way the original blind spot did, and prove the budget it falls back to -
+# what an unconfigured home actually parks for - is itself below that deadline.
+# Lowering the declared timeout without lowering the hook's ceiling fails here,
+# and so does leaving the fallback behind when the ceiling comes down.
+test_renewal_budget_reaching_the_declared_timeout_is_refused() {
+  local declared dir out status fallback
+  declared=$(declared_stop_hook_timeout)
+  case "$declared" in
+    ''|*[!0-9]*) fail "the tracked Stop registration must declare a numeric auto-arm timeout, got: '$declared'" ;;
+  esac
+  dir=$(make_primary_dir "$TMP_ROOT/renewal-budget-ceiling")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET="$declared"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  expect_code 2 "$status" "a refused renewal budget must leave ordinary translation intact"
+  assert_contains "$out" "refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=$declared" \
+    "a budget reaching the declared Stop-hook timeout must be refused out loud, not accepted silently"
+  assert_contains "$out" "firstmate watcher wake" "the refusal swallowed the ordinary wake banner"
+  fallback=$(printf '%s\n' "$out" | sed -n 's/.*using \([0-9][0-9]*\)s instead.*/\1/p' | head -1)
+  case "$fallback" in
+    ''|*[!0-9]*) fail "the refusal must name the numeric budget it fell back to, got: '$fallback'" ;;
+  esac
+  [ "$fallback" -gt 0 ] && [ "$fallback" -lt "$declared" ] \
+    || fail "the built-in renewal budget ${fallback}s must stay below the ${declared}s timeout declared for this hook"
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=00
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  expect_code 2 "$status" "a zero renewal budget must leave ordinary translation intact"
+  assert_contains "$out" "refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=00" \
+    "a leading-zeros budget normalizing to zero must be refused, not accepted as an instant renewal"
+  assert_present "$dir/state/arm-ran" "a refused zero budget must still park a real arm"
+  assert_contains "$out" "firstmate watcher wake" "a refused zero budget must keep ordinary translation intact"
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=not-a-number
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  expect_code 2 "$status" "an unusable renewal budget must leave ordinary translation intact"
+  assert_contains "$out" "refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=not-a-number" \
+    "an unusable budget must be refused out loud"
+  pass "auto-arm: a renewal budget reaching the declared Stop-hook timeout is refused for the safe default"
+}
+
+# Only the single-flight owner that is about to park an arm may complain about
+# the budget. Every other firing - a child worktree, a non-owner session, an away
+# or idle home - governs no arm, so per this hook's own contract its exit 0 stays
+# byte-for-byte silent whatever a fleet-wide environment exports.
+test_refused_budget_is_silent_on_firings_that_never_arm() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/refused-budget-inert")
+  write_arm_fixture "$dir" actionable
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=99999
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  expect_code 0 "$status" "an idle home must stay inert whatever renewal budget the environment carries"
+  [ -z "$out" ] || fail "a firing that never arms printed a renewal-budget notice: $out"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed an idle home"
+  pass "auto-arm: a refused renewal budget stays silent on firings that never arm"
+}
+
+# The renewal TERM closes only this hook's own arm. When that arm was attached
+# to a peer watcher, the peer survives with a fresh beacon, so the home is still
+# supervised and waking the model would spend a turn for nothing.
+test_renewal_with_surviving_live_watcher_is_silent() {
+  local dir out status pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/renewal-live-watcher")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" parks
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the live watcher holder for the renewal close"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  printf 'session=sess-autoarm\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=2
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a renewal close that leaves a live fresh watcher must not spend a turn"
+  [ -z "$out" ] || fail "renewal with a surviving watcher produced output: $out"
+  [ "$(epoch_outcome "$dir")" = clean ] || fail "renewal with a surviving watcher must record outcome=clean, got: $(epoch_outcome "$dir")"
+  assert_present "$dir/state/arm-terminated" "the renewal did not close the parked arm"
+  assert_absent "$dir/state/.claude-autoarm-renewal" "renewal left its marker behind"
+  assert_absent "$dir/state/.turnend-claude-blocks" "a benign renewal close must clear the prior block budget"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "a benign renewal close must clear the failure episode"
+  pass "auto-arm: a renewal leaving a verified live watcher closes silently for zero turns"
+}
+
 test_need_vanished_mid_cycle_closes_quietly() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/vanished")
@@ -907,6 +1238,17 @@ test_pid_reused_arming_claim_is_reclaimed_and_rearms
 test_pid_reused_claim_with_no_ledger_is_reclaimed_and_rearms
 test_identity_matched_arming_claim_is_never_reclaimed
 test_terminal_check_claim_is_never_reclaimed
+test_renewal_at_deadline_rewakes_with_benign_banner
+test_renewal_inert_when_afk_appears_mid_park
+test_renewal_inert_when_need_vanished_mid_park
+test_renewal_suppressed_after_attended_alarm
+test_renewal_budget_does_not_widen_owner_gate
+test_no_renewal_before_deadline
+test_renewal_ledger_records_continuity_not_interrupt
+test_renewal_active_in_marked_secondmate_home
+test_renewal_budget_reaching_the_declared_timeout_is_refused
+test_refused_budget_is_silent_on_firings_that_never_arm
+test_renewal_with_surviving_live_watcher_is_silent
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
