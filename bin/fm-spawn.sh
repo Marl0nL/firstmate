@@ -33,7 +33,14 @@
 #   worktree, and clears the previous harness's per-task wiring before arming
 #   the new incarnation.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
-#   positional harness arg still works for back-compat.
+#   positional harness arg still works for back-compat, but only in the LAST
+#   positional slot, after <project-dir> or <firstmate-home>. A --secondmate
+#   spawn that puts a bare adapter name before the home is refused as ambiguous:
+#   that name is read as the harness, which leaves the home no slot to land in.
+#   Positional counts are checked per form before anything is created, so a
+#   missing or extra positional refuses with the synopsis forms above and leaves
+#   no worktree, task metadata, or endpoint behind. -h/--help still prints this
+#   whole block.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
@@ -210,6 +217,14 @@ usage() {
   # comment. Derived rather than a fixed line range, which silently truncated
   # this help mid-sentence every time the header above grew.
   sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
+}
+
+usage_synopsis() {
+  # Just the synopsis forms out of that same block: one per spawn shape, each
+  # recognised by the `<task-id>` placeholder that opens it, which is what
+  # separates a form from the batch-pair example further down. A refusal prints
+  # this instead of the whole header so its own error line stays on screen.
+  sed -n '2,${/^#/!q;/^#[[:space:]]*\(Usage:[[:space:]]*\)\{0,1\}fm-spawn\.sh <task-id>/p;}' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -892,6 +907,56 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   done
   exit "$rc"
 fi
+# A --secondmate second positional that is empty or a bare adapter name is read
+# as the harness rather than as <firstmate-home>, which consumes the only slot a
+# third positional could land in. One owner for that shape: the arity check
+# below refuses the ambiguous three-positional case, and the POS consumer far
+# below takes the same branch for the two-positional case it does support.
+secondmate_positional_is_bare_harness() {
+  case "${1-}" in
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse) return 0 ;;
+  esac
+  return 1
+}
+# Positional arity, checked before indexing POS at all so a missing or extra
+# positional is a usage refusal, not a bash "unbound variable" trace: the
+# arity contract differs per form (usage() above owns the authoritative
+# synopsis), so each form is checked against its own rule rather than a
+# blanket count.
+[ "${#POS[@]}" -ge 1 ] || {
+  echo "error: missing required <task-id>" >&2
+  usage_synopsis >&2
+  exit 1
+}
+if [ "$RELAUNCH" -eq 1 ]; then
+  [ "${#POS[@]}" -eq 1 ] || {
+    echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
+    usage_synopsis >&2
+    exit 1
+  }
+elif [ "$KIND" = secondmate ]; then
+  [ "${#POS[@]}" -le 3 ] || {
+    echo "error: --secondmate spawn takes <task-id>, an optional <firstmate-home>, and an optional legacy harness positional; unexpected extra argument(s)" >&2
+    usage_synopsis >&2
+    exit 1
+  }
+  if [ "${#POS[@]}" -gt 2 ] && secondmate_positional_is_bare_harness "${POS[1]}"; then
+    echo "error: --secondmate read '${POS[1]}' as a harness name, which leaves no slot for a third positional ('${POS[2]}'); the supported positional order is <task-id> <firstmate-home> <harness>, home first, or name the harness with --harness" >&2
+    usage_synopsis >&2
+    exit 1
+  fi
+else
+  [ "${#POS[@]}" -ge 2 ] || {
+    echo "error: spawn requires <task-id> <project-dir>; missing <project-dir>" >&2
+    usage_synopsis >&2
+    exit 1
+  }
+  [ "${#POS[@]}" -le 3 ] || {
+    echo "error: spawn takes <task-id> <project-dir> and an optional legacy harness positional; unexpected extra argument(s)" >&2
+    usage_synopsis >&2
+    exit 1
+  }
+fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -988,10 +1053,6 @@ FIRSTMATE_HOME=
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
 if [ "$RELAUNCH" -eq 1 ]; then
-  [ "${#POS[@]}" -eq 1 ] || {
-    echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
-    exit 1
-  }
   RELAUNCH_META="$STATE/$ID.meta"
   [ -f "$RELAUNCH_META" ] || {
     echo "error: --relaunch needs an existing task record; no $RELAUNCH_META" >&2
@@ -1052,23 +1113,24 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
 elif [ "$KIND" = secondmate ]; then
-  case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
-      ARG3=${POS[1]:-}
-      ;;
-    *' '*)
-      if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
+  if secondmate_positional_is_bare_harness "${POS[1]:-}"; then
+    ARG3=${POS[1]:-}
+  else
+    case "${POS[1]}" in
+      *' '*)
+        if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
+          FIRSTMATE_HOME=${POS[1]}
+          ARG3=${POS[2]:-}
+        else
+          ARG3=${POS[1]}
+        fi
+        ;;
+      *)
         FIRSTMATE_HOME=${POS[1]}
         ARG3=${POS[2]:-}
-      else
-        ARG3=${POS[1]}
-      fi
-      ;;
-    *)
-      FIRSTMATE_HOME=${POS[1]}
-      ARG3=${POS[2]:-}
-      ;;
-  esac
+        ;;
+    esac
+  fi
 else
   PROJ=${POS[1]}
   ARG3=${POS[2]:-}

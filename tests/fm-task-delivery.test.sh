@@ -115,6 +115,84 @@ EOF
   pass "fm-spawn: scout and secondmate spawns refuse ship delivery flags"
 }
 
+# A missing or extra positional must be a usage refusal naming the exact
+# problem, not a bash "unbound variable" trace: the arity contract differs per
+# form, so each is exercised on its own spawn. Every case must stop before any
+# task record exists.
+test_spawn_refuses_missing_or_extra_positionals() {
+  local rec home proj fakebin out status lines
+  rec=$(make_home arity)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  out=$(run_spawn "$home" "$fakebin" arity-a1 --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an ordinary spawn missing <project-dir> should exit non-zero"
+  assert_contains "$out" "missing <project-dir>" "missing-project-dir refusal did not name the missing positional"
+  assert_contains "$out" "Usage: fm-spawn.sh" "missing-project-dir refusal did not print the usage block"
+  assert_absent "$home/state/arity-a1.meta" "refused spawn wrote task metadata"
+  # The remedy has to survive on an ordinary terminal, so a refusal prints the
+  # synopsis forms only, not the whole several-hundred-line header (whose Kimi
+  # paragraph is the marker here).
+  assert_not_contains "$out" "surgically installed" "refusal dumped the whole header instead of the usage synopsis"
+  lines=$(printf '%s\n' "$out" | wc -l)
+  [ "$lines" -le 8 ] || fail "refusal printed $lines lines; the error plus synopsis should stay within 8"
+
+  out=$(run_spawn "$home" "$fakebin" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn missing <task-id> should exit non-zero"
+  assert_contains "$out" "missing required <task-id>" "missing-task-id refusal did not name the missing positional"
+  assert_contains "$out" "Usage: fm-spawn.sh" "missing-task-id refusal did not print the usage block"
+
+  out=$(run_spawn "$home" "$fakebin" arity-a2 "$proj" claude extra-stray --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an ordinary spawn with an extra positional should exit non-zero"
+  assert_contains "$out" "unexpected extra argument(s)" "extra-positional refusal did not name the problem"
+  assert_contains "$out" "Usage: fm-spawn.sh" "extra-positional refusal did not print the usage block"
+  assert_absent "$home/state/arity-a2.meta" "refused spawn wrote task metadata"
+
+  out=$(run_spawn "$home" "$fakebin" arity-a3 "$proj" --relaunch)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--relaunch with a stray positional should exit non-zero"
+  assert_contains "$out" "--relaunch takes the task id only" "relaunch stray-positional refusal did not explain the contract"
+  assert_contains "$out" "Usage: fm-spawn.sh" "relaunch stray-positional refusal did not print the usage block"
+  assert_absent "$home/state/arity-a3.meta" "refused relaunch wrote task metadata"
+
+  pass "fm-spawn: missing or extra positionals are refused with a usage error, not a bash trace"
+}
+
+# A --secondmate second positional that is a bare adapter name is read as the
+# harness, so a third positional has nowhere to go. Dropping it silently would
+# send the spawn to some other home, so the ambiguous order refuses while the
+# supported home-first order keeps working.
+test_secondmate_refuses_an_ambiguous_harness_first_positional() {
+  local rec home proj fakebin nohome out status
+  rec=$(make_home secondmate-arity)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  nohome="$TMP_ROOT/secondmate-arity/no-such-home"
+
+  out=$(run_spawn "$home" "$fakebin" sm-arity-1 claude "$nohome" --secondmate)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a harness-first --secondmate spawn with a third positional should exit non-zero"
+  assert_contains "$out" "no slot for a third positional" "ambiguous --secondmate refusal did not name the ambiguity"
+  assert_contains "$out" "Usage: fm-spawn.sh" "ambiguous --secondmate refusal did not print the usage synopsis"
+  assert_absent "$home/state/sm-arity-1.meta" "refused secondmate spawn wrote task metadata"
+
+  # The documented home-first order must clear arity and fail later, on the home
+  # itself, which proves the refusal above is about the order and not the count.
+  out=$(run_spawn "$home" "$fakebin" sm-arity-2 "$nohome" claude --secondmate)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a --secondmate spawn onto a missing home should exit non-zero"
+  assert_not_contains "$out" "no slot for a third positional" "the documented home-first order was refused as ambiguous"
+  assert_contains "$out" "$nohome" "the home-first --secondmate spawn did not fail on the supplied home"
+  assert_absent "$home/state/sm-arity-2.meta" "refused secondmate spawn wrote task metadata"
+
+  pass "fm-spawn: --secondmate refuses a harness-first third positional and keeps the home-first order"
+}
+
 # The brief is what the worker actually follows, so a spawn whose explicit mode
 # disagrees with the brief's recorded contract must refuse instead of launching a
 # worker whose instructions contradict the recorded task delivery.
@@ -273,6 +351,8 @@ EOF
 }
 
 test_ship_spawn_requires_a_valid_delivery_contract
+test_spawn_refuses_missing_or_extra_positionals
+test_secondmate_refuses_an_ambiguous_harness_first_positional
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
