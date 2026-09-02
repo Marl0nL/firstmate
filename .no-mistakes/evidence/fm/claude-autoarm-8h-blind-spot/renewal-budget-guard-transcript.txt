@@ -1,0 +1,39 @@
+==============================================================================
+Renewal budget guard - the value that decides whether a home parks past the kill timer
+==============================================================================
+declared Stop-hook timeout in the tracked .claude/settings.json: 28800s
+  (at this bound Claude Code SIGTERMs the hook's whole process group, watcher included)
+
+FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=28800        -> exit 2
+    refused on stderr: firstmate: refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=28800 - a Claude Stop auto-arm budget must be a positive number of seconds below the 28800s timeout declared for this hook, at which Claude Code kills the arm and its watcher unsupervised; using 27000s instead.
+FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=00           -> exit 2
+    refused on stderr: firstmate: refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=00 - a Claude Stop auto-arm budget must be a positive number of seconds below the 28800s timeout declared for this hook, at which Claude Code kills the arm and its watcher unsupervised; using 27000s instead.
+FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=000          -> exit 2
+    refused on stderr: firstmate: refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=000 - a Claude Stop auto-arm budget must be a positive number of seconds below the 28800s timeout declared for this hook, at which Claude Code kills the arm and its watcher unsupervised; using 27000s instead.
+FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=not-a-number -> exit 2
+    refused on stderr: firstmate: refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=not-a-number - a Claude Stop auto-arm budget must be a positive number of seconds below the 28800s timeout declared for this hook, at which Claude Code kills the arm and its watcher unsupervised; using 27000s instead.
+FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=0            -> exit 2
+    refused on stderr: firstmate: refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=0 - a Claude Stop auto-arm budget must be a positive number of seconds below the 28800s timeout declared for this hook, at which Claude Code kills the arm and its watcher unsupervised; using 27000s instead.
+FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=999999999    -> exit 2
+    refused on stderr: firstmate: refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=999999999 - a Claude Stop auto-arm budget must be a positive number of seconds below the 28800s timeout declared for this hook, at which Claude Code kills the arm and its watcher unsupervised; using 27000s instead.
+FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=27000        -> exit 2
+    accepted silently: the arm may park for 27000s, below the 28800s kill timer
+FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=3600         -> exit 2
+    accepted silently: the arm may park for 3600s, below the 28800s kill timer
+
+An idle home (nothing in flight) must stay byte-for-byte silent whatever the fleet exports:
+    FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=99999 on an idle home -> exit 0, output: <empty>
+
+==============================================================================
+The declared-timeout ceiling binds the unconfigured default, not just requests
+==============================================================================
+shipped ceiling 28800s (mirrors the tracked registration):
+    fallback for a 28800s ceiling: using 27000s instead
+ceiling lowered to 3600s, as a home would do alongside a lowered declared timeout:
+    fallback for a 3600s ceiling: using 3375s instead
+ceiling lowered to 600s:
+    fallback for a 600s ceiling: using 563s instead
+
+>>> the fallback every unconfigured home parks for follows the ceiling down and
+>>> stays below it, so a lowered kill timer can never leave a stale 27000s default
+>>> parked past the deadline - the original 8h blind spot in miniature.

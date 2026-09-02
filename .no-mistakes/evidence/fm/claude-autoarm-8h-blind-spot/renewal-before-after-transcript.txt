@@ -1,0 +1,66 @@
+==============================================================================
+Claude Stop auto-arm: declared-timeout blind spot vs. continuity renewal
+Simulated declared Stop-hook timeout: 25s  (real registration: 28800s)
+Renewal budget under test:            10s   (real default: 27000s)
+Real bin/fm-claude-stop-autoarm.sh + real bin/fm-watch-arm.sh + parked stub watcher.
+Only Claude Code's own behavior is simulated: own process group, group-TERM at
+the declared timeout, and a Stop firing after each turn end.
+==============================================================================
+
+### BEFORE - base commit 43ead08, one Stop firing, session left idle
+harness: declared timeout 25s reached - SIGTERM to the hook-owned process group 2168486
+hook exit code: 143  (143 = killed by the harness group SIGTERM; no exit-2 rewake)
+hook stderr: <empty> - the session is told nothing and never wakes
+elapsed: 26s
+lifecycle ledger (state/.watch-cycle-exits.log):
+    arm_pid=2168580	watcher_pid=2168592	origin=started	started_at=1788338110	ended_at=1788338136	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=0	lock_before=<identity>	lock_after=<identity>	successor=none
+supervision now: watcher pid=2168592 not running -> home is BLIND until the next real turn end
+>>> BEFORE: at the declared bound the group kill closed arm and watcher as
+>>> 'reason=arm-interrupted ... successor=none' and nothing re-armed.
+
+### AFTER - target commit f4b8796, same idle session, no captain turn
+
+--- Stop firing #1 (t+0s) ---
+hook exit code: 2  (2 = rewake; Claude renders this hook's stderr as 'Stop hook feedback')
+hook stderr, verbatim - what the idle session is shown:
+    | firstmate watcher continuity renewal - no supervision event occurred; the watcher cycle was closed cleanly before this Stop hook's declared timeout could interrupt it unsupervised.
+    | Run bin/fm-wake-drain.sh first as on any wake; if it presents nothing actionable, end the turn immediately so the next turn end starts a fresh watcher cycle automatically. Do NOT run bin/fm-watch-arm.sh.
+epoch ledger: epoch=2 owner_pid=2171080 outcome=renewal updated_at=1788338148
+after the renewal close: watcher pid=2171187 not running - closed with its arm, no orphan
+(the model drains the wake queue, finds nothing, ends the turn -> next Stop fires)
+
+--- Stop firing #2 (t+13s) ---
+hook exit code: 2  (2 = rewake; Claude renders this hook's stderr as 'Stop hook feedback')
+hook stderr, verbatim - what the idle session is shown:
+    | firstmate watcher continuity renewal - no supervision event occurred; the watcher cycle was closed cleanly before this Stop hook's declared timeout could interrupt it unsupervised.
+    | Run bin/fm-wake-drain.sh first as on any wake; if it presents nothing actionable, end the turn immediately so the next turn end starts a fresh watcher cycle automatically. Do NOT run bin/fm-watch-arm.sh.
+epoch ledger: epoch=4 owner_pid=2172308 outcome=renewal updated_at=1788338161
+after the renewal close: watcher pid=2172421 not running - closed with its arm, no orphan
+(the model drains the wake queue, finds nothing, ends the turn -> next Stop fires)
+
+--- Stop firing #3 (t+26s) ---
+hook exit code: 2  (2 = rewake; Claude renders this hook's stderr as 'Stop hook feedback')
+hook stderr, verbatim - what the idle session is shown:
+    | firstmate watcher continuity renewal - no supervision event occurred; the watcher cycle was closed cleanly before this Stop hook's declared timeout could interrupt it unsupervised.
+    | Run bin/fm-wake-drain.sh first as on any wake; if it presents nothing actionable, end the turn immediately so the next turn end starts a fresh watcher cycle automatically. Do NOT run bin/fm-watch-arm.sh.
+epoch ledger: epoch=6 owner_pid=2173198 outcome=renewal updated_at=1788338174
+after the renewal close: watcher pid=2173508 not running - closed with its arm, no orphan
+(the model drains the wake queue, finds nothing, ends the turn -> next Stop fires)
+
+--- Stop firing #4 (t+39s): parked, and left running past the declared bound ---
+t+47s (> 25s declared bound): watcher pid=2174178 LIVE, beacon_age=0s -> home is supervised
+(BEFORE, the same session had no watcher at all from t+25s onward)
+
+lifecycle ledger across the whole idle period (state/.watch-cycle-exits.log):
+    arm_pid=2171172	watcher_pid=2171187	origin=started	started_at=1788338138	ended_at=1788338148	exit_code=143	signal=TERM	reason=continuity-renewal	beacon_age=1	lock_before=<identity>	lock_after=<identity>	successor=stop-renewal
+    arm_pid=2172405	watcher_pid=2172421	origin=started	started_at=1788338151	ended_at=1788338161	exit_code=143	signal=TERM	reason=continuity-renewal	beacon_age=1	lock_before=<identity>	lock_after=<identity>	successor=stop-renewal
+    arm_pid=2173493	watcher_pid=2173508	origin=started	started_at=1788338165	ended_at=1788338174	exit_code=143	signal=TERM	reason=continuity-renewal	beacon_age=1	lock_before=<identity>	lock_after=<identity>	successor=stop-renewal
+
+continuity-renewal rows: 3    arm-interrupted rows: 0
+>>> AFTER: every close is 'reason=continuity-renewal ... successor=stop-renewal',
+>>> each handed to a fresh Stop firing, and the home is still supervised past the
+>>> declared bound that used to end supervision until the next real turn.
+
+### teardown - the harness kills the hook-owned group when the session ends
+watcher pid 2174178 did not survive teardown
+no surviving lab fm-* process (no-orphan teardown)

@@ -1,0 +1,4 @@
+arm_pid=2171172	watcher_pid=2171187	origin=started	started_at=1788338138	ended_at=1788338148	exit_code=143	signal=TERM	reason=continuity-renewal	beacon_age=1	lock_before=<identity>	lock_after=<identity>	successor=stop-renewal
+arm_pid=2172405	watcher_pid=2172421	origin=started	started_at=1788338151	ended_at=1788338161	exit_code=143	signal=TERM	reason=continuity-renewal	beacon_age=1	lock_before=<identity>	lock_after=<identity>	successor=stop-renewal
+arm_pid=2173493	watcher_pid=2173508	origin=started	started_at=1788338165	ended_at=1788338174	exit_code=143	signal=TERM	reason=continuity-renewal	beacon_age=1	lock_before=<identity>	lock_after=<identity>	successor=stop-renewal
+arm_pid=2174163	watcher_pid=2174178	origin=started	started_at=1788338177	ended_at=1788338185	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=0	lock_before=<identity>	lock_after=<identity>	successor=none
