@@ -1148,6 +1148,56 @@ fm_autoarm_release_abandoned() {  # <state-dir>
   return 1
 }
 
+# --- Claude Stop auto-arm continuity renewal ---------------------------------
+# Claude Code enforces a command hook's declared timeout by SIGTERMing the whole
+# hook-owned process group, watcher included, and an asyncRewake hook has no
+# unbounded setting (an absent timeout falls back to Claude's own default). A
+# park that outlives the declared timeout therefore used to close as an
+# anonymous "arm-interrupted ... successor=none" and leave the home blind until
+# the session's next real turn end. Shortly before that deadline the Stop hook
+# now requests a MARKED close instead: it writes this one-line marker naming the
+# exact arm pid it is about to TERM plus the successor token the ledger should
+# record, and the arm's signal handler claims the marker so the close is logged
+# as reason=continuity-renewal with that successor, never as arm-interrupted
+# with no successor. The marker is home-scoped and matched by pid: a leftover
+# marker naming any other pid proves nothing and is ignored, and the requesting
+# hook removes it after reaping the arm.
+fm_autoarm_renewal_request() {  # <state-dir> <arm-pid> <successor-token>
+  local state=$1 pid=$2 successor=$3 tmp
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$successor" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  tmp="$state/.claude-autoarm-renewal.tmp.${BASHPID:-$$}"
+  if printf 'pid=%s successor=%s\n' "$pid" "$successor" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$state/.claude-autoarm-renewal" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  return 1
+}
+
+# Claim a pending renewal request for exactly this arm pid. Sets
+# FM_AUTOARM_RENEWAL_SUCCESSOR on success and leaves the marker in place for
+# the requesting hook to remove after it reaps the arm.
+# shellcheck disable=SC2034 # Read by callers after fm_autoarm_renewal_claim returns.
+FM_AUTOARM_RENEWAL_SUCCESSOR=
+fm_autoarm_renewal_claim() {  # <state-dir> <arm-pid>
+  local state=$1 pid=$2 line successor
+  FM_AUTOARM_RENEWAL_SUCCESSOR=
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -f "$state/.claude-autoarm-renewal" ] || return 1
+  # 2> before <: a failed input redirection reports through whatever stderr is
+  # current when it runs, so the suppression has to be established first.
+  IFS= read -r line 2>/dev/null < "$state/.claude-autoarm-renewal" || return 1
+  case "$line" in
+    "pid=$pid successor="*) successor=${line#*successor=} ;;
+    *) return 1 ;;
+  esac
+  case "$successor" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  # shellcheck disable=SC2034 # Read by callers after fm_autoarm_renewal_claim returns.
+  FM_AUTOARM_RENEWAL_SUCCESSOR=$successor
+  return 0
+}
+
 fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }
