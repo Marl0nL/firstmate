@@ -46,6 +46,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# fm_busy_native_busy owns how far a backend's native busy verdict is trusted,
+# so fm_wr_confirmed_busy never accepts herdr's registry idle as authoritative.
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
 # fm_wr_home resolves a secondmate home through the single owner of the
@@ -96,7 +100,7 @@ throttled() {  # <name> <kind>
 
 emit_for() {  # <name>
   local name=$1 home inbox pending residency msg newest age idle quiet meta
-  local backend target last_seen activity raised
+  local backend target harness last_seen activity raised
 
   fm_wr_load "$CONFIG" "$name" || return 0
   home=$(fm_wr_home "$STATE" "$name" "$DATA") || return 0
@@ -139,7 +143,7 @@ emit_for() {  # <name>
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || target=$(fm_meta_get "$meta" window)
   [ -n "$target" ] || return 0
-  fm_wr_confirmed_busy "$backend" "$target" && return 0
+  harness=$(fm_meta_get "$meta" harness)
 
   # Quiet since the LATEST of: this residency starting, the last message seen,
   # and the home's own most recent working footprint. Anything newer than the
@@ -158,6 +162,7 @@ emit_for() {  # <name>
   [ "$quiet" -gt 0 ] 2>/dev/null || return 0
   idle=$((NOW - quiet))
   [ "$idle" -ge "$FM_WR_IDLE_SECS" ] || return 0
+  fm_wr_confirmed_busy "$backend" "$target" "$harness" && return 0
   throttled "$name" standdown && return 0
   printf 'wake-resident %s: quiet %sm, nothing in flight - stand it down with bin/fm-wake-resident.sh standdown %s\n' \
     "$name" "$((idle / 60))" "$name"

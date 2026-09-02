@@ -616,6 +616,12 @@ fm_daemon_primary_harness() {
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} native tail40 harness
   harness=$(fm_daemon_primary_harness)
+  # This guards the SUPERVISOR pane (away-mode injection), not a recorded worker
+  # task, and it already never trusts a native idle: only an exact native busy
+  # short-circuits, and every other verdict falls through to the rendered footer.
+  # It deliberately keeps the primary's own native busy short-circuit (its
+  # contract in tests/fm-daemon.test.sh), distinct from the worker-state trust
+  # rule fm_busy_native_busy owns for recorded tasks.
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$native" in
     busy) return 0 ;;

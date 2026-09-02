@@ -990,6 +990,41 @@ test_kimi_capture_fallback_uses_recorded_harness() (
   pass "pending replies scope Kimi capture fallback by recorded harness"
 )
 
+# Reproduction (2026-09-01): a herdr crew mid-turn whose native agent-registry
+# reads idle while the pane clearly shows Claude's busy footer. herdr's registry
+# is a shadow of reality for a pane-typed agent, so the observation must classify
+# BUSY from the pane, not idle from the registry - otherwise the repost ladder
+# fires a spurious pending-reply-missed against a working secondmate.
+test_herdr_registry_idle_shadow_uses_capture() (
+  local busy_footer
+  busy_footer='  Wibbling... (9m 41s · esc to interrupt)'
+  # shellcheck disable=SC2329 # invoked indirectly through the observation
+  fm_backend_busy_state() { printf 'idle'; }
+  # shellcheck disable=SC2329 # invoked indirectly through the observation
+  fm_backend_capture() { printf '%s\n' "$busy_footer"; }
+  # The two signals must genuinely DIVERGE, or this case would prove nothing.
+  [ "$(fm_backend_busy_state herdr default:w1X:p2)" = idle ] \
+    || fail "fixture must make the herdr registry read idle"
+  printf '%s\n' "$busy_footer" | fm_busy_lines_match claude \
+    || fail "fixture must make the pane capture read busy for claude"
+  [ "$(fm_pending_reply_backend_observation herdr default:w1X:p2 fm-hibit claude)" = busy ] \
+    || fail "a herdr registry idle must not shadow a working claude secondmate's busy footer"
+  # Losing the registry signal entirely still classifies busy from the capture.
+  # shellcheck disable=SC2329
+  fm_backend_busy_state() { printf 'unknown'; }
+  [ "$(fm_pending_reply_backend_observation herdr default:w1X:p2 fm-hibit claude)" = busy ] \
+    || fail "a missing herdr registry signal must still classify busy from the capture"
+  # A genuinely quiet pane under the same idle registry degrades to fallback-idle
+  # (grace-gated), never a trusted idle that could shadow a late-starting turn.
+  # shellcheck disable=SC2329
+  fm_backend_busy_state() { printf 'idle'; }
+  # shellcheck disable=SC2329
+  fm_backend_capture() { printf 'a quiet idle pane\n'; }
+  [ "$(fm_pending_reply_backend_observation herdr default:w1X:p2 fm-hibit claude)" = fallback-idle ] \
+    || fail "a quiet herdr pane must degrade to fallback-idle, not a trusted registry idle"
+  pass "herdr registry idle never shadows a working secondmate's busy footer (capture owns the verdict)"
+)
+
 test_tick_skips_terminal_and_reuses_target_observation() {
   (
     local home state open1 open2 resolved escalated rec probe_log probes scan_log scans snapshot
@@ -1279,6 +1314,7 @@ test_helper_report_resolves
 test_busy_idle_observation_via_backend_abstraction
 test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
+test_herdr_registry_idle_shadow_uses_capture || exit 1
 test_tick_skips_terminal_and_reuses_target_observation
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate

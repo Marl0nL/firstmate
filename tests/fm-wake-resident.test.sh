@@ -18,6 +18,20 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# Sourced for test_confirmed_busy_never_trusts_a_herdr_registry_idle, which drives
+# the real fm_wr_confirmed_busy predicate directly (the other tests invoke the
+# scripts as subprocesses). fm-busy-lib owns fm_busy_native_busy, fm-tmux-lib
+# brings fm_pane_is_busy and fm_busy_lines_match, fm-backend brings the capture
+# dispatcher these stub.
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$ROOT/bin/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$ROOT/bin/fm-backend.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$ROOT/bin/fm-busy-lib.sh"
+# shellcheck source=bin/fm-wake-resident-lib.sh
+. "$ROOT/bin/fm-wake-resident-lib.sh"
+
 WR="$ROOT/bin/fm-wake-resident.sh"
 POLL="$ROOT/bin/fm-wake-resident-poll.sh"
 
@@ -531,6 +545,38 @@ test_standdown_preserves_home_and_lease() {
   pass "an idle stand-down exits the process and leaves home, lease, meta, backlog and status intact"
 }
 
+# The quiet clock alone never licenses a stand-down: a mate can sit past the idle
+# threshold with no fresh footprint and still be mid-turn, so the poll must reach
+# the pane before it offers to stand it down. The two worlds are separate because
+# the offer is throttled per home once it has been made.
+test_poll_refuses_standdown_while_the_pane_reads_busy() {
+  local quiet_home busy_home footer out
+  footer='  Wibbling... (9m 41s . esc to interrupt)'
+  pose_pane claude
+
+  quiet_home=$(new_world "$TMP/standdown-quiet-pane" advisor)
+  wr "$quiet_home" enable advisor --idle-secs 1800 >/dev/null
+  make_quiet "$quiet_home" advisor 7200
+
+  busy_home=$(new_world "$TMP/standdown-busy-pane" advisor)
+  wr "$busy_home" enable advisor --idle-secs 1800 >/dev/null
+  make_quiet "$busy_home" advisor 7200
+
+  # The two worlds differ ONLY in what the pane renders, or this proves nothing.
+  fm_pane_is_busy firstmate:fm-advisor claude \
+    && fail "fixture must make the default pane capture read idle for claude"
+  FM_FAKE_PANE_CAPTURE=$footer fm_pane_is_busy firstmate:fm-advisor claude \
+    || fail "fixture must make the busy pane capture read busy for claude"
+
+  out=$(poll "$quiet_home")
+  assert_contains "$out" "nothing in flight - stand it down" \
+    "an idle pane past the quiet threshold must still be offered for stand-down: $out"
+  out=$(FM_FAKE_PANE_CAPTURE=$footer poll "$busy_home")
+  assert_not_contains "$out" "stand it down" \
+    "a mate working past the quiet threshold was still offered for stand-down: $out"
+  pass "a busy pane refuses the stand-down offer even once the quiet threshold has passed"
+}
+
 test_persistence_invariant_catches_a_loss() {
   local home sub snap out
   home=$(new_world "$TMP/persist" advisor)
@@ -801,6 +847,55 @@ test_exit_commands_match_harness_adapters() {
   pass "the executable exit-command table agrees with harness-adapters"
 }
 
+# fm_wr_confirmed_busy gates the stand-down: returning "not busy" while the mate
+# is mid-turn would exit a working secondmate. herdr's native agent-registry idle
+# is a shadow of reality for a pane-typed agent (fm_busy_native_busy /
+# docs/herdr-backend.md), so a registry idle must reach the pane's own busy
+# footer before concluding not-busy - exactly the divergence confirmed live on
+# 2026-09-01. Real processes, no harness: the registry and pane are stubbed and
+# the real predicate runs.
+test_confirmed_busy_never_trusts_a_herdr_registry_idle() (
+  local busy_footer
+  busy_footer='  Wibbling... (9m 41s · esc to interrupt)'
+  # shellcheck disable=SC2329 # invoked indirectly through fm_wr_confirmed_busy
+  fm_backend_busy_state() { printf 'idle'; }
+  # shellcheck disable=SC2329 # invoked indirectly through fm_wr_confirmed_busy
+  fm_backend_capture() { printf '%s\n' "$busy_footer"; }
+  # The two signals must genuinely DIVERGE, or this case would prove nothing.
+  # SC2218: the stub above is defined 4 lines up; shellcheck miscounts because the
+  # stub is redefined again later in this same subshell.
+  # shellcheck disable=SC2218
+  [ "$(fm_backend_busy_state herdr default:w1X:p2)" = idle ] \
+    || fail "fixture must make the herdr registry read idle"
+  printf '%s\n' "$busy_footer" | fm_busy_lines_match claude \
+    || fail "fixture must make the pane capture read busy for claude"
+  fm_wr_confirmed_busy herdr default:w1X:p2 claude \
+    || fail "a herdr registry idle must not stand down a working claude secondmate"
+  # Losing the registry signal entirely still confirms busy from the capture.
+  # shellcheck disable=SC2329
+  fm_backend_busy_state() { printf 'unknown'; }
+  fm_wr_confirmed_busy herdr default:w1X:p2 claude \
+    || fail "a missing herdr registry signal must still confirm busy from the capture"
+  # A genuinely quiet pane is correctly not-confirmed-busy; the stand-down's
+  # other gates (idle time, in-flight work) then decide.
+  # shellcheck disable=SC2329
+  fm_backend_busy_state() { printf 'idle'; }
+  # shellcheck disable=SC2329
+  fm_backend_capture() { printf 'a quiet idle pane\n'; }
+  if fm_wr_confirmed_busy herdr default:w1X:p2 claude; then
+    fail "a quiet herdr pane must not be confirmed busy"
+  fi
+  # A TRUSTED native busy (herdr-detected, non-claude) still short-circuits
+  # without reading the pane at all.
+  # shellcheck disable=SC2329
+  fm_backend_busy_state() { printf 'busy'; }
+  # shellcheck disable=SC2329
+  fm_backend_capture() { fail "a trusted native busy must not need a capture fallback"; }
+  fm_wr_confirmed_busy herdr default:w1X:p2 pi \
+    || fail "a herdr-detected native busy must confirm busy for a non-claude harness"
+  pass "fm_wr_confirmed_busy never trusts a herdr registry idle and reaches the pane's busy footer"
+)
+
 # Evaluate a reread-nudge suppression predicate against the current fixture pane,
 # exactly as bin/fm-bootstrap.sh's nudge path and bin/fm-update.sh's nudge listing
 # call it. Echoes "SUPPRESS: <reason>" or "KEEP". <fn> is fm_wr_dormant_wake_resident
@@ -924,6 +1019,7 @@ test_self_exited_standdown_still_refuses_work_and_mail
 test_standdown_records_a_settle_race_self_exit
 test_standdown_send_failure_still_fails_while_resident
 test_standdown_preserves_home_and_lease
+test_poll_refuses_standdown_while_the_pane_reads_busy
 test_persistence_invariant_catches_a_loss
 test_next_message_wakes_it_again
 test_standdown_refuses_unknown_harness_exit
@@ -938,3 +1034,4 @@ test_nudge_guard_blocks_a_bare_shell_but_dormant_skip_does_not
 test_nudge_never_suppresses_a_remote_secondmate
 test_nudge_keeps_a_dead_verdict_on_an_unverified_harness
 test_exit_commands_match_harness_adapters
+test_confirmed_busy_never_trusts_a_herdr_registry_idle || exit 1

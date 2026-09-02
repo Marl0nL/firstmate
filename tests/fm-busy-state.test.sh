@@ -421,6 +421,45 @@ test_herdr_native_busy_not_trusted_for_claude() {
   pass "claude does not borrow herdr's native busy verdict (report-agent echo), but its own record still counts"
 }
 
+# fm_busy_native_busy is the ONE owner of how far a backend's native
+# agent-registry verdict (fm_backend_busy_state) is trusted. It is what the
+# endpoint delivery-confirmation observers (secondmate pending-reply,
+# wake-resident stand-down) share, so its rule is pinned here directly rather
+# than only through fm_busy_classify.
+test_native_busy_owner_trusts_busy_only() {
+  local FAKE_NATIVE
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_native_busy
+  fm_backend_busy_state() { printf '%s' "$FAKE_NATIVE"; }
+  FAKE_NATIVE=busy
+  fm_busy_native_busy herdr s:p pi \
+    || fail "a native busy must be trusted for a non-claude harness"
+  FAKE_NATIVE=idle
+  if fm_busy_native_busy herdr s:p pi; then
+    fail "a native idle must NOT be trusted - it is a pane-typed agent's shadow"
+  fi
+  FAKE_NATIVE=unknown
+  if fm_busy_native_busy herdr s:p pi; then
+    fail "a native unknown must NOT be trusted as busy"
+  fi
+  FAKE_NATIVE=busy
+  if fm_busy_native_busy herdr s:p claude; then
+    fail "claude's native busy is firstmate's own report-agent echo and must NOT be trusted"
+  fi
+  if fm_busy_native_busy herdr s:p pi-signed; then
+    : # non-claude harnesses keep the trusted busy
+  else
+    fail "pi-signed native busy must stay trusted"
+  fi
+  unset -f fm_backend_busy_state
+  # With the backend layer unsourced there is no native primitive at all; the
+  # owner defers to the caller's own reality-touching fallback rather than
+  # asserting busy.
+  if fm_busy_native_busy herdr s:p pi; then
+    fail "a missing native primitive must defer, not assert busy"
+  fi
+  pass "fm_busy_native_busy trusts a native busy only (never idle, never claude, never when unsourced)"
+}
+
 # The record parser runs inside sourcing callers (the watcher, the daemon, the
 # crew-state reader), so it must not disturb their shell: no clobbered
 # positional parameters and no changed glob setting.
@@ -484,6 +523,7 @@ test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
 test_herdr_native_busy_not_trusted_for_claude
+test_native_busy_owner_trusts_busy_only
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
 

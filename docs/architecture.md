@@ -137,8 +137,9 @@ Endpoint death is the only process-level override and yields dead; child process
 `state/<id>.turn-ended` files remain wake notifications, not current state.
 
 Each record is bound to an incarnation token minted when the task's wiring is armed, so an event from a superseded incarnation is rejected rather than applied, and a record left behind by one classifies unknown.
-Three rendered-text checks deliberately remain outside this contract because they answer delivery questions: submit acknowledgement and the away-mode supervisor-pane busy guard consume the shared delivery-footer matcher owned by `bin/fm-composer-lib.sh`, while `bin/fm-pending-reply-lib.sh` owns the secondmate delivery-confirmation observation.
-All are harness-scoped rather than a global pattern union, and none is a recorded worker state source.
+Four rendered-text checks deliberately remain outside this contract because they answer delivery questions: submit acknowledgement and the away-mode supervisor-pane busy guard consume the shared delivery-footer matcher owned by `bin/fm-composer-lib.sh`, `bin/fm-pending-reply-lib.sh` owns the secondmate delivery-confirmation observation, and `fm_wr_confirmed_busy` (`bin/fm-wake-resident-lib.sh`) reads the pane before a wake-resident stand-down concludes not-busy.
+Each matches the pane's recorded harness and never borrows another harness's signature; only a caller with no recorded harness at all falls back to the shared default union, as the submit cores and the stand-down gate's long-standing tmux arm do.
+None is a recorded worker state source.
 
 ## Runtime session backends
 
@@ -150,7 +151,7 @@ Runtime auto-detection is innermost-first: `$TMUX` wins over `HERDR_ENV=1`, whic
 Unknown backend names fail loudly.
 For compatibility, default tmux tasks do not write `backend=tmux`; every reader treats a missing `backend=` field as `tmux`.
 `fm-watch.sh` decides each window's busy state through the semantic contract above rather than by polling the backend for rendered text.
-Herdr's native `agent.get` verdict still participates, but only as evidence of activity: a native `busy` is accepted when the task has no record of its own, while a native `idle` is not, because `agent.get` reports generation state and reads idle while a worker blocks on its own long-running foreground tool call; Claude tasks are excluded because their herdr-native state is firstmate's own published report echo ([`herdr-backend.md`](herdr-backend.md#restart-and-liveness-behavior)).
+Herdr's native `agent.get` verdict still participates, but only as evidence of activity: a native `busy` is accepted when the task has no record of its own, a native `idle` never is, and Claude tasks are excluded entirely; `fm_busy_native_busy` in `bin/fm-busy-lib.sh` owns how far that native verdict is trusted for every consumer of it, and [`herdr-backend.md`](herdr-backend.md#restart-and-liveness-behavior) owns why a pane-typed agent's registry state is not authoritative.
 tmux, zellij, orca, and cmux expose no native busy primitive at all, so a task on those backends is classified purely from its adapter's own lifecycle record.
 That poll loop is still the default event source for backends with no native push events, so this stays an extraction of the abstraction rather than a watcher rewrite.
 For capable Herdr sessions, the same watcher replaces its terminal sleep with a bounded native event wait that immediately surfaces `blocked`; [Push events and polling fallback](herdr-backend.md#push-events-and-polling-fallback) owns the current mechanism and capability gates, while [runtime backend verification](verification/runtime-backends.md#native-blocked-event) owns the active evidence.

@@ -231,8 +231,8 @@ The poll density bounds the residual possibility of an extremely fast complete t
 The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
 This generous floor is required for small composer and peek reads.
 
-Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
-The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that, and a Claude pane's native state is skipped entirely because it is firstmate's own published echo (see [Restart and liveness behavior](#restart-and-liveness-behavior)).
+Herdr's native agent state is positive evidence of activity only when it reads `busy` for a harness Herdr detects itself, and is never evidence that a worker has stopped, so every consumer reaches the pane before concluding not-busy.
+[Restart and liveness behavior](#restart-and-liveness-behavior) owns that trust rule and why a registry `idle` or a Claude pane's status is only a shadow of reality.
 A human-blocked permission dialog has no busy banner and still surfaces.
 
 ## Composer and injection safety
@@ -297,7 +297,12 @@ Firstmate also publishes each managed Claude crew's state - and each secondmate 
 The publish is reality-gated: it only takes on a pane whose foreground process the U2 probe confirms as a live verified harness, and when the agent is gone (crashed, or a restored bare-shell husk such as a stood-down wake-resident advisor) it instead clears any still-registered firstmate record with `pane release-agent`, returning the pane to `agent_not_found` so the liveness classifier, dead-crew relaunch, and husk reclaim all read reality rather than firstmate's own echo.
 `pane report-agent` takes only on an unclaimed pane, so this is scoped to Claude panes firstmate launches; Herdr registers pi/codex natively.
 Suppressing a secondmate supervisor's claim disables its own `HERDR_ENV=1` detection, so the spawn and every convergence sweep pin `config/backend=herdr` into the secondmate home through the inheritance effective-backend override ([`fm-config-inherit-lib.sh`](../bin/fm-config-inherit-lib.sh)), keyed on the secondmate's own endpoint backend (its meta `backend=`), and the suppression itself fires only when that pin is actually present in the home - a remote or otherwise unpinned mate stays integration-claimed; the captain's OWN primary pane is captain-launched and integration-claimed, so it is deliberately never published (registration is secondmates-only from the primary's watcher, and each secondmate's own watcher publishes its own crews).
-Because Herdr's native `agent_status` for a Claude crew is now firstmate's own report echo, `bin/fm-busy-lib.sh` no longer borrows Herdr's native busy verdict for `claude`.
+This is why Herdr's native agent-registry state is not authoritative for the busy/idle plane of a pane-typed agent, the busy/idle twin of the rule below that a replayed metadata verdict is never authoritative for liveness.
+Firstmate launches every crew by TYPING the launch command into a pane rather than `herdr agent start`, so the registry carries no accurate turn state for it: a genuine `working` transition for a harness Herdr detects natively (pi/codex) is trustworthy as busy, but a registry `idle` is only a shadow (a long foreground tool call, or a mid-turn Claude whose `agent_status` never leaves idle, both read idle), and a Claude pane's status is firstmate's own report echo and is not an independent signal at all.
+`fm_busy_native_busy` (`bin/fm-busy-lib.sh`) is the one owner of that trust rule - native busy only, never a registry idle, never a Claude echo - and every worker-facing consumer of the native verdict applies it: `fm_busy_classify` for recorded worker tasks, and the delivery-confirmation observers for endpoints firstmate does not semantically wire (secondmate pending-reply in `bin/fm-pending-reply-lib.sh`, wake-resident stand-down in `bin/fm-wake-resident-lib.sh`).
+Each of those reaches the pane's own rendered busy footer before concluding not-busy, so a working secondmate is never nagged, escalated, or stood down on a shadow idle.
+`pane_is_busy` (`bin/fm-supervise-daemon.sh`) is the one deliberate exception, because it guards the away-mode SUPERVISOR pane rather than a recorded worker task: it reads the native verdict directly under its own separately tested busy-only short-circuit, which likewise never trusts an idle and falls through to the same rendered footer.
+The dated measurement and its live guard (`FM_HERDR_BUSY_STATE_LIVE=1 tests/fm-herdr-busy-state-live-e2e.test.sh`) are recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) "Herdr pane-typed busy state".
 The three captain-consented global attention settings (`agent_panel_sort = "priority"`, `[ui.toast]`, `[ui.sound]`) are applied idempotently by `bin/fm-herdr-attention-config.sh` (dated backup, validate, reload).
 The dated 0.8.2 report-agent-publishing measurements are recorded in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) "Agent-state publishing (U3)" (live guard `FM_HERDR_ATTENTION_LIVE=1 tests/fm-herdr-attention-live-e2e.test.sh`) and "Supervisor-pane self-registration" (live guard `FM_HERDR_SUPERVISOR_SELFREG_LIVE=1 tests/fm-herdr-supervisor-selfreg-live-e2e.test.sh`).
 
@@ -382,6 +387,7 @@ tests/fm-afk-pi-herdr-return-e2e.test.sh
 tests/fm-watch-herdr-report.test.sh
 tests/fm-herdr-attention-config.test.sh
 tests/fm-herdr-attention-live-e2e.test.sh
+tests/fm-herdr-busy-state-live-e2e.test.sh
 tests/fm-launch-health-lib.test.sh
 tests/fm-secondmate-liveness.test.sh
 tests/fm-secondmate-manual-mode-e2e.test.sh

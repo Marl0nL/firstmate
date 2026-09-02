@@ -513,6 +513,26 @@ Observed 2026-08-19:
 ok - live Herdr submit confirm: Claude Code (2.1.236 (Claude Code)) on herdr 0.8.0 reports empty for a landed idle steer
 ```
 
+### Herdr pane-typed busy state
+
+Measured 2026-09-02 against Herdr 0.8.2 and Claude Code 2.1.258 in an isolated `fm-lab-` session.
+
+Herdr registers no agent record for a pane-typed Claude (firstmate launches it by typing the command, not `herdr agent start`), so across a landed multi-second generation turn `herdr agent get` answered `agent_not_found` and `fm_backend_herdr_busy_state` read `unknown` on every sample, while the pane rendered Claude's busy footer (`… esc to interrupt`).
+In the live fleet the same shadow instead reads `idle` because firstmate publishes the pane's own state through `pane report-agent` (the 2026-09-01 incident); both are non-busy verdicts that must not shadow a working crew.
+[`herdr-backend.md`](../herdr-backend.md#restart-and-liveness-behavior) owns the trust rule this measurement motivates - which native verdict `fm_busy_native_busy` (`bin/fm-busy-lib.sh`) accepts, and which consumers apply it.
+The portable regressions pin the divergence with no harness: `tests/fm-busy-state.test.sh` (the owner), `tests/fm-pending-reply.test.sh`, and `tests/fm-wake-resident.test.sh` each drive an idle/unknown registry against a busy capture and assert the busy verdict survives, including when the registry signal is lost entirely.
+Refresh the live Claude proof with:
+
+```sh
+FM_HERDR_BUSY_STATE_LIVE=1 tests/fm-herdr-busy-state-live-e2e.test.sh
+```
+
+Observed 2026-09-02:
+
+```text
+ok - live Herdr busy state: Claude Code (2.1.258 (Claude Code)) on herdr 0.8.2 reads native='unknown' yet the consumers classify busy from the pane in isolated session fm-lab-herdr-busy-state-2218598-22084
+```
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

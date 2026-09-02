@@ -727,10 +727,11 @@ assert_present "$PARENT/state/procevent/remote-reply-ios.source" "remote spawn d
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.sh"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
   || fail "remote endpoint was not projected alive from its own host"
-# Herdr reports a native agent state, so the delivery observation resolves
-# without the rendered-output fallback a tmux endpoint needs.
-[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios)" = idle ] \
-  || fail "remote endpoint delivery observation did not execute on its own host"
+# Herdr's native agent state is not authoritative for a pane-typed agent, so the
+# delivery observation reads the rendered output exactly like a tmux endpoint and
+# a quiet pane resolves to the grace-gated fallback rather than a trusted idle.
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios)" = fallback-idle ] \
+  || fail "remote endpoint delivery observation did not reach the rendered-output fallback on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
