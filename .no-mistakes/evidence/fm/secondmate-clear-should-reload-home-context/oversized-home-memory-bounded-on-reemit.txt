@@ -1,0 +1,28 @@
+# A large-but-sanctioned home memory on the /clear re-emit
+
+data/learnings.md is 15769 bytes - well inside config/startup-memory-budget, far past
+the ~10,000-character inline preview. Leading with it unbounded would swallow the
+whole preview, so the re-emit section caps each memory file and points at the rest.
+
+## What the re-emit prints for it (the cut and its recovery pointer)
+
+data/learnings.md
+--------------------------------------------------------------------------------
+# learnings
+
+## Replying to a marked from-firstmate request
+Answer promptly on the status channel and echo the corr= token from the request.
+...
+... [truncated to fit the re-emit preview budget; read the full file at /tmp/fm-ev-work/big-memory-home/data/learnings.md (15769 bytes)] ...
+
+tail of the file is NOT in the re-emit: confirmed (cut, pointer names the full path)
+pointer lines emitted: 1 (one per over-cap file)
+
+## The sections behind the memory still fit the preview
+offset of READ-ONCE CONTRACT in the re-emit: 6585 chars (budget ~10000)
+offset of SUPERVISION OPERATING INSTRUCTIONS: 5005 chars
+offset of FLEET STATE: 8305 chars
+
+## A true startup is NOT bounded: it prints the same file whole
+tail marker present in the full startup digest: yes
+truncation pointer present in the full startup digest: no

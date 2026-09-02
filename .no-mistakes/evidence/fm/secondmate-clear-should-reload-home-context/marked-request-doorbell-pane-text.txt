@@ -1,0 +1,40 @@
+# The doorbell a secondmate actually receives in its pane
+
+Driven through the real bin/fm-send.sh with a tmux that records the literal
+keystrokes; the text below is byte-for-byte what was typed into the pane.
+The request payload itself never gets typed - it rides the durable inbox record -
+so the doorbell is ALL a freshly /clear-ed mate has to go on.
+
+## Marked from-firstmate request to the devops SECONDMATE  (fm-send.sh fm-devops "audit the release build")
+
+--- BASE  (43ead08, before the fix) ---
+Firstmate instruction waiting: list /tmp/fm-ev-doorbell/base-home/state/devops.inbox/*.msg and, in numeric order, read and act on each, then mv each handled file to /tmp/fm-ev-doorbell/base-home/state/devops.inbox/handled/.
+
+--- FIXED (5900b2e, this change) ---
+Firstmate instruction waiting: list /tmp/fm-ev-doorbell/fixed-home/state/devops.inbox/*.msg and, in numeric order, read and act on each, then mv each handled file to /tmp/fm-ev-doorbell/fixed-home/state/devops.inbox/handled/. Each is a from-firstmate request: after doing it, append one status line that includes its corr=<id> token (shown in the request) to /tmp/fm-ev-doorbell/fixed-home/state/devops.status - the main firstmate reads only that status file, not this pane, so a reply only here is lost.
+
+## Unmarked steer to an ordinary CREWMATE (fm-send.sh fm-build "rerun the flaky suite")
+
+--- BASE ---
+Firstmate instruction waiting: list /tmp/fm-ev-doorbell/base-home/state/build.inbox/*.msg and, in numeric order, read and act on each, then mv each handled file to /tmp/fm-ev-doorbell/base-home/state/build.inbox/handled/.
+
+--- FIXED ---
+Firstmate instruction waiting: list /tmp/fm-ev-doorbell/fixed-home/state/build.inbox/*.msg and, in numeric order, read and act on each, then mv each handled file to /tmp/fm-ev-doorbell/fixed-home/state/build.inbox/handled/.
+
+crewmate doorbell: BYTE-IDENTICAL between base and fixed once the home path is
+normalized away - the unmarked doorbell is untouched by this change.
+
+## Remote-route leg (fm-remote-secondmate-control.sh send rsm ...)
+
+The record the real host-local remote leg wrote: /tmp/fm-ev-doorbell/remote-home/state/parent-route/rsm.inbox/001.msg
+The doorbell that leg rings for it (bin/fm-task-inbox-lib.sh, the same function
+fm_task_inbox_ring types into the herdr pane):
+
+--- BASE ---
+Firstmate instruction waiting: list /tmp/fm-ev-doorbell/remote-home/state/parent-route/rsm.inbox/*.msg and, in numeric order, read and act on each, then mv each handled file to /tmp/fm-ev-doorbell/remote-home/state/parent-route/rsm.inbox/handled/.
+
+--- FIXED ---
+Firstmate instruction waiting: list /tmp/fm-ev-doorbell/remote-home/state/parent-route/rsm.inbox/*.msg and, in numeric order, read and act on each, then mv each handled file to /tmp/fm-ev-doorbell/remote-home/state/parent-route/rsm.inbox/handled/. Each is a from-firstmate request: after doing it, append one status line that includes its corr=<id> token (shown in the request) to /tmp/fm-ev-doorbell/remote-home/state/parent-replies.status - the main firstmate reads only that status file, not this pane, so a reply only here is lost.
+
+Names the relay log the parent really reads (state/parent-replies.status): YES
+Never names the dead derived sibling (parent-route/rsm.status): YES

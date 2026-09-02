@@ -1,0 +1,65 @@
+# /clear re-emit delivery: does the cleared learning reach the agent?
+
+Home: a devops-secondmate primary whose data/learnings.md holds the corr= reply rule
+the trigger incident hinged on. Both legs run the REAL session-open hook
+(bin/fm-sessionstart-run.sh --source clear) against an identical home.
+Claude caps SessionStart hook stdout injected inline at ~10,000 characters and
+saves the rest to a file, so only the HEAD preview is what a cleared agent acts on.
+
+## BASE  (43ead08, before the fix)
+digest bytes total: 11790
+learnings rule ("put the corr= token from the request in that status line")
+  first appears at byte offset: 10991
+  PAST the ~10,000-char inline preview -> the cleared agent never sees it
+  in first 10000 chars: NO
+
+## FIXED (5900b2e, this change)
+digest bytes total: 12958
+learnings rule ("put the corr= token from the request in that status line")
+  first appears at byte offset: 2828
+  INSIDE the ~10,000-char inline preview -> the cleared agent sees it
+  in first 10000 chars: YES
+
+## Section order on the /clear re-emit (fixed build)
+  12:LOCK
+  16:BOOTSTRAP
+  29:OPERATIONAL MEMORY (context re-emit priority)
+  61:WAKE QUEUE
+  65:SUPERVISION OPERATING INSTRUCTIONS - primary harness: unknown
+  89:READ-ONCE CONTRACT
+  116:FLEET STATE
+  249:NETWORK CHECKS
+  256:CONTEXT
+  271:OPERATIONAL MEMORY (context re-emit priority), ahead of the wake queue and the bulky fleet
+  276:NEXT STEP
+
+## Section order on the /clear re-emit (base build)
+  12:LOCK
+  16:BOOTSTRAP
+  28:WAKE QUEUE
+  32:SUPERVISION OPERATING INSTRUCTIONS - primary harness: unknown
+  56:READ-ONCE CONTRACT
+  80:FLEET STATE
+  213:NETWORK CHECKS
+  220:CONTEXT
+  260:NEXT STEP
+
+## Full startup (fixed build) is unchanged: memory stays in CONTEXT
+  22:WAKE QUEUE
+  90:FLEET STATE
+  236:CONTEXT
+  learnings rule offset on startup: 13612
+
+## /compact re-emit on the same home (not regressed: every section still present)
+learnings rule offset on compact: 2828 chars
+  12:LOCK
+  16:BOOTSTRAP
+  29:OPERATIONAL MEMORY (context re-emit priority)
+  61:WAKE QUEUE
+  65:SUPERVISION OPERATING INSTRUCTIONS - primary harness: unknown
+  89:READ-ONCE CONTRACT
+  116:FLEET STATE
+  249:NETWORK CHECKS
+  256:CONTEXT
+  271:OPERATIONAL MEMORY (context re-emit priority), ahead of the wake queue and the bulky fleet
+  276:NEXT STEP
