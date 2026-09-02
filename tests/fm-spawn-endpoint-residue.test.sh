@@ -25,7 +25,13 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-endpoint-residue)
 # '#{pane_id}' existence probe then report it gone); a sticky kill leaves it
 # present (a teardown that could not be confirmed). Every kill-window is logged
 # so a test can prove teardown was attempted. FM_FAKE_STATE toggles a
-# preexisting window by pre-touching present.
+# preexisting window by pre-touching present. FM_FAKE_SIBLING_WINDOW adds a
+# second, always-live window.
+#
+# The '#{pane_id}' probe reproduces real tmux target resolution: a bare window
+# name matches by exact name and then by PREFIX, while a '=name' target matches
+# only exactly. That is what makes a sibling window whose name merely starts with
+# fm-<id> observable to a test.
 make_residue_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -39,9 +45,20 @@ case "$*" in
   *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_CMD:-}"; exit 0 ;;
   *"#{pane_tty}"*) exit 0 ;;
   *"#{pane_id}"*)
-    if [ -n "$st" ] && [ -f "$st/present" ] && [ ! -f "$st/killed" ]; then
-      printf '%%1\n'; exit 0
-    fi
+    tgt=; prev=
+    for a in "$@"; do
+      if [ "$prev" = "-t" ]; then tgt=$a; break; fi
+      prev=$a
+    done
+    want=${tgt#*:}
+    live=
+    if [ -n "$st" ] && [ -f "$st/present" ] && [ ! -f "$st/killed" ]; then live=$wname; fi
+    for w in $live ${FM_FAKE_SIBLING_WINDOW:-}; do
+      case "$want" in
+        =*) [ "$w" = "${want#=}" ] && { printf '%%1\n'; exit 0; } ;;
+        *) case "$w" in "$want"*) printf '%%1\n'; exit 0 ;; esac ;;
+      esac
+    done
     exit 1 ;;
 esac
 case "${1:-}" in
@@ -49,6 +66,7 @@ case "${1:-}" in
     if [ -n "$st" ] && [ -f "$st/present" ] && [ ! -f "$st/killed" ]; then
       printf '%s\n' "$wname"
     fi
+    [ -z "${FM_FAKE_SIBLING_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_SIBLING_WINDOW"
     exit 0 ;;
   new-window)
     [ -z "$st" ] || touch "$st/present"
@@ -171,6 +189,27 @@ test_retry_on_residue_gives_actionable_message() {
   pass "fm-spawn: a retry on a leftover window is refused with an actionable, named remedy"
 }
 
+# A completed teardown must not be reported as leftover just because another
+# LIVE window's name starts with fm-<id>: tmux resolves a bare window name by
+# exact match, then fnmatch, then prefix, so the confirmation probe has to pin
+# the exact window the same way the kill and the remedy line do.
+test_teardown_confirmation_ignores_prefix_sibling_window() {
+  local rec out status
+  rec=$(make_case teardown-prefix-sibling)
+  read_case "$rec"
+  record_meta "$HOME_DIR" owner-f6 "window=firstmate:fm-owner-f6" "worktree=$CONTESTED" \
+    "project=$PROJ_DIR" "harness=claude" "kind=ship"
+  # fm-fix-g7-auth is a different task's live window; fm-fix-g7 is this spawn's,
+  # and its teardown genuinely removes it.
+  out=$(run_spawn "$rec" fix-g7 "$CONTESTED" FM_FAKE_SIBLING_WINDOW=fm-fix-g7-auth); status=$?
+  [ "$status" -ne 0 ] || fail "a spawn onto an owned slot must exit non-zero"$'\n'"--- output ---"$'\n'"$out"
+  assert_grep "fm-fix-g7" "$KILL_LOG" "the failed spawn must tear down the window it created"
+  assert_not_contains "$out" "could not tear down" \
+    "a live sibling window whose name only starts with fm-<id> must not make a completed teardown read as leftover"
+  pass "fm-spawn: teardown confirmation matches the exact window, not a prefix sibling"
+}
+
 test_guard_refusal_tears_down_created_window
 test_unconfirmed_teardown_prints_remedy
 test_retry_on_residue_gives_actionable_message
+test_teardown_confirmation_ignores_prefix_sibling_window

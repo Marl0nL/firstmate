@@ -751,6 +751,22 @@ spawn_endpoint_remedy_line() {
   esac
 }
 
+# spawn_endpoint_still_present: did the endpoint named by $BACKEND/$T survive the
+# teardown? tmux needs its own probe rather than the shared
+# fm_backend_target_exists: on this path $T is always "<session>:fm-<id>", a bare
+# window NAME, and tmux resolves a bare name by exact match, then fnmatch, then
+# PREFIX - so a live sibling window whose name merely starts with fm-<id> would
+# make a completed teardown read as still present and print a remedy for a window
+# that is already gone. Use the same '=ses:=win' exact form the adapter kill and
+# the remedy line use. Every other backend records an id-shaped target, which the
+# shared probe already resolves exactly.
+spawn_endpoint_still_present() {
+  case "$BACKEND" in
+    tmux) tmux display-message -p -t "=${T%%:*}:=${T#*:}" '#{pane_id}' >/dev/null 2>&1 ;;
+    *) fm_backend_target_exists "$BACKEND" "$T" 2>/dev/null ;;
+  esac
+}
+
 # spawn_preshield_start: before `treehouse get`, hold every worktree this home's
 # own state/*.meta already records so the pool cannot judge an owned slot free.
 # Treehouse v2 decides a slot is available from live-process cwd, and a parked
@@ -761,32 +777,30 @@ spawn_endpoint_remedy_line() {
 # worktree keeps that slot visibly taken for the duration of the get; the shields
 # are reaped immediately after acquisition (spawn_preshield_stop) and on every
 # exit path via the abort-cleanup trap. Both a task's own worktree= and a
-# secondmate's home= are recorded slots; vanished paths are skipped. This home's
-# own $ID meta is skipped, matching assert_worktree_unleased's same-id exemption
-# (a legitimate respawn may reacquire its own slot). FM_SPAWN_SHIELD_CMD overrides
-# the per-shield command for tests; production holds the slot with a bounded sleep
-# that self-exits (FM_SPAWN_SHIELD_TTL) so even an unreaped orphan cannot linger.
+# secondmate's home= are recorded slots; a path that no longer exists is the only
+# one skipped. EVERY recorded worktree is shielded, including the spawning task's
+# own: this runs only on the fresh treehouse-acquire path (a --relaunch adopts its
+# recorded worktree in place and never gets here), so exempting $ID's own record
+# would protect no legitimate reacquisition and would leave a respawn onto a
+# surviving-but-dead id free to have its own slot reset out from under it.
+# FM_SPAWN_SHIELD_CMD overrides the per-shield command for tests; production holds
+# the slot with a bounded sleep that self-exits (FM_SPAWN_SHIELD_TTL) so even an
+# unreaped orphan cannot linger.
 spawn_preshield_start() {
-  local meta other_id path real seen ttl shield_cmd
+  local meta path real seen ttl shield_cmd
   SPAWN_SHIELD_PIDS=
   ttl=${FM_SPAWN_SHIELD_TTL:-90}
-  shield_cmd=${FM_SPAWN_SHIELD_CMD:-}
+  shield_cmd=${FM_SPAWN_SHIELD_CMD:-sleep $ttl}
   seen=$'\n'
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
-    other_id=$(basename "$meta" .meta)
-    [ "$other_id" != "$ID" ] || continue
     for path in "$(fm_meta_get "$meta" worktree)" "$(fm_meta_get "$meta" home)"; do
       [ -n "$path" ] || continue
       [ -d "$path" ] || continue
       real=$(real_path_or_raw "$path")
       case "$seen" in *$'\n'"$real"$'\n'*) continue ;; esac
       seen="$seen$real"$'\n'
-      if [ -n "$shield_cmd" ]; then
-        ( cd "$path" 2>/dev/null && exec $shield_cmd ) </dev/null >/dev/null 2>&1 &
-      else
-        ( cd "$path" 2>/dev/null && exec sleep "$ttl" ) </dev/null >/dev/null 2>&1 &
-      fi
+      ( cd "$path" 2>/dev/null && exec $shield_cmd ) </dev/null >/dev/null 2>&1 &
       SPAWN_SHIELD_PIDS="$SPAWN_SHIELD_PIDS $!"
     done
   done
@@ -885,7 +899,7 @@ spawn_abort_cleanup() {
     SPAWN_ENDPOINT_ABORT_CLEANUP=0
     if [ -n "${BACKEND:-}" ] && [ -n "${T:-}" ]; then
       fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null || true
-      if fm_backend_target_exists "$BACKEND" "$T" 2>/dev/null; then
+      if spawn_endpoint_still_present; then
         echo "warning: could not tear down the $BACKEND endpoint '$T' left by the failed spawn of $ID; remove it before retrying: $(spawn_endpoint_remedy_line)" >&2
       fi
     fi

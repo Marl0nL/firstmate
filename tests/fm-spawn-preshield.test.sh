@@ -202,6 +202,31 @@ test_enumeration_covers_worktree_and_home_skips_vanished() {
   pass "fm-spawn: shields cover worktree= and home= rows, dedupe one path, and skip vanished paths"
 }
 
+# A fresh (non-relaunch) spawn that REUSES an id whose record survived - the
+# agent and its window are gone, but state/<id>.meta and its worktree still hold
+# uncommitted work - must shield that id's OWN recorded worktree too. Nothing
+# refuses this spawn (the window is gone, and the lease guard exempts the same
+# id), so an unshielded own slot is exactly the slot `treehouse get` can hand
+# back and reset at acquisition, before any guard runs.
+test_shields_own_id_recorded_worktree_on_reused_id() {
+  local rec out status own
+  rec=$(make_case reused-id)
+  read_case "$rec"
+  own="$CASE_DIR/own-wt"
+  mkdir -p "$own"
+  record_meta "$HOME_DIR" revive-k1 "window=firstmate:fm-revive-k1" "worktree=$own" \
+    "project=$PROJ_DIR" "harness=claude" "kind=ship"
+  out=$(run_spawn "$rec" revive-k1); status=$?
+  expect_code 0 "$status" "respawning a dead id must succeed"$'\n'"--- output ---"$'\n'"$out"
+  assert_grep $'up\t'"$own" "$SHIELD_LOG" \
+    "the respawned id's own recorded worktree must be shielded before the get"
+  assert_grep "$own" "$GET_SNAPSHOT" \
+    "the respawned id's own recorded worktree must be held for the duration of the get"
+  piddir_empty || fail "every shield must be reaped after the get (no orphan sleeps)"
+  pass "fm-spawn: shields the spawning id's own recorded worktree when a dead id is respawned fresh"
+}
+
 test_shields_live_during_get_then_reaped_on_success
 test_shields_reaped_on_failure_exit
 test_enumeration_covers_worktree_and_home_skips_vanished
+test_shields_own_id_recorded_worktree_on_reused_id
