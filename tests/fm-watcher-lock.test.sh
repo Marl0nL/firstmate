@@ -1236,6 +1236,70 @@ test_evicted_watcher_does_no_work_after_takeover() {
   pass "a watcher superseded mid-iteration stands down without enqueuing or absorbing"
 }
 
+# The grace is not the only bounded mid-iteration span before a side effect: the
+# triage that follows it spawns a crew-state read per referenced task, so a takeover
+# landing INSIDE that probe left the superseded watcher enqueuing the wake and
+# advancing the .seen-* marker once the probe returned - the same duplicate the
+# grace gate was added to stop, one span later. Ownership is re-checked after triage
+# too, so the stood-down watcher leaves the signal unmarked for the rightful holder.
+test_evicted_watcher_does_no_work_after_takeover_during_triage() {
+  local dir state fakebin out probe seen pid i
+  dir=$(make_case evicted-no-work-triage)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  probe="$dir/triage-probe-started"
+  mark_pr_check_migration_complete "$state"
+  # A slow crew-state fake stands in for the real bounded read (a pane capture plus
+  # a no-mistakes run-step lookup) and announces its entry, so the takeover lands
+  # deterministically inside triage - AFTER the post-grace gate has already passed.
+  # Its unknown verdict keeps the no-verb signal ACTIONABLE, so pre-fix the
+  # superseded watcher would enqueue it.
+  cat > "$fakebin/fm-crew-state.sh" <<SH
+#!/usr/bin/env bash
+set -u
+: > "$probe"
+sleep 6
+printf '%s\n' 'state: unknown · source: none · slow fake'
+exit 0
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  seen=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_signal_seen_path "$2" "$3"' \
+    _ "$LIB" "$state" "$state/task.status") || fail "could not resolve the seen-marker path"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && [ -s "$state/.watch.lock/pid-identity" ] \
+      && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    || fail "watcher did not take the lock before the takeover"
+  printf 'working: crew turn ended\n' > "$state/task.status"
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$probe" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$probe" ] || fail "triage probe never ran, so the takeover could not land inside it"
+  # A live successor takes the singleton while the incumbent is still inside triage.
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  wait_for_exit "$pid" 300 || fail "watcher superseded during triage did not stand down"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "watcher superseded during triage enqueued a wake it no longer owned: $(cat "$state/.wake-queue")"
+  ! grep -q 'absorbed' "$state/.watch-triage.log" 2>/dev/null \
+    || fail "watcher superseded during triage absorbed a signal it no longer owned"
+  [ ! -e "$seen" ] \
+    || fail "watcher superseded during triage advanced the seen-marker, hiding the signal from the holder"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$$" ] \
+    || fail "watcher superseded during triage clobbered the successor's lock"
+  pass "a watcher superseded during triage stands down leaving the signal for the holder"
+}
+
 # The renewal marker's in-progress predicate: a marker naming a LIVE arm means a
 # renewal hand-off is genuinely under way; a marker naming a dead arm (the hook
 # removes it only after reaping the arm), an absent marker, and a malformed marker
@@ -1340,5 +1404,6 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
 test_evicted_watcher_does_no_work_after_takeover
+test_evicted_watcher_does_no_work_after_takeover_during_triage
 test_fm_autoarm_renewal_in_progress_predicate
 test_arm_refuses_fresh_watcher_during_live_renewal

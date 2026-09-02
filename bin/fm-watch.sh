@@ -98,12 +98,14 @@
 # beacon to SETTLE ownership, then RE-CHECKS the lock before entering the poll
 # loop. That acquire/settle-recheck pair brackets the brief mid-renewal window a
 # fresh arm can land in, so two watchers can never both proceed past admission. The
-# same ownership predicate (watcher_owns_lock) then gates every side effect: it
-# runs at the top of each poll iteration and again after the one bounded
-# mid-iteration wait (the signal grace), so a watcher that loses the lock to a
-# takeover stands down without enqueuing a duplicate wake, refreshing the beacon,
-# or absorbing a signal it no longer owns. A direct duplicate invocation likewise
-# no-ops: it fails admission and exits "already running" before any work.
+# same ownership predicate (watcher_owns_lock) then gates the signal batch's side
+# effects: it runs at the top of each poll iteration, again after the bounded
+# mid-iteration wait (the signal grace), and once more after the triage probe -
+# the last point before any enqueue, seen-marker write, or absorb - so a watcher
+# that loses the lock to a takeover across either bounded span stands down without
+# enqueuing a duplicate wake, refreshing the beacon, or absorbing a signal it no
+# longer owns. A direct duplicate invocation likewise no-ops: it fails admission
+# and exits "already running" before any work.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1468,6 +1470,18 @@ EOF
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+      signal_actionable=0
+    else
+      signal_actionable=1
+    fi
+    # Triage itself is a bounded multi-second probe (signal_crew_provably_working
+    # spawns a crew-state read per referenced task), so a takeover can land DURING
+    # it just as it can during the grace above. Re-check ownership at the LAST point
+    # before any side effect: the enqueue, the .seen-* signature advance, and the
+    # benign absorb all follow. Standing down here leaves the signature unwritten, so
+    # the rightful holder rescans the signal and delivers it exactly once.
+    watcher_owns_lock || continue
+    if [ "$signal_actionable" = 0 ]; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1

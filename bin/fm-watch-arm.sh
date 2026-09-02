@@ -258,6 +258,18 @@ report_attached() {
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
+# The one attach outcome, shared by every admission path that finds a healthy
+# holder instead of forking one. Reads the HEALTHY_PID/HEALTHY_IDENTITY globals a
+# successful healthy_watcher just published, and never returns: it exits this arm
+# with the attached cycle's status.
+attach_to_healthy_watcher() {
+  cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
+  cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
+  report_attached
+  attach_and_wait "$HEALTHY_PID"
+  exit $?
+}
+
 # Give a successor the same bounded confirmation window used for a fresh child.
 # Adapter-owned continuations normally win immediately, but the bound avoids a
 # false failure when process-close delivery and lock publication cross briefly.
@@ -454,11 +466,7 @@ fi
 # then, not as an immediate empty wake. (--restart skips this: it just stopped
 # this home's watcher and wants a fresh one.)
 if [ "$mode" = arm ] && healthy_watcher; then
-  cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-  cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
-  report_attached
-  attach_and_wait "$HEALTHY_PID"
-  exit $?
+  attach_to_healthy_watcher
 fi
 
 # Refuse to fork a competing watcher while a Claude Stop auto-arm continuity
@@ -475,11 +483,7 @@ if [ "$mode" = arm ] && fm_autoarm_renewal_in_progress "$STATE"; then
   renewal_deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
   while fm_autoarm_renewal_in_progress "$STATE"; do
     if healthy_watcher; then
-      cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-      cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
-      report_attached
-      attach_and_wait "$HEALTHY_PID"
-      exit $?
+      attach_to_healthy_watcher
     fi
     [ "$(date +%s)" -ge "$renewal_deadline" ] && break
     sleep 0.2
