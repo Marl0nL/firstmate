@@ -2008,7 +2008,11 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     wt_top_real=
   fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
-    if [ "${SPAWN_ENDPOINT_ABORT_CLEANUP:-0}" = 1 ] || [ "${HERDR_PROJECTION_ABORT_CLEANUP:-0}" = 1 ]; then
+    # Invariant: EVERY abort-cleanup flag that destroys this endpoint must key this
+    # suppression, or the refusal sends the operator to inspect what the trap removes.
+    if [ "${SPAWN_ENDPOINT_ABORT_CLEANUP:-0}" = 1 ] \
+       || [ "${HERDR_PROJECTION_ABORT_CLEANUP:-0}" = 1 ] \
+       || [ "${ORCA_ABORT_CLEANUP:-0}" = 1 ]; then
       hint="the spawn's endpoint was cleaned up - re-run the spawn, or run 'treehouse get' manually to diagnose the worktree pool"
     else
       hint="Inspect target $inspect_target"
@@ -2555,13 +2559,17 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
     sleep 1
   done
-  # Acquisition is resolved (the pool has leased and, if it was going to, reset the
-  # slot); the shields have done their job and must not linger into the launch.
-  spawn_preshield_stop
   if [ -z "$WT" ]; then
     echo "error: treehouse get did not enter a worktree within 60s; the spawn's endpoint was cleaned up - re-run the spawn, or run 'treehouse get' manually to diagnose the worktree pool" >&2
     exit 1
   fi
+  # Past the timeout refusal, so acquisition IS resolved (the pool has leased and,
+  # if it was going to, reset the slot) and the shields must not linger into the
+  # launch. They cannot be dropped any earlier: at the timeout the get may still be
+  # live and waiting for a slot, and unshielding it there hands it exactly the owned
+  # worktree this exists to protect - so that path keeps its shields until the
+  # abort-cleanup trap has torn the endpoint (and the get running in it) down first.
+  spawn_preshield_stop
 
   validate_spawn_worktree "treehouse get" "$T"
 fi

@@ -47,8 +47,18 @@ chmod +x "$SHIELD_SCRIPT"
 # only ever happens while the shields are up, so anything captured there was
 # provably alive during acquisition.
 make_preshield_fakebin() {
-  local dir=$1 fakebin
+  local dir=$1 fakebin real_sleep
   fakebin=$(fm_fakebin "$dir")
+  real_sleep=$(command -v sleep)
+  # FM_FAKE_FAST_POLL collapses ONLY the acquisition loop's own 1s poll sleep, so a
+  # case can drive the 60-poll timeout without burning a minute. Every other sleep
+  # (notably the shield's own, much longer one) still runs for real.
+  cat > "$fakebin/sleep" <<SH
+#!/usr/bin/env bash
+if [ "\${FM_FAKE_FAST_POLL:-0}" = 1 ] && [ "\${1:-}" = 1 ]; then exit 0; fi
+exec "$real_sleep" "\$@"
+SH
+  chmod +x "$fakebin/sleep"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -66,7 +76,10 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   send-keys) exit "${FM_FAKE_SEND_KEYS_EXIT:-0}" ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  kill-window)
+    printf 'teardown\t%s\n' "$*" >> "${SHIELD_LOG:-/dev/null}"
+    exit 0 ;;
+  has-session|new-session|new-window|set-window-option) exit 0 ;;
 esac
 exit 0
 SH
@@ -278,8 +291,38 @@ test_remote_secondmate_rows_are_not_shielded() {
   pass "fm-spawn: shields skip a remote secondmate's recorded paths and still cover local rows"
 }
 
+# The acquisition TIMEOUT is the one exit where the get is provably unresolved: it
+# may still be blocked waiting for a slot, and the thing that finally stops it is
+# the endpoint teardown in the abort-cleanup trap. Dropping the shields before that
+# teardown hands the still-live get exactly the owned worktree the shields exist to
+# protect, so on this path the reap must come AFTER the endpoint is gone.
+test_shields_outlive_the_endpoint_teardown_on_the_acquisition_timeout() {
+  local rec out status owned down_line teardown_line
+  rec=$(make_case get-timeout)
+  read_case "$rec"
+  owned="$CASE_DIR/owned-wt"
+  mkdir -p "$owned"
+  record_meta "$HOME_DIR" owner-u4 "window=firstmate:fm-owner-u4" "worktree=$owned" \
+    "project=$PROJ_DIR" "harness=claude" "kind=ship"
+  # The pane never leaves the project, so the poll loop runs out - the treehouse
+  # get never resolved and could still be waiting for a slot.
+  out=$(run_spawn "$rec" stalled-v5 FM_FAKE_PANE_PATH="$PROJ_DIR" FM_FAKE_FAST_POLL=1); status=$?
+  [ "$status" -ne 0 ] || fail "a spawn whose get never enters a worktree must exit non-zero"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "did not enter a worktree within 60s" "the timeout refusal must report the stalled get"
+  assert_grep $'up\t'"$owned" "$SHIELD_LOG" "the owned worktree must have been shielded for the get"
+  teardown_line=$(grep -n $'^teardown\t' "$SHIELD_LOG" | head -1 | cut -d: -f1)
+  down_line=$(grep -n $'^down\t' "$SHIELD_LOG" | head -1 | cut -d: -f1)
+  [ -n "$teardown_line" ] || fail "the timed-out spawn must tear down the endpoint it created"
+  [ -n "$down_line" ] || fail "the shields must still be reaped on the timeout path"
+  [ "$teardown_line" -lt "$down_line" ] \
+    || fail "on the acquisition timeout the shields must outlive the endpoint teardown - reaping them first lets a still-live 'treehouse get' take an owned slot"
+  piddir_empty || fail "every shield must still be reaped by the trap (no orphan sleeps)"
+  pass "fm-spawn: on the acquisition timeout the shields are reaped only after the endpoint teardown"
+}
+
 test_shields_live_during_get_then_reaped_on_success
 test_shields_reaped_on_failure_exit
+test_shields_outlive_the_endpoint_teardown_on_the_acquisition_timeout
 test_remote_secondmate_rows_are_not_shielded
 test_shields_reaped_by_trap_when_the_get_never_starts
 test_enumeration_covers_worktree_and_home_skips_vanished

@@ -1312,6 +1312,29 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding the work"
 }
 
+# A relaunch ADOPTS the endpoint it was given and arms no endpoint-destroying
+# cleanup, so its refusals are the ones that must still point the operator at the
+# live endpoint - the suppression that hides that hint belongs only to the paths
+# whose abort cleanup removes what it names.
+test_spawn_relaunch_isolation_refusal_keeps_the_inspect_hint() {
+  local dir out rc plain meta
+  dir=$(new_case nonisolated rl40)
+  add_ship_task "$dir" rl40 claude
+  plain="$dir/plain-wt"
+  mkdir -p "$plain"
+  meta="$dir/home/state/rl40.meta"
+  { grep -v '^worktree=' "$meta"; printf 'worktree=%s\n' "$plain"; } > "$meta.new"
+  mv "$meta.new" "$meta"
+  printf 'zsh' > "$dir/fake/command"
+  printf '%s' "$plain" > "$dir/fake/cwd"
+  out=$(run_spawn "$dir" rl40 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a relaunch whose recorded worktree is not an isolated worktree should refuse"$'\n'"$out"
+  assert_contains "$out" "did not yield an isolated worktree" "the refusal should report the isolation failure"
+  assert_contains "$out" "Inspect target" \
+    "a relaunch destroys no endpoint, so its refusal must still tell the operator where to look"
+  pass "fm-spawn --relaunch: an isolation refusal still points at the adopted endpoint"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -1358,3 +1381,4 @@ test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_spawn_relaunch_isolation_refusal_keeps_the_inspect_hint
