@@ -245,13 +245,17 @@ test_run_clear_and_compact_reemit() {
 # data/learnings.md reach the agent only through this digest. The run-tier
 # channel persists an oversized payload to a file and previews it from the HEAD
 # (Claude's inline cap is ~10k characters), so a re-emit must LEAD with that
-# memory instead of ordering it last behind the bulky fleet state. This drives
+# memory instead of ordering it last behind the bulky fleet state. It must also
+# lead the WAKE QUEUE, which carries no aggregate byte budget of its own, or the
+# per-file memory bound only holds for a home with a quiet queue. This drives
 # the real fm-session-start.sh through the run wrapper and pins that the cleared
-# memory now lands ahead of FLEET STATE and within the inline budget, printed
-# once, while a true startup keeps the original memory-after-fleet-state order.
+# memory now lands ahead of both the WAKE QUEUE and FLEET STATE and within the
+# inline budget, printed once, while a true startup keeps the original
+# memory-after-fleet-state order.
 test_run_clear_reemit_leads_with_home_memory() {
   local root="$TMP_ROOT/run-clear-memory" out status=0
-  local mark op_line fleet_line ctx_line mark_line startup_out s_mark_line s_fleet_line
+  local mark op_line wake_line fleet_line ctx_line mark_line
+  local startup_out s_mark_line s_fleet_line s_wake_line
   local prefix offset
   mark="LEARNING-MARKER-reply-to-a-marked-request-with-its-corr-token"
   make_run_primary "$root"
@@ -276,11 +280,19 @@ test_run_clear_reemit_leads_with_home_memory() {
   assert_contains "$out" "$mark" "the clear re-emit dropped this home's learnings memory"
 
   op_line=$(printf '%s\n' "$out" | grep -n 'OPERATIONAL MEMORY (context re-emit priority)' | head -1 | cut -d: -f1)
+  wake_line=$(printf '%s\n' "$out" | grep -n '^WAKE QUEUE$' | head -1 | cut -d: -f1)
   fleet_line=$(printf '%s\n' "$out" | grep -n '^FLEET STATE$' | head -1 | cut -d: -f1)
   ctx_line=$(printf '%s\n' "$out" | grep -n '^CONTEXT$' | head -1 | cut -d: -f1)
   mark_line=$(printf '%s\n' "$out" | grep -n "$mark" | head -1 | cut -d: -f1)
-  [ -n "$op_line" ] && [ -n "$fleet_line" ] && [ -n "$ctx_line" ] && [ -n "$mark_line" ] \
+  [ -n "$op_line" ] && [ -n "$wake_line" ] && [ -n "$fleet_line" ] && [ -n "$ctx_line" ] \
+    && [ -n "$mark_line" ] \
     || fail "clear re-emit missing a required section header: $out"
+  # Ahead of the unbudgeted wake queue, so the per-file memory bound is a
+  # preview guarantee for a busy home and not only a quiet one.
+  [ "$op_line" -lt "$wake_line" ] \
+    || fail "OPERATIONAL MEMORY did not precede the WAKE QUEUE on the clear re-emit"
+  [ "$mark_line" -lt "$wake_line" ] \
+    || fail "the cleared learnings memory landed behind the unbudgeted wake queue"
   [ "$op_line" -lt "$fleet_line" ] \
     || fail "OPERATIONAL MEMORY did not precede FLEET STATE on the clear re-emit"
   [ "$mark_line" -lt "$fleet_line" ] \
@@ -308,10 +320,13 @@ test_run_clear_reemit_leads_with_home_memory() {
     "a true startup wrongly moved memory into the re-emit-only section"
   s_mark_line=$(printf '%s\n' "$startup_out" | grep -n "$mark" | head -1 | cut -d: -f1)
   s_fleet_line=$(printf '%s\n' "$startup_out" | grep -n '^FLEET STATE$' | head -1 | cut -d: -f1)
-  [ -n "$s_mark_line" ] && [ -n "$s_fleet_line" ] \
-    || fail "startup digest missing memory or FLEET STATE: $startup_out"
+  s_wake_line=$(printf '%s\n' "$startup_out" | grep -n '^WAKE QUEUE$' | head -1 | cut -d: -f1)
+  [ -n "$s_mark_line" ] && [ -n "$s_fleet_line" ] && [ -n "$s_wake_line" ] \
+    || fail "startup digest missing memory, WAKE QUEUE, or FLEET STATE: $startup_out"
   [ "$s_fleet_line" -lt "$s_mark_line" ] \
     || fail "startup regressed: memory no longer sits behind the live fleet state"
+  [ "$s_wake_line" -lt "$s_fleet_line" ] \
+    || fail "startup regressed: the wake queue no longer leads the fleet state"
 
   pass "run wrapper: a clear re-emit leads with home memory within the inline budget; startup order is unchanged"
 }

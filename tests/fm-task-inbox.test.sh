@@ -217,22 +217,29 @@ test_marked_request_doorbell_carries_reply_directive() {
   pass "inbox: a marked from-firstmate request's doorbell carries the correlated-reply directive"
 }
 
-# The status file is derivable from the inbox path for exactly one inbox shape:
-# the canonical home-state inbox <home>/state/<id>.inbox, whose sibling
-# <home>/state/<id>.status IS the channel the parent reads. The host-local remote
-# steer leg writes its records under <remote-home>/state/parent-route/<id>.inbox
-# instead (bin/fm-remote-secondmate-control.sh CONTROL_STATE), where the same
-# derivation yields parent-route/<id>.status - a file nothing reads and nothing
-# mirrors back to the parent, because a remote mate's replies travel only via
-# state/parent-replies.status. Naming it would authoritatively send a cleared
-# remote mate's correlated reply into a dead file, the exact loss this directive
-# exists to prevent. So a non-home-state inbox must fall back to charter-relative
-# phrasing and name no path at all.
-test_marked_doorbell_names_no_derived_path_off_the_home_state_inbox() {
-  local state route mark r_local r_route d_local d_route
+# Which file the directive names depends on the inbox shape, and the naive
+# derivation is right for exactly one of them: the canonical home-state inbox
+# <home>/state/<id>.inbox, whose sibling <home>/state/<id>.status IS the channel
+# the parent reads. The host-local remote steer leg writes its records under
+# <remote-home>/state/parent-route/<id>.inbox instead
+# (bin/fm-remote-secondmate-control.sh CONTROL_STATE), where the same derivation
+# yields parent-route/<id>.status - a file nothing reads and nothing mirrors back
+# to the parent, because a remote mate's replies travel only via that home's
+# fixed relay log state/parent-replies.status
+# (bin/fm-remote-home-seed.sh writes it into the remote charter copy,
+# bin/fm-procevent-remote-reply.sh mirrors it back). Naming the derived sibling
+# there would send a cleared remote mate's correlated reply into a dead file -
+# the exact loss this directive exists to prevent - and deferring to the charter
+# is little better, because /clear is what destroyed the charter. So the remote
+# shape must name that relay log, which is derivable from the record path
+# without any per-record coupling. A sub-plane this library does not own gets no
+# guessed path at all.
+test_marked_doorbell_names_the_reply_channel_of_the_leg_that_wrote_it() {
+  local state route other mark r_local r_route r_other d_local d_route d_other
   state="$TMP_ROOT/marked-doorbell-route/state"
   route="$state/parent-route"
-  mkdir -p "$route"
+  other="$state/some-other-plane"
+  mkdir -p "$route" "$other"
   mark=$(bash -c '. "$1"; printf %s "$FM_FROMFIRST_MARK"' _ "$ROOT/bin/fm-operational-input.sh")
   [ -n "$mark" ] || fail "could not load the from-firstmate carrier constant"
 
@@ -241,32 +248,45 @@ test_marked_doorbell_names_no_derived_path_off_the_home_state_inbox() {
   # The remote leg's own write, into the same sub-plane it really uses.
   r_route=$(inbox_lib "$state" fm_task_inbox_write "$route" ios \
     "${mark}corr=0123456789abcdef audit the ledger") || fail "routed marked write failed"
+  r_other=$(inbox_lib "$state" fm_task_inbox_write "$other" ios \
+    "${mark}corr=0123456789abcdef audit the ledger") || fail "unknown-plane marked write failed"
 
   d_local=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$r_local")
   d_route=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$r_route")
+  d_other=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$r_other")
 
   # The canonical home-state shape still names its real sibling status file.
   assert_contains "$d_local" "to $state/ios.status" \
     "the home-state marked doorbell stopped naming the status file the parent reads"
 
-  # The routed shape still carries the directive, but names no derived path.
+  # The remote steer leg names that home's relay log - the only file whose
+  # contents actually reach the parent - and never the derived sibling.
   assert_contains "$d_route" "Firstmate instruction waiting: list $route/ios.inbox/*.msg" \
     "the routed doorbell lost its constant drain-all instruction"
-  assert_contains "$d_route" "including its corr=<id> token" \
+  assert_contains "$d_route" "includes its corr=<id> token" \
     "the routed marked doorbell dropped the correlated-reply directive"
-  assert_contains "$d_route" "your parent status channel (the report file your charter names)" \
-    "the routed marked doorbell did not defer to the charter's own reply channel"
+  assert_contains "$d_route" "to $state/parent-replies.status" \
+    "the routed marked doorbell did not name the relay log the parent actually reads"
   case "$d_route" in
     *"$route/ios.status"*)
       fail "the routed doorbell named parent-route/ios.status, which nothing reads: $d_route" ;;
-    *.status*)
-      fail "the routed doorbell named a status path it cannot know: $d_route" ;;
+  esac
+  case "$d_route" in
+    *"your charter names"*)
+      fail "the routed doorbell deferred to the charter a cleared mate no longer holds: $d_route" ;;
   esac
   case "$d_route" in
     *$'\n'*) fail "the routed marked doorbell must stay a single line" ;;
   esac
 
-  pass "inbox: a marked request outside the home-state inbox defers to the charter's reply channel"
+  # An unrecognized sub-plane is not guessed at: no path, charter-relative only.
+  assert_contains "$d_other" "your parent status channel (the report file your charter names)" \
+    "an unowned sub-plane's doorbell did not fall back to charter-relative phrasing"
+  case "$d_other" in
+    *.status*) fail "an unowned sub-plane's doorbell guessed a status path: $d_other" ;;
+  esac
+
+  pass "inbox: a marked request's doorbell names the reply channel of the leg that wrote it"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -590,7 +610,7 @@ test_watcher_escalates_once_after_budget() {
 
 test_write_is_durable_and_exact
 test_marked_request_doorbell_carries_reply_directive
-test_marked_doorbell_names_no_derived_path_off_the_home_state_inbox
+test_marked_doorbell_names_the_reply_channel_of_the_leg_that_wrote_it
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence

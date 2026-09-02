@@ -279,34 +279,53 @@ fm_task_inbox_record_is_marked() {  # <record-path>
 # so every marked record in one inbox still rings an identical drain-all
 # doorbell.
 #
-# WHERE the directive sends the reply depends on which leg wrote the record,
-# because only ONE inbox shape has a status file derivable from its own path:
+# WHERE the directive sends the reply depends on which leg wrote the record. A
+# cleared mate cannot be sent to a file nothing reads, and it also cannot be
+# sent to its charter - the charter is precisely what /clear destroyed, and no
+# digest section re-injects it - so the directive names a concrete path for
+# every inbox shape this library actually owns, and only falls back to
+# charter-relative phrasing for a shape it does not recognise:
 #   - the canonical LOCAL secondmate inbox, <home>/state/<id>.inbox, whose
 #     sibling <home>/state/<id>.status is exactly the parent's correlated reply
 #     channel (bin/fm-send.sh writes there, bin/fm-pending-reply-lib.sh reads
-#     it). There the directive names that concrete path.
-#   - any OTHER location - in practice the host-local remote steer leg, which
-#     writes under <remote-home>/state/parent-route/<id>.inbox
+#     it). There the directive names that concrete sibling.
+#   - the host-local remote steer leg, which writes under
+#     <remote-home>/state/parent-route/<id>.inbox
 #     (bin/fm-remote-secondmate-control.sh CONTROL_STATE). There the derived
 #     sibling would be parent-route/<id>.status, which NOTHING reads: a remote
-#     mate's replies reach the parent only through
-#     <remote-home>/state/parent-replies.status, the path
-#     bin/fm-remote-home-seed.sh writes into its charter and
-#     bin/fm-procevent-remote-reply.sh mirrors back. Naming the derived path
-#     there would steer a cleared mate off its only mirrored channel, so the
-#     directive stays path-agnostic and defers to the charter instead.
+#     mate's replies reach the parent only through the fixed append-only relay
+#     log <remote-home>/state/parent-replies.status, the path
+#     bin/fm-remote-home-seed.sh writes into that home's charter copy and
+#     bin/fm-procevent-remote-reply.sh mirrors back. That log is a per-home
+#     constant, not a per-record derivation, so it is named directly from the
+#     directory CONTAINING parent-route.
+#   - any OTHER sub-plane is one this library does not own; it guesses no path
+#     and defers to the charter, which is still better than an authoritative
+#     wrong one.
 # The discriminator is the inbox directory's PARENT basename: 'state' is the
-# home-state shape, anything else is a routed sub-plane whose reply channel this
-# library does not own.
+# home-state shape, 'parent-route' is the remote steer leg, anything else is an
+# unrecognised sub-plane.
 fm_task_inbox_doorbell_line() {  # <record-path>
-  local dir=${1%/*} abs line parent status_file
+  local dir=${1%/*} abs line parent home_state status_file
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
   line=$(printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then mv each handled file to %s/handled/.' \
     "$abs" "$abs")
   if fm_task_inbox_record_is_marked "$1"; then
     parent=${abs%/*}
-    if [ "${parent##*/}" = state ]; then
-      status_file="${abs%.inbox}.status"
+    home_state=${parent%/*}
+    status_file=
+    case "${parent##*/}" in
+      state) status_file="${abs%.inbox}.status" ;;
+      parent-route)
+        # A parent with no directory component of its own is not the shape this
+        # names, so it falls through to the path-agnostic wording rather than
+        # inventing a relative path.
+        if [ -n "$home_state" ] && [ "$home_state" != "$parent" ]; then
+          status_file="$home_state/parent-replies.status"
+        fi
+        ;;
+    esac
+    if [ -n "$status_file" ]; then
       line="$line Each is a from-firstmate request: after doing it, append one status line that includes its corr=<id> token (shown in the request) to $status_file - the main firstmate reads only that status file, not this pane, so a reply only here is lost."
     else
       line="$line Each is a from-firstmate request: after doing it, reply on your parent status channel (the report file your charter names) including its corr=<id> token (shown in the request), never only in this pane, or the parent never sees it."

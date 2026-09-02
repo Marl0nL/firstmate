@@ -1821,7 +1821,7 @@ EOF
   expect_code 0 "$status" "a truncated re-emit must still exit 0 so the session can open"
   assert_contains "$out" "STARTUP TRUNCATED - SESSION START HIT ITS" "a truncated re-emit did not say so"
   assert_contains "$out" \
-    "bootstrap wake-queue operational-memory supervision-instructions read-once fleet-state network-checks context next-step" \
+    "bootstrap operational-memory wake-queue supervision-instructions read-once fleet-state network-checks context next-step" \
     "the re-emit truncation banner did not list the re-emit-only memory stage for reconciliation"
 
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_STARTUP_NETWORK_TIMEOUT=2 \
