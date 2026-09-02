@@ -137,8 +137,9 @@ Endpoint death is the only process-level override and yields dead; child process
 `state/<id>.turn-ended` files remain wake notifications, not current state.
 
 Each record is bound to an incarnation token minted when the task's wiring is armed, so an event from a superseded incarnation is rejected rather than applied, and a record left behind by one classifies unknown.
-Three rendered-text checks deliberately remain outside this contract because they answer delivery questions: submit acknowledgement and the away-mode supervisor-pane busy guard consume the shared delivery-footer matcher owned by `bin/fm-composer-lib.sh`, while `bin/fm-pending-reply-lib.sh` owns the secondmate delivery-confirmation observation.
-All are harness-scoped rather than a global pattern union, and none is a recorded worker state source.
+Four rendered-text checks deliberately remain outside this contract because they answer delivery questions: submit acknowledgement and the away-mode supervisor-pane busy guard consume the shared delivery-footer matcher owned by `bin/fm-composer-lib.sh`, `bin/fm-pending-reply-lib.sh` owns the secondmate delivery-confirmation observation, and `fm_wr_confirmed_busy` (`bin/fm-wake-resident-lib.sh`) reads the pane before a wake-resident stand-down concludes not-busy.
+Each matches the pane's recorded harness and never borrows another harness's signature; only a caller with no recorded harness at all falls back to the shared default union, as the submit cores and the stand-down gate's long-standing tmux arm do.
+None is a recorded worker state source.
 
 ## Runtime session backends
 

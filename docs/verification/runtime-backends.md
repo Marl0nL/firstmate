@@ -519,7 +519,7 @@ Measured 2026-09-02 against Herdr 0.8.2 and Claude Code 2.1.258 in an isolated `
 
 Herdr registers no agent record for a pane-typed Claude (firstmate launches it by typing the command, not `herdr agent start`), so across a landed multi-second generation turn `herdr agent get` answered `agent_not_found` and `fm_backend_herdr_busy_state` read `unknown` on every sample, while the pane rendered Claude's busy footer (`… esc to interrupt`).
 In the live fleet the same shadow instead reads `idle` because firstmate publishes the pane's own state through `pane report-agent` (the 2026-09-01 incident); both are non-busy verdicts that must not shadow a working crew.
-`fm_busy_native_busy` (`bin/fm-busy-lib.sh`) owns the trust rule - native busy only, never a registry idle, never a Claude echo - and every consumer applies it: `fm_busy_classify`, the secondmate pending-reply observer, and the wake-resident stand-down gate each reach the pane's rendered busy footer before concluding not-busy.
+[`herdr-backend.md`](../herdr-backend.md#restart-and-liveness-behavior) owns the trust rule this measurement motivates - which native verdict `fm_busy_native_busy` (`bin/fm-busy-lib.sh`) accepts, and which consumers apply it.
 The portable regressions pin the divergence with no harness: `tests/fm-busy-state.test.sh` (the owner), `tests/fm-pending-reply.test.sh`, and `tests/fm-wake-resident.test.sh` each drive an idle/unknown registry against a busy capture and assert the busy verdict survives, including when the registry signal is lost entirely.
 Refresh the live Claude proof with:
 
