@@ -496,6 +496,39 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
 }
 
+test_create_task_closes_created_workspace_when_no_surface_found() {
+  local dir fb out status title
+  dir="$TMP_ROOT/create-task-no-surface"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-nosurface)
+  # 1: workspace list --json (pre-create duplicate check) -> no match
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  # 2: new-workspace (silent on success)
+  # 3: workspace list --json (post-create id resolution) -> match
+  cmux_workspace_list_response "$dir" 3 "dddddddd-3333-3333-3333-333333333333" "$title"
+  # 4: list-panes --json -> no panes, so no default surface can be resolved
+  printf '{"panes":[]}' > "$dir/responses/4.out"
+  # The teardown must take the last-in-window-safe route: the new workspace is
+  # the ONLY one in its window, where a bare close-workspace silently no-ops.
+  # 5: list-windows -> one window
+  cmux_windows_response "$dir" 5 "e1111111-0000-0000-0000-000000000000" 1
+  # 6: workspace list --window -> the created workspace is last-in-window
+  cmux_workspace_list_response "$dir" 6 "dddddddd-3333-3333-3333-333333333333" "$title"
+  # 7: new-workspace --window (throwaway sibling); 8: close-workspace - silent
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-nosurface /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must fail when the new workspace's default surface cannot be resolved"
+  assert_contains "$out" "could not resolve the default surface" "create_task did not report the unresolvable surface"
+  assert_contains "$(cat "$dir/log")" $'\x1f''new-workspace'$'\x1f''--window'$'\x1f''e1111111-0000-0000-0000-000000000000' \
+    "create_task's teardown must add a throwaway sibling when its workspace is the last in its window (a bare close-workspace silently no-ops there)"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''dddddddd-3333-3333-3333-333333333333' \
+    "create_task must tear its just-created workspace back down when no surface can be resolved (otherwise a retry dies on the title)"
+  cmux_assert_call_order "$dir/log" $'\x1f''new-workspace'$'\x1f''--window' $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''dddddddd-3333-3333-3333-333333333333' \
+    "create_task's teardown must create the sibling BEFORE closing the last-in-window workspace"
+  pass "fm_backend_cmux_create_task: tears its just-created workspace down via the last-in-window-safe close when the default surface cannot be resolved"
+}
+
 # --- target_ready / capture ---------------------------------------------------
 
 test_target_ready_fails_when_target_absent() {
@@ -1130,6 +1163,7 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
+test_create_task_closes_created_workspace_when_no_surface_found
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch

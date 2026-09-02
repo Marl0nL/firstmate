@@ -612,6 +612,10 @@ test_spawn_refuses_orca_nonisolated_worktree() {
     "Orca spawn should close the implicit terminal after validation aborts"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-bad'$'\x1f''--force'$'\x1f''--json' \
     "Orca spawn should remove the worktree after validation aborts"
+  assert_not_contains "$out" "Inspect target" \
+    "the refusal must not send the operator to a worktree/terminal its own abort cleanup then removes"
+  assert_contains "$out" "the spawn's endpoint was cleaned up" \
+    "the refusal must say the endpoint is gone and how to diagnose instead"
   pass "fm-spawn.sh --backend orca: refuses non-isolated worktrees and closes implicit terminals"
 }
 

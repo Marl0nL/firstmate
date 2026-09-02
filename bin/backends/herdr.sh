@@ -2188,6 +2188,35 @@ fm_backend_herdr_agent_alive() {  # <target>
   esac
 }
 
+# fm_backend_herdr_close_residue_tab: remove the replacement tab
+# fm_backend_herdr_create_task just created, on the failure paths where it has
+# to give the label back so a retry starts clean - but NEVER at the cost of the
+# workspace itself. Closing a workspace's LAST remaining tab deletes the whole
+# workspace on real herdr (docs/herdr-backend.md "Watching and task containers"),
+# and these paths run AFTER the husks this tab replaced were already closed, so
+# the replacement can legitimately be the only tab left. Re-list and close only
+# when the workspace demonstrably still has another tab; when the tab list is
+# missing, unparseable, not an ARRAY, or holds <= 1 tab, leave the tab in place
+# and tell the operator what to remove by hand - a residue tab a retry can name
+# is strictly better than deleting this home's persistent workspace. The array
+# type check is load-bearing: jq's `length` on a NON-array returns a nonzero
+# number (a string's character count, an object's key count), so counting
+# without it would read a malformed payload as "plenty of tabs" and close on
+# exactly the branch that exists because the payload was malformed. Mirrors the
+# tab-count re-check in fm_backend_herdr_workspace_prune_seeded_default_tab.
+fm_backend_herdr_close_residue_tab() {  # <session> <workspace_id> <tab_id> <label>
+  local session=$1 wsid=$2 tab_id=$3 label=$4 tabs tab_count
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || tabs=
+  tab_count=$(printf '%s' "$tabs" | jq -r 'if (.result.tabs | type) == "array" then (.result.tabs | length) else 0 end' 2>/dev/null)
+  case "$tab_count" in
+    ''|*[!0-9]*|0|1)
+      echo "warning: leaving herdr tab '$label' ($tab_id) in workspace $wsid (session $session) in place: it may be that workspace's last tab, and closing that would delete the whole workspace - close it manually before retrying: herdr tab close $tab_id --session $session" >&2
+      return 0
+      ;;
+  esac
+  fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || true
+}
+
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
 # <container> ("session:workspace_id"). Herdr does NOT enforce label
 # uniqueness itself (verified: two tabs can share a label), so the duplicate
@@ -2209,7 +2238,7 @@ fm_backend_herdr_agent_alive() {  # <target>
 # Ordering is deliberate: the REPLACEMENT tab is created FIRST, and the husk
 # is closed only AFTER that succeeds - never the reverse. Closing a
 # workspace's LAST remaining tab deletes the whole workspace on real herdr
-# (docs/herdr-backend.md "Default workspace lifecycle"), and a session-restore husk
+# (docs/herdr-backend.md "Watching and task containers"), and a session-restore husk
 # can legitimately be that workspace's only tab (e.g. its own seeded default
 # tab was already pruned, long before the restart, by a prior real task tab
 # existing alongside it). Herdr's lack of label-uniqueness enforcement is
@@ -2246,7 +2275,7 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
       [ -n "$dup" ] || continue
       dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
       if [ -z "$dup_pane" ] || ! fm_backend_herdr_tab_is_husk "$session" "$dup_pane"; then
-        echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
+        echo "error: herdr tab '$label' (tab $dup) already exists in workspace $wsid (session $session) and its pane is live or could not be classified, so it is not a reclaimable husk. Verify no live agent is working there first (herdr pane list --workspace $wsid --session $session, then herdr agent get <pane> --session $session); only if it is not live, remove it and retry: herdr tab close $dup --session $session" >&2
         return 1
       fi
       dup_tab_ids="${dup_tab_ids}${dup}"$'\n'
@@ -2258,7 +2287,7 @@ EOF
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
-    echo "error: could not parse tab/pane id from herdr tab create output" >&2
+    echo "error: could not parse tab/pane id from herdr tab create output; a tab labeled '$label' may have been created in workspace $wsid (session $session) without a targetable id - close it manually if present" >&2
     return 1
   fi
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
@@ -2271,10 +2300,12 @@ $dup_tab_ids
 EOF
     list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
       echo "error: could not verify herdr husk removal for tab '$label' in workspace $wsid (session $session)" >&2
+      fm_backend_herdr_close_residue_tab "$session" "$wsid" "$tab_id" "$label"
       return 1
     }
     if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
       echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
+      fm_backend_herdr_close_residue_tab "$session" "$wsid" "$tab_id" "$label"
       return 1
     fi
     remaining_dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" --arg replacement "$tab_id" \
@@ -2282,6 +2313,7 @@ EOF
     remaining_dup_tabs=${remaining_dup_tabs//$'\n'/ }
     if [ -n "$remaining_dup_tabs" ]; then
       echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session)" >&2
+      fm_backend_herdr_close_residue_tab "$session" "$wsid" "$tab_id" "$label"
       return 1
     fi
   fi

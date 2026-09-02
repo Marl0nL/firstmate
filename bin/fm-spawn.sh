@@ -148,6 +148,23 @@
 #   FM_HOME and never sweeps sibling homes, whose state is not this home's to read
 #   or reason about. See assert_worktree_unleased() below for why it exists and
 #   what it cannot cover.
+#   The lease guard can only refuse AFTER `treehouse get` has already leased (and,
+#   for a slot the pool wrongly judged free, reset) the worktree. To stop that
+#   reset at its source, a fresh ship/scout spawn that acquires through treehouse
+#   (never a --relaunch, and never backend=orca, which brings its own worktree)
+#   first holds every worktree this home records (each task's worktree= and each
+#   secondmate's home=) with a cheap shield process cwd'd inside it, so the pool -
+#   which judges a slot free from live process cwd - cannot hand out an owned slot;
+#   the shields are reaped the instant the get resolves and on every exit path
+#   (spawn_preshield_start/stop).
+#   FM_SPAWN_SHIELD_TTL bounds each shield's self-exit (default 300s - the
+#   backstop must outlast the FULL acquisition wait below, which allows 60 polls
+#   whose per-poll cost on the active-probe backends is seconds, not the 1s
+#   sleep alone); tests inject FM_SPAWN_SHIELD_CMD to observe them.
+#   A spawn that is refused or fails AFTER creating its tmux window / herdr flat
+#   tab / zellij / cmux surface tears that endpoint back down in the same failure
+#   path, so a retry does not die on the backend's "already exists"; where the
+#   teardown cannot be confirmed gone it prints the exact one-line removal command.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -670,6 +687,14 @@ BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+# Ordinary (non-projection) tmux window / herdr flat tab / zellij / cmux endpoint
+# residue guard. Set to 1 the moment such an endpoint is created and cleared once
+# the task record is published; while set, an aborted spawn tears the endpoint back
+# down in spawn_abort_cleanup so a retry does not die on a leftover "already exists".
+SPAWN_ENDPOINT_ABORT_CLEANUP=0
+# Space-separated PIDs of the temporary acquisition shields (spawn_preshield_start),
+# reaped by spawn_preshield_stop on every exit path.
+SPAWN_SHIELD_PIDS=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -710,6 +735,136 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+# spawn_endpoint_remedy_line: the exact one-line command to remove the leftover
+# endpoint named by $BACKEND/$T, printed only when automatic teardown could not
+# be confirmed. $T is "<session/container>:<pane/window/surface>". tmux targets
+# the window with '=' exact-match (a bare name would prefix-match a sibling live
+# window); herdr closes the pane, which closes its tab; zellij must close the
+# TAB by its create-time id (ZELLIJ_TAB_ID, in scope whenever this prints -
+# closing a zellij tab's only pane leaves an empty ghost tab that still blocks
+# the label); cmux closes the whole workspace.
+spawn_endpoint_remedy_line() {
+  case "$BACKEND" in
+    tmux) printf "tmux kill-window -t '=%s:=%s'" "${T%%:*}" "${T#*:}" ;;
+    herdr) printf "herdr pane close '%s' --session '%s'" "${T#*:}" "${T%%:*}" ;;
+    zellij) printf "zellij --session '%s' action close-tab-by-id '%s'" "${T%%:*}" "${ZELLIJ_TAB_ID:-}" ;;
+    cmux) printf "cmux close-workspace --workspace '%s'" "${T%%:*}" ;;
+    *) printf "remove the leftover %s endpoint '%s'" "$BACKEND" "$T" ;;
+  esac
+}
+
+# spawn_endpoint_still_present: is the endpoint named by $BACKEND/$T still
+# holding its slot after the teardown? Answers with PROOF OF ABSENCE, not with a
+# plain existence probe: an endpoint read that fails because the BACKEND is
+# unreadable (herdr server stopped or restarting mid-abort, zellij session gone,
+# cmux app relaunching) looks identical to an endpoint that is gone, and the
+# backends persist their endpoints across exactly those events - so believing
+# "unreadable" means "removed" silences the remedy line in precisely the case it
+# exists for. Every branch therefore proves the CONTAINER is readable first and
+# reports still-present whenever absence cannot be established, including for an
+# unrecognized backend.
+#
+# tmux additionally needs its own probe rather than the shared
+# fm_backend_target_exists: on this path $T is always "<session>:fm-<id>", a bare
+# window NAME, and tmux resolves a bare name by exact match, then fnmatch, then
+# PREFIX - so a live sibling window whose name merely starts with fm-<id> would
+# make a completed teardown read as still present and print a remedy for a window
+# that is already gone. Use the same '=ses:=win' exact form the adapter kill and
+# the remedy line use. It must also be `list-windows`, NOT the shared probe's
+# `display-message -p -t <target>`: real tmux marks display-message's -t as
+# CMD_FIND_CANFAIL, so an UNRESOLVABLE target does not fail - it silently falls
+# back to the current pane and exits 0 (docs/verification/runtime-backends.md
+# "Endpoint absence probe" owns the dated tmux 3.5a transcript for this whole
+# paragraph, including the prefix-match and server-down cases). That makes
+# display-message incapable of ever confirming absence, so every successfully
+# cleaned-up spawn would print a remedy for a window that is already gone.
+# list-windows fails for BOTH an absent window and an unreachable server, so the
+# has-session check above splits them: unreachable => not confirmed (fail-safe).
+# herdr already owns a structured proof-of-absence read
+# (fm_backend_herdr_endpoint_confirmed_gone trusts only pane_not_found); the
+# other backends record id-shaped targets the shared probe resolves exactly.
+spawn_endpoint_still_present() {
+  local ses=${T%%:*}
+  case "$BACKEND" in
+    tmux)
+      tmux has-session -t "=$ses" >/dev/null 2>&1 || return 0
+      tmux list-windows -t "=$ses:=${T#*:}" >/dev/null 2>&1
+      ;;
+    herdr)
+      ! fm_backend_herdr_endpoint_confirmed_gone "$T" 2>/dev/null
+      ;;
+    zellij)
+      fm_backend_zellij_session_exists "$ses" 2>/dev/null || return 0
+      fm_backend_target_exists zellij "$T" 2>/dev/null
+      ;;
+    cmux)
+      fm_backend_cmux_cli list-windows --json --id-format uuids >/dev/null 2>&1 || return 0
+      fm_backend_target_exists cmux "$T" 2>/dev/null
+      ;;
+    *) return 0 ;;
+  esac
+}
+
+# spawn_preshield_start: before `treehouse get`, hold every worktree this home's
+# own state/*.meta already records so the pool cannot judge an owned slot free.
+# Treehouse v2 decides a slot is available from live-process cwd, and a parked
+# done-crew's agent process keeps its cwd at the pane launch dir, so the owned
+# slot reads free and `treehouse get` RESETS it at acquisition - before
+# assert_worktree_unleased can refuse (observed 2026-08-19: a live crew's
+# worktree reset to detached HEAD). A cheap process cwd'd in each recorded
+# worktree keeps that slot visibly taken for the duration of the get; the shields
+# are reaped immediately after acquisition (spawn_preshield_stop) and on every
+# exit path via the abort-cleanup trap. Both a task's own worktree= and a
+# secondmate's home= are recorded slots; a path that no longer exists, and a
+# REMOTE secondmate's rows (remote_host= set - its worktree=/home= name paths on
+# another host, and treehouse's deterministic per-pool/slot layout can make that
+# same path exist locally as an unrelated, genuinely free slot this home must not
+# hold), are the only ones skipped. EVERY other recorded worktree is shielded,
+# including the spawning task's own: this runs only on the fresh acquire path (a
+# --relaunch adopts its recorded worktree in place and never gets here), so
+# exempting $ID's own record would protect no legitimate reacquisition and would
+# leave a respawn onto a surviving-but-dead id free to have its own slot reset
+# out from under it.
+# FM_SPAWN_SHIELD_CMD overrides the per-shield command for tests; production holds
+# the slot with a bounded sleep that self-exits (FM_SPAWN_SHIELD_TTL) so even an
+# unreaped orphan cannot linger. That TTL is a backstop against orphans, never a
+# limit on the shield's job, so it must outlast the whole acquisition wait: the
+# poll loop below allows 60 iterations, and on zellij/cmux each iteration is an
+# active marker probe costing several CLI round trips on top of its 1s sleep, so
+# a get can resolve well past the old 90s default - a shield that self-exits mid-get
+# hands the slot straight back to the pool and reopens the reset this exists to close.
+spawn_preshield_start() {
+  local meta path real seen ttl shield_cmd
+  SPAWN_SHIELD_PIDS=
+  ttl=${FM_SPAWN_SHIELD_TTL:-300}
+  shield_cmd=${FM_SPAWN_SHIELD_CMD:-sleep $ttl}
+  seen=$'\n'
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    [ -z "$(fm_meta_get "$meta" remote_host)" ] || continue
+    for path in "$(fm_meta_get "$meta" worktree)" "$(fm_meta_get "$meta" home)"; do
+      [ -n "$path" ] || continue
+      [ -d "$path" ] || continue
+      real=$(real_path_or_raw "$path")
+      case "$seen" in *$'\n'"$real"$'\n'*) continue ;; esac
+      seen="$seen$real"$'\n'
+      ( cd "$path" 2>/dev/null && exec $shield_cmd ) </dev/null >/dev/null 2>&1 &
+      SPAWN_SHIELD_PIDS="$SPAWN_SHIELD_PIDS $!"
+    done
+  done
+}
+
+# spawn_preshield_stop: reap every shield started by spawn_preshield_start. Idempotent
+# and safe on an empty set, so the abort-cleanup trap can call it unconditionally.
+spawn_preshield_stop() {
+  local pid
+  for pid in $SPAWN_SHIELD_PIDS; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  SPAWN_SHIELD_PIDS=
 }
 
 spawn_abort_cleanup() {
@@ -784,6 +939,22 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
+  # Ordinary tmux window / herdr flat tab / zellij / cmux endpoint residue: an
+  # abort AFTER the endpoint was created but BEFORE the task record was published
+  # leaves a tab/window (with its bare subshell) holding the slot, on which a
+  # retry dies with "already exists". Tear it back down in the same failure path.
+  # Best-effort like every backend kill; when it cannot be confirmed gone, print
+  # the exact one-line remedy so the operator can clear it before retrying.
+  if [ "$SPAWN_ENDPOINT_ABORT_CLEANUP" = 1 ]; then
+    SPAWN_ENDPOINT_ABORT_CLEANUP=0
+    if [ -n "${BACKEND:-}" ] && [ -n "${T:-}" ]; then
+      fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null || true
+      if spawn_endpoint_still_present; then
+        echo "warning: could not tear down the $BACKEND endpoint '$T' left by the failed spawn of $ID; remove it before retrying: $(spawn_endpoint_remedy_line)" >&2
+      fi
+    fi
+  fi
+  spawn_preshield_stop
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1836,7 +2007,7 @@ PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_AB
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real hint
   assert_worktree_unleased "$source"
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
@@ -1849,7 +2020,16 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     wt_top_real=
   fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
-    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+    # Invariant: EVERY abort-cleanup flag that destroys this endpoint must key this
+    # suppression, or the refusal sends the operator to inspect what the trap removes.
+    if [ "${SPAWN_ENDPOINT_ABORT_CLEANUP:-0}" = 1 ] \
+       || [ "${HERDR_PROJECTION_ABORT_CLEANUP:-0}" = 1 ] \
+       || [ "${ORCA_ABORT_CLEANUP:-0}" = 1 ]; then
+      hint="the spawn's endpoint was cleaned up - re-run the spawn, or run 'treehouse get' manually to diagnose the worktree pool"
+    else
+      hint="Inspect target $inspect_target"
+    fi
+    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. $hint" >&2
     exit 1
   fi
 }
@@ -1997,6 +2177,7 @@ case "$BACKEND" in
     # stays $T (the name form), which is safe now that rename is disabled.
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
     WT_TARGET="$WID"
+    SPAWN_ENDPOINT_ABORT_CLEANUP=1
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
@@ -2164,6 +2345,10 @@ EOF
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
+    # The projected path carries its own exact abort cleanup
+    # (HERDR_PROJECTION_ABORT_CLEANUP); only the ordinary flat tab needs the
+    # generic endpoint teardown.
+    [ "$HERDR_PROJECTED" -eq 1 ] || SPAWN_ENDPOINT_ABORT_CLEANUP=1
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
@@ -2176,6 +2361,7 @@ EOF
       exit 1
     fi
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
+    SPAWN_ENDPOINT_ABORT_CLEANUP=1
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
@@ -2188,6 +2374,7 @@ EOF
       exit 1
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
+    SPAWN_ENDPOINT_ABORT_CLEANUP=1
     ;;
   orca)
     set +e
@@ -2339,6 +2526,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # Hold every slot this home already owns before the pool can hand one out and
+  # reset it at acquisition (spawn_preshield_start). Reaped right after the get
+  # resolves, and on any earlier exit via the abort-cleanup trap.
+  spawn_preshield_start
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -2381,9 +2572,16 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within 60s; the spawn's endpoint was cleaned up - re-run the spawn, or run 'treehouse get' manually to diagnose the worktree pool" >&2
     exit 1
   fi
+  # Past the timeout refusal, so acquisition IS resolved (the pool has leased and,
+  # if it was going to, reset the slot) and the shields must not linger into the
+  # launch. They cannot be dropped any earlier: at the timeout the get may still be
+  # live and waiting for a slot, and unshielding it there hands it exactly the owned
+  # worktree this exists to protect - so that path keeps its shields until the
+  # abort-cleanup trap has torn the endpoint (and the get running in it) down first.
+  spawn_preshield_stop
 
   validate_spawn_worktree "treehouse get" "$T"
 fi
@@ -2831,6 +3029,9 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+# The task record is published: this endpoint is now owned by the record and a
+# later failure is a recovery/teardown concern, not a residue to silently kill.
+SPAWN_ENDPOINT_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

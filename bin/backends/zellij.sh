@@ -344,13 +344,14 @@ fm_backend_zellij_create_task() {  # <session> <label> <cwd>
   tab_id=$(fm_backend_zellij_cli "$session" action new-tab --cwd "$cwd" --name "$title" 2>/dev/null | tr -d '[:space:]')
   case "$tab_id" in
     ''|*[!0-9]*)
-      echo "error: zellij new-tab did not return a numeric tab id for '$title' (got '$tab_id'; session '$session' may not exist)" >&2
+      echo "error: zellij new-tab did not return a numeric tab id for '$title' (got '$tab_id'; session '$session' may not exist); a tab titled '$title' may have been created without a targetable id - close it manually if present" >&2
       return 1
       ;;
   esac
   pane_id=$(fm_backend_zellij_pane_for_tab "$session" "$tab_id")
   if [ -z "$pane_id" ]; then
     echo "error: could not find a terminal pane for zellij tab $tab_id (session '$session')" >&2
+    fm_backend_zellij_cli "$session" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || true
     return 1
   fi
   if [ -n "$prev_active" ] && [ "$prev_active" != "$tab_id" ]; then

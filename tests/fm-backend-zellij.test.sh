@@ -520,6 +520,54 @@ test_create_task_no_restore_when_new_tab_was_already_active() {
   pass "fm_backend_zellij_create_task: skips the restore call when there was no previously-active tab"
 }
 
+test_create_task_closes_created_tab_when_no_pane_found() {
+  local dir fb out status
+  dir="$TMP_ROOT/create-task-no-pane"; mkdir -p "$dir/responses"
+  # 1: list-tabs --json -> no existing tabs
+  printf '[]\n' > "$dir/responses/1.out"
+  # 2: new-tab -> tab id 6
+  printf '6\n' > "$dir/responses/2.out"
+  # 3: list-panes --json -> no terminal pane belongs to tab 6
+  printf '[]\n' > "$dir/responses/3.out"
+  # 4: close-tab-by-id 6 (the just-created tab torn back down) - silent
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_create_task firstmate fm-nopane /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must fail when its new tab has no terminal pane"
+  assert_contains "$out" "could not find a terminal pane" "create_task did not report the missing pane"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id'$'\x1f''6' \
+    "create_task must tear its just-created tab back down when no terminal pane can be resolved (otherwise a retry dies on the tab name)"
+  pass "fm_backend_zellij_create_task: closes its just-created tab when the terminal pane cannot be resolved"
+}
+
+# new-tab that creates the tab but emits non-numeric output leaves an untargetable
+# tab behind: there is no id to close it by, so the refusal must at least name the
+# scoped title the operator has to remove, or a retry walks into the duplicate
+# refusal with no remedy.
+test_create_task_hints_at_untargetable_tab_when_id_non_numeric() {
+  local dir fb out status title
+  dir="$TMP_ROOT/create-task-bad-id"; mkdir -p "$dir/responses"
+  title=$(zellij_expected_scoped_title fm-badid)
+  # 1: list-tabs --json -> no existing tabs
+  printf '[]\n' > "$dir/responses/1.out"
+  # 2: new-tab -> the tab may well have been created, but stdout is not an id
+  printf 'Error: something went sideways\n' > "$dir/responses/2.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_create_task firstmate fm-badid /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must fail when new-tab returns a non-numeric tab id"
+  assert_contains "$out" "did not return a numeric tab id" "create_task did not report the unusable tab id"
+  assert_contains "$out" "$title" "the refusal must name the scoped title of the possibly-orphaned tab"
+  assert_contains "$out" "close it manually" "the refusal must tell the operator to remove the untargetable tab"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id' \
+    "create_task must not attempt an id-targeted close when no tab id was returned"
+  pass "fm_backend_zellij_create_task: a non-numeric tab id refusal names the possibly-orphaned tab so a retry is not blind"
+}
+
 # --- capture / send_key / send_literal / current_path / kill -----------------
 
 test_capture_small_reads_use_viewport_and_trim() {
@@ -1321,6 +1369,8 @@ test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_create_task_restores_previously_active_tab
 test_create_task_no_restore_when_new_tab_was_already_active
+test_create_task_closes_created_tab_when_no_pane_found
+test_create_task_hints_at_untargetable_tab_when_id_non_numeric
 test_capture_small_reads_use_viewport_and_trim
 test_capture_large_reads_use_full_scrollback_and_trim
 test_capture_fails_when_pane_absent
