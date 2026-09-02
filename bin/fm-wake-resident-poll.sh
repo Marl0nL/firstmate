@@ -144,7 +144,6 @@ emit_for() {  # <name>
   [ -n "$target" ] || target=$(fm_meta_get "$meta" window)
   [ -n "$target" ] || return 0
   harness=$(fm_meta_get "$meta" harness)
-  fm_wr_confirmed_busy "$backend" "$target" "$harness" && return 0
 
   # Quiet since the LATEST of: this residency starting, the last message seen,
   # and the home's own most recent working footprint. Anything newer than the
@@ -163,6 +162,7 @@ emit_for() {  # <name>
   [ "$quiet" -gt 0 ] 2>/dev/null || return 0
   idle=$((NOW - quiet))
   [ "$idle" -ge "$FM_WR_IDLE_SECS" ] || return 0
+  fm_wr_confirmed_busy "$backend" "$target" "$harness" && return 0
   throttled "$name" standdown && return 0
   printf 'wake-resident %s: quiet %sm, nothing in flight - stand it down with bin/fm-wake-resident.sh standdown %s\n' \
     "$name" "$((idle / 60))" "$name"
