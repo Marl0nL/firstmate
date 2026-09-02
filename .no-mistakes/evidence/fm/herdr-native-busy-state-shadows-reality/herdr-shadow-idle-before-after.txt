@@ -1,0 +1,48 @@
+BEFORE - base commit 43ead08 (herdr's registry idle is trusted)
+==================================================================
+=================================================================
+SCENARIO  secondmate 'hibit' on backend=herdr target=default:w1:p2 harness=claude
+          quiet 120m (past the 30m stand-down threshold)
+-----------------------------------------------------------------
+herdr registry  : agent get -> agent_status=idle
+the pane itself :   ✻ Wibbling… (9m 41s · esc to interrupt)
+=================================================================
+
+### 1. what the captain's watcher prints (bin/fm-wake-resident-poll.sh)
+wake-resident hibit: quiet 120m, nothing in flight - stand it down with bin/fm-wake-resident.sh standdown hibit
+
+### 2. bin/fm-wake-resident.sh standdown hibit
+fm-wake-resident: hibit did not confirm its exit within 30s; leaving it alone rather than killing a possibly-working agent
+(exit status 1)
+
+### 3. pending-reply reconciliation over the same endpoint
+delivery observation : idle
+record phase         : escalated
+nudges typed at the working agent:
+  to hibit: [fm-from-firstmate]⁣corr=a101e9b84dc7da51 REPOST REQUIRED: previous marked request had no correlated parent report. Reply on the parent status channel including corr=a101e9b84dc7da51. Original request: please summarise the delivery note
+captain-facing status line:
+  blocked [key=pending-reply-a101e9b84dc7da51]: pending-reply-missed: task=hibit pending-reply-id=a101e9b84dc7da51 request=please summarise the delivery note
+
+AFTER - target commit 6d8e01f (registry idle never shadows the pane)
+==================================================================
+=================================================================
+SCENARIO  secondmate 'hibit' on backend=herdr target=default:w1:p2 harness=claude
+          quiet 120m (past the 30m stand-down threshold)
+-----------------------------------------------------------------
+herdr registry  : agent get -> agent_status=idle
+the pane itself :   ✻ Wibbling… (9m 41s · esc to interrupt)
+=================================================================
+
+### 1. what the captain's watcher prints (bin/fm-wake-resident-poll.sh)
+(no output - the poll stayed silent)
+
+### 2. bin/fm-wake-resident.sh standdown hibit
+fm-wake-resident: hibit is busy right now; leaving it up
+(exit status 1)
+
+### 3. pending-reply reconciliation over the same endpoint
+delivery observation : busy
+record phase         : awaiting_report
+nudges typed at the working agent: (none)
+captain-facing status line: (none - nothing escalated)
+

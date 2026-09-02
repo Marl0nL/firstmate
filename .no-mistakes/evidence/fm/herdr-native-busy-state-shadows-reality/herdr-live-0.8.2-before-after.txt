@@ -1,0 +1,24 @@
+LIVE herdr 0.8.2 probe - isolated fm-herdr-lab session, real herdr CLI
+======================================================================
+
+BEFORE - base commit 43ead08
+----------------------------
+herdr client/server        : herdr 0.8.2
+isolated lab session       : fm-lab-busyshadow-1866872-20636  (pane w1:p1)
+raw registry (agent get)   : idle
+fm_backend_busy_state      : idle
+the pane's last live line  :   ✻ Wibbling… (9m 41s · esc to interrupt)
+--- what the consumers conclude -------------------------------
+pending-reply observation  : idle
+wake-resident stand-down   : ALLOWED (endpoint read as not busy)
+
+AFTER - target commit 6d8e01f
+-----------------------------
+herdr client/server        : herdr 0.8.2
+isolated lab session       : fm-lab-busyshadow-1867933-2444  (pane w1:p1)
+raw registry (agent get)   : idle
+fm_backend_busy_state      : idle
+the pane's last live line  :   ✻ Wibbling… (9m 41s · esc to interrupt)
+--- what the consumers conclude -------------------------------
+pending-reply observation  : busy
+wake-resident stand-down   : REFUSED (endpoint confirmed busy)
