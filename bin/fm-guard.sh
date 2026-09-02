@@ -207,8 +207,12 @@ if [ "$watcher_healthy" = false ]; then
         printf '●  %s task(s) in flight, but %s.\n' "$in_flight" "$watcher_cause"
       elif [ "$sources" -gt 0 ]; then
         printf '●  %s process-event source(s) registered, but %s.\n' "$sources" "$watcher_cause"
-      else
+      elif [ -f "$STATE/x-watch.check.sh" ]; then
         printf '●  X-mode relay polling needs supervision, but %s.\n' "$watcher_cause"
+      elif [ "$FM_SUP_QUEUE_PENDING" = true ]; then
+        printf '●  a queued notification is waiting to be delivered, but %s.\n' "$watcher_cause"
+      else
+        printf '●  the deferred startup network checks are still running, but %s.\n' "$watcher_cause"
       fi
       if [ "$READ_ONLY" -eq 1 ]; then
         printf '●  This read-only session should report the lapse, not repair it.\n'

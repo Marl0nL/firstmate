@@ -27,7 +27,11 @@
 #     digest or as a `check: startup-network` wake. Only a durable acknowledgement
 #     written after harvest prints the finished result suppresses that wake, so a
 #     claimant that exits first cannot lose the result. While the worker is still
-#     running the digest states by name what is not yet confirmed.
+#     running the digest states by name what is not yet confirmed. A running stage
+#     and the wake it enqueues both count as supervision need
+#     (bin/fm-supervision-lib.sh), so an idle home - a relaunched secondmate that
+#     reconciled and went quiet before this worker finished - keeps its
+#     supervision cycle armed and delivers the wake itself, with no external nudge.
 #   - Mutation authority is leased. The worker outlives the command that launched
 #     it, so it takes the same acquisition lease a new session must hold before
 #     replacing a dead owner, re-checks the captured owner under that lease, and

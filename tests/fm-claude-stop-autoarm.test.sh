@@ -54,6 +54,31 @@ make_secondmate_dir() {
   printf '%s\n' "$dir"
 }
 
+# A primary-shaped home carrying the WHOLE bin, so the auto-arm forks the real
+# fm-watch-arm.sh and the real fm-watch.sh instead of a stub. Used only by the
+# end-to-end delivery test, which proves the real armed cycle surfaces a queued
+# wake in an idle home with no external nudge.
+make_real_chain_dir() {
+  local dir=$1
+  mkdir -p "$dir/state" "$dir/bin"
+  git init -q "$dir"
+  git -C "$dir" commit -q --allow-empty -m init
+  : > "$dir/AGENTS.md"
+  cp -R "$ROOT/bin/." "$dir/bin/"
+  printf '%s\n' "$dir"
+}
+
+# A pid that no live process holds, found by scanning rather than by spawning and
+# killing: killing a backgrounded job can run the inherited fm_test_cleanup EXIT
+# trap in the forked child and wipe the fixture root out from under the test.
+nonexistent_pid() {
+  local pid=999999
+  while kill -0 "$pid" 2>/dev/null; do
+    pid=$((pid + 1))
+  done
+  printf '%s\n' "$pid"
+}
+
 # A genuine linked git worktree: the shape every crewmate/scout task worktree
 # has (git-dir != git-common-dir), which must keep the hook inert.
 make_crewmate_worktree_dir() {
@@ -511,6 +536,84 @@ test_arms_for_x_mode_poll_need_without_inflight() {
   pass "auto-arm: X-mode poll need arms the cycle even with no tasks in flight"
 }
 
+test_arms_when_wake_queue_pending_without_inflight() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/queue-pending-arms")
+  # A wake enqueued out of band into an idle home (no state/*.meta): the deferred
+  # network stage finishing after the reconcile turn ended. The auto-arm used to
+  # exit 0 here, so the queued wake sat undelivered until the parent nudged it.
+  printf '%s\t1\tcheck\tstartup-network\tcheck: startup-network: finished\n' "$(date +%s)" > "$dir/state/.wake-queue"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an idle home holding a queued wake must arm and rewake, not sit inert"
+  [ -e "$dir/state/arm-ran" ] || fail "hook never foregrounded the arm for a pending-queue home"
+  pass "auto-arm: a pending durable wake queue arms the cycle even with no tasks in flight"
+}
+
+test_arms_when_deferred_network_stage_running() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/network-stage-arms")
+  # This shell ($$) is a genuinely-alive pid for the whole run - a real live
+  # worker for the stage liveness check, with nothing to spawn or kill.
+  cat > "$dir/state/.startup-network.status" <<EOF
+state=running
+pid=$$
+started=$(date +%s)
+locked=1
+phases=probe,sweeps
+generation=$(date +%s).$$.0
+lock_pid=0
+EOF
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an in-progress deferred network stage must keep the auto-arm cycle armed across the window before its wake lands"
+  [ -e "$dir/state/arm-ran" ] || fail "hook never foregrounded the arm while the network stage was running"
+  pass "auto-arm: an in-progress deferred network stage arms the cycle even with no tasks in flight"
+}
+
+test_inert_when_deferred_network_stage_crashed() {
+  local dir out status dead
+  dir=$(make_primary_dir "$TMP_ROOT/network-stage-crashed")
+  # A worker killed with its process group leaves state=running behind; a dead
+  # recorded pid must never hold an idle turn open.
+  dead=$(nonexistent_pid)
+  cat > "$dir/state/.startup-network.status" <<EOF
+state=running
+pid=$dead
+started=$(date +%s)
+locked=1
+phases=probe,sweeps
+generation=$(date +%s).$$.0
+lock_pid=0
+EOF
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "a crashed network stage (dead worker) must not hold an idle turn open"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed on a crashed network stage record"
+  pass "auto-arm: inert when a network stage record is stale (crashed worker)"
+}
+
+# End-to-end, real processes, no harness and no stub: the auto-arm forks the real
+# fm-watch-arm.sh + fm-watch.sh. An idle home holding a wake queued out of band
+# must self-deliver it (the watcher resurfaces a non-empty queue on arm) and force
+# exactly one exit-2 rewake, with no external nudge. This is the exact fleet
+# scenario the reproduction reported across relaunched secondmates.
+test_real_chain_delivers_queued_wake_without_nudge() {
+  local dir out status wpid
+  dir=$(make_real_chain_dir "$TMP_ROOT/real-chain")
+  FM_STATE_OVERRIDE="$dir/state" bash -c \
+    '. "$1"; fm_wake_append check startup-network "check: startup-network: deferred startup network checks finished (done)"' \
+    _ "$dir/bin/fm-wake-lib.sh" || fail "could not seed the out-of-band queued wake"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  # Never leave a real watcher running past the test, on any assertion path.
+  wpid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+  case "$wpid" in ''|*[!0-9]*) ;; *) kill "$wpid" 2>/dev/null || true ;; esac
+  expect_code 2 "$status" "an idle home holding a queued wake must self-deliver it through a real armed watcher (exit-2 rewake) with no external nudge"
+  assert_contains "$out" "firstmate watcher wake" "the real chain must force a handling turn for the queued wake"
+  [ -s "$dir/state/.wake-queue" ] || fail "the durable wake must remain queued until the handling turn drains and acknowledges it"
+  pass "auto-arm: real arm + real watcher deliver a queued wake from an idle home with no nudge"
+}
+
 test_single_flight_admits_exactly_one_owner() {
   local dir rc1 rc2 count
   dir=$(make_primary_dir "$TMP_ROOT/single-flight")
@@ -803,6 +906,10 @@ test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
 test_arms_for_x_mode_poll_need_without_inflight
+test_arms_when_wake_queue_pending_without_inflight
+test_arms_when_deferred_network_stage_running
+test_inert_when_deferred_network_stage_crashed
+test_real_chain_delivers_queued_wake_without_nudge
 test_single_flight_admits_exactly_one_owner
 test_abandoned_owner_claim_is_reclaimed_and_rearms
 test_arming_claim_is_never_reclaimed

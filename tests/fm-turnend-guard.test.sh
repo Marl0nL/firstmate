@@ -77,6 +77,74 @@ test_predicate_queue_pending_flag() {
   pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
 }
 
+# bin/fm-startup-network.sh writes this key=value status record; only its
+# state/pid/started fields drive the supervision liveness gate.
+write_network_status() {  # <state-dir> <state-value> <pid> <started-epoch>
+  mkdir -p "$1"
+  cat > "$1/.startup-network.status" <<EOF
+state=$2
+pid=$3
+started=$4
+locked=1
+phases=probe,sweeps
+generation=$4.$$.0
+lock_pid=$$
+EOF
+  [ -f "$1/.startup-network.status" ] || fail "could not write the network-stage status fixture into $1"
+}
+
+test_predicate_queue_pending_needs_supervision() {
+  local state="$TMP_ROOT/pred-queue-need/state"
+  mkdir -p "$state"
+  # A wake enqueued out of band into an otherwise idle home (no state/*.meta):
+  # exactly the deferred network stage finishing after the reconcile turn ended.
+  printf '%s\t1\tcheck\tstartup-network\tcheck: startup-network: finished\n' "$(date +%s)" > "$state/.wake-queue"
+  fm_supervision_needed "$state" 300 || fail "a pending wake queue must register as supervision need"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a pending queue must not be counted as an in-flight task"
+  [ "$FM_SUP_QUEUE_PENDING" = true ] || fail "a non-empty wake queue must read as pending"
+  [ "$FM_SUP_NEEDED" = true ] || fail "a pending wake queue must set FM_SUP_NEEDED"
+  fm_supervision_unhealthy "$state" 300 || fail "a pending queue with no beacon must be unhealthy"
+  pass "fm_supervision_needed: a pending durable wake queue needs supervision"
+}
+
+test_predicate_network_stage_running_needs_supervision() {
+  local state="$TMP_ROOT/pred-net-run/state"
+  mkdir -p "$state"
+  # This shell ($$) is a genuinely-alive pid for the whole run - a real live
+  # worker for the kill -0 liveness check, with nothing to spawn or kill.
+  write_network_status "$state" running "$$" "$(date +%s)"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_NETWORK_STAGE" = true ] || fail "a live running deferred network stage must set FM_SUP_NETWORK_STAGE"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a network stage must not be counted as a task"
+  [ "$FM_SUP_NEEDED" = true ] || fail "an in-progress deferred network stage must set FM_SUP_NEEDED"
+  pass "fm_supervision_status: an in-progress deferred network stage needs supervision"
+}
+
+test_predicate_network_stage_dead_worker_not_needed() {
+  local state="$TMP_ROOT/pred-net-dead/state" dead
+  mkdir -p "$state"
+  # A worker killed with its process group (the truncated-digest case) leaves the
+  # running record behind; a dead recorded pid must never hold an idle turn open.
+  dead=$(nonexistent_pid)
+  write_network_status "$state" running "$dead" "$(date +%s)"
+  [ -f "$state/.startup-network.status" ] || fail "dead-worker fixture status file is missing (would pass vacuously)"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_NETWORK_STAGE" = false ] || fail "a running record with a dead worker pid must NOT read as an active stage"
+  [ "$FM_SUP_NEEDED" = false ] || fail "a crashed network stage must not hold an idle turn open"
+  pass "fm_supervision_status: a crashed network stage (dead worker) is not a supervision need"
+}
+
+test_predicate_network_stage_overage_not_needed() {
+  local state="$TMP_ROOT/pred-net-old/state"
+  mkdir -p "$state"
+  # A live pid ($$) but started far past the stage's own aggregate deadline: a
+  # recycled pid that happens to be alive must not pin supervision on forever.
+  write_network_status "$state" running "$$" "$(( $(date +%s) - 100000 ))"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_NETWORK_STAGE" = false ] || fail "a running record older than the stage deadline must not read as active (recycled-pid guard)"
+  pass "fm_supervision_status: a stale over-deadline running record is not an active stage"
+}
+
 test_predicate_x_mode_needs_supervision() {
   local state="$TMP_ROOT/pred-x-mode/state"
   mkdir -p "$state"
@@ -268,6 +336,17 @@ test_hook_blocks_source_only_home() {
   expect_code 2 "$status" "non-Claude hook must block when a source-only home has no watcher"
   assert_contains "$out" "1 process-event source(s) registered" "block reason must identify the source-only supervision need"
   pass "fm-turnend-guard: non-Claude path blocks a source-only home"
+}
+
+test_hook_blocks_queue_pending_only_home() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-queue-only")
+  # No task metadata: an idle home that still holds a wake queued out of band.
+  printf '%s\t1\tcheck\tstartup-network\tcheck: startup-network: finished\n' "$(date +%s)" > "$dir/state/.wake-queue"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "non-Claude hook must block when only a pending wake queue needs supervision"
+  assert_contains "$out" "a queued notification is waiting to be delivered" "block reason must name the pending-wake supervision need, not misreport X-mode"
+  pass "fm-turnend-guard: non-Claude path blocks an idle home holding a pending wake queue"
 }
 
 test_hook_blocks_when_dead_lock_has_fresh_beacon() {
@@ -1777,11 +1856,16 @@ test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
+test_predicate_queue_pending_needs_supervision
+test_predicate_network_stage_running_needs_supervision
+test_predicate_network_stage_dead_worker_not_needed
+test_predicate_network_stage_overage_not_needed
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
+test_hook_blocks_queue_pending_only_home
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_silent_when_lock_armed_from_real_and_hook_runs_via_alias
