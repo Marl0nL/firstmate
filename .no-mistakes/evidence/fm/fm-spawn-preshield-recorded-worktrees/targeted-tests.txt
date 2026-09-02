@@ -1,0 +1,42 @@
+Targeted behavior tests for this change (bin/fm-test-run.sh, worktree HEAD 415cf2a)
+=================================================================================
+
+$ bin/fm-test-run.sh tests/fm-spawn-preshield.test.sh tests/fm-spawn-endpoint-residue.test.sh
+FM_TEST_BEGIN 2026-09-02T12:30:10Z tests/fm-spawn-preshield.test.sh family=unclassified expected_gate_skip=none
+ok - fm-spawn: shields every owned slot during the get and reaps them all on a successful acquisition
+ok - fm-spawn: reaps every shield on a guard-refused spawn's failure exit
+ok - fm-spawn: on the acquisition timeout the shields are reaped only after the endpoint teardown
+ok - fm-spawn: shields skip a remote secondmate's recorded paths and still cover local rows
+ok - fm-spawn: the abort-cleanup trap reaps the shields when a spawn dies before the get resolves
+ok - fm-spawn: shields cover worktree= and home= rows, dedupe one path, and skip vanished paths
+ok - fm-spawn: shields the spawning id's own recorded worktree when a dead id is respawned fresh
+FM_TEST_END 2026-09-02T12:30:20Z tests/fm-spawn-preshield.test.sh exit=0 duration_ms=9816 gate_skip=false
+FM_TEST_BEGIN 2026-09-02T12:30:20Z tests/fm-spawn-endpoint-residue.test.sh family=unclassified expected_gate_skip=none
+ok - fm-spawn: a guard-refused spawn tears down the tmux window it created, leaving no residue
+ok - fm-spawn: an unconfirmed endpoint teardown prints the exact one-line remedy
+ok - fm-spawn: a retry on a leftover window is refused with a named, verify-first conditional remedy
+ok - fm-spawn: teardown confirmation matches the exact window, not a prefix sibling
+ok - fm-spawn: a pre-publish isolation refusal reports the endpoint teardown instead of pointing at the destroyed endpoint
+ok - fm-spawn: an unreadable backend is reported as an unconfirmed teardown, not as a removed endpoint
+FM_TEST_END 2026-09-02T12:30:26Z tests/fm-spawn-endpoint-residue.test.sh exit=0 duration_ms=6235 gate_skip=false
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=16115
+FM_TEST_SUMMARY_FAMILY family=unclassified count=2 duration_ms=16051 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-spawn-preshield.test.sh duration_ms=9816
+FM_TEST_SLOWEST rank=2 script=tests/fm-spawn-endpoint-residue.test.sh duration_ms=6235
+
+$ bin/fm-test-run.sh tests/fm-backend-cmux.test.sh tests/fm-backend-herdr.test.sh tests/fm-backend-orca.test.sh tests/fm-backend-zellij.test.sh tests/fm-control-relaunch.test.sh
+FM_TEST_BEGIN 2026-09-02T12:30:26Z tests/fm-backend-cmux.test.sh family=cmux expected_gate_skip=optional-binary
+FM_TEST_END 2026-09-02T12:30:29Z tests/fm-backend-cmux.test.sh exit=0 duration_ms=3093 gate_skip=false
+FM_TEST_BEGIN 2026-09-02T12:30:29Z tests/fm-backend-herdr.test.sh family=backend-dispatch expected_gate_skip=none
+FM_TEST_END 2026-09-02T12:30:47Z tests/fm-backend-herdr.test.sh exit=0 duration_ms=17759 gate_skip=false
+FM_TEST_BEGIN 2026-09-02T12:30:47Z tests/fm-backend-orca.test.sh family=orca expected_gate_skip=optional-binary
+FM_TEST_END 2026-09-02T12:31:05Z tests/fm-backend-orca.test.sh exit=0 duration_ms=17365 gate_skip=false
+FM_TEST_BEGIN 2026-09-02T12:31:05Z tests/fm-backend-zellij.test.sh family=zellij expected_gate_skip=optional-binary
+FM_TEST_END 2026-09-02T12:31:11Z tests/fm-backend-zellij.test.sh exit=0 duration_ms=6238 gate_skip=false
+FM_TEST_BEGIN 2026-09-02T12:31:11Z tests/fm-control-relaunch.test.sh family=backend-dispatch expected_gate_skip=none
+FM_TEST_END 2026-09-02T12:31:38Z tests/fm-control-relaunch.test.sh exit=0 duration_ms=26936 gate_skip=false
+FM_TEST_SUMMARY total=5 failed=0 skipped_gate=0 duration_ms=71534
+FM_TEST_SUMMARY_FAMILY family=backend-dispatch count=2 duration_ms=44695 failed=0
+FM_TEST_SUMMARY_FAMILY family=cmux count=1 duration_ms=3093 failed=0
+FM_TEST_SUMMARY_FAMILY family=orca count=1 duration_ms=17365 failed=0
+FM_TEST_SUMMARY_FAMILY family=zellij count=1 duration_ms=6238 failed=0

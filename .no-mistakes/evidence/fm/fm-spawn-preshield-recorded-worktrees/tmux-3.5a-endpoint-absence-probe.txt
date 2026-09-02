@@ -1,0 +1,29 @@
+# Reproduction of docs/verification/runtime-backends.md -> 'Endpoint absence probe'
+# host: Linux 6.17.7-ba29.fc43.x86_64 x86_64  date: 2026-09-02T12:21:46Z
+# tmux: tmux 3.5a   socket: fm-probe-4111041
+
+$ tmux -L "$sock" new-session -d -s probe -n fm-a
+$ tmux -L "$sock" new-window -d -t probe: -n fm-a-sibling
+$ tmux -L "$sock" kill-window -t "=probe:=fm-a"
+
+--- the window fm-a is now GONE; fm-a-sibling is still live ---
+
+$ tmux -L "$sock" display-message -p -t "=probe:=fm-a" "#{window_name}"; echo "rc $?"
+fm-a-sibling
+rc 0
+
+$ tmux -L "$sock" list-windows -t "=probe:=fm-a"; echo "rc $?"
+can't find window: fm-a
+rc 1
+
+$ tmux -L "$sock" list-windows -t "probe:fm-a"; echo "rc $?"   # bare name -> PREFIX match
+1: fm-a-sibling* (1 panes) [80x24] [layout b25e,80x24,0,0,1] @1 (active)
+rc 0
+
+$ tmux -L "$sock" kill-server
+$ tmux -L "$sock" has-session -t "=probe"; echo "rc $?"
+no server running on /tmp/tmux-1000/fm-probe-4111041
+rc 1
+$ tmux -L "$sock" list-windows -t "=probe:=fm-a"; echo "rc $?"
+no server running on /tmp/tmux-1000/fm-probe-4111041
+rc 1

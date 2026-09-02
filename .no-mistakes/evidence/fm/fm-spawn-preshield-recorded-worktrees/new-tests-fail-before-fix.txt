@@ -1,0 +1,34 @@
+Regression property: the new tests fail against the pre-fix code and pass at HEAD
+===============================================================================
+
+HEAD's tests/ were dropped onto each pre-fix checkout of bin/ unchanged.
+
+--- tests/fm-spawn-endpoint-residue.test.sh against 11a61e3 bin/ (display-message probe) ---
+not ok - a confirmed teardown must print no leftover remedy (unexpected: 'could not tear down')
+--- output ---
+warning: <tmp>/teardown-clean/home/data/intruder-b2/brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+error: treehouse get yielded worktree '<tmp>/teardown-clean/contested', which task 'owner-a1' already records as its own in <tmp>/teardown-clean/home/state/owner-a1.meta; refusing to launch intruder-b2 into a worktree another task of this home is using. Reconcile owner-a1 first (bin/fm-crew-state.sh owner-a1), then respawn.
+warning: could not tear down the tmux endpoint 'firstmate:fm-intruder-b2' left by the failed spawn of intruder-b2; remove it before retrying: tmux kill-window -t '=firstmate:=fm-intruder-b2'
+FM_TEST_END 2026-09-02T12:32:05Z tests/fm-spawn-endpoint-residue.test.sh exit=1 duration_ms=1351 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=1 skipped_gate=0 duration_ms=1389
+
+--- tests/fm-spawn-preshield.test.sh against base 43ead08 bin/ (no shields) ---
+not ok - the owned worktree must be shielded before the get
+FM_TEST_END 2026-09-02T12:32:07Z tests/fm-spawn-preshield.test.sh exit=1 duration_ms=2059 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=1 skipped_gate=0 duration_ms=2098
+
+--- both, unchanged, at HEAD 415cf2a ---
+ok - fm-spawn: shields every owned slot during the get and reaps them all on a successful acquisition
+ok - fm-spawn: reaps every shield on a guard-refused spawn's failure exit
+ok - fm-spawn: on the acquisition timeout the shields are reaped only after the endpoint teardown
+ok - fm-spawn: shields skip a remote secondmate's recorded paths and still cover local rows
+ok - fm-spawn: the abort-cleanup trap reaps the shields when a spawn dies before the get resolves
+ok - fm-spawn: shields cover worktree= and home= rows, dedupe one path, and skip vanished paths
+ok - fm-spawn: shields the spawning id's own recorded worktree when a dead id is respawned fresh
+ok - fm-spawn: a guard-refused spawn tears down the tmux window it created, leaving no residue
+ok - fm-spawn: an unconfirmed endpoint teardown prints the exact one-line remedy
+ok - fm-spawn: a retry on a leftover window is refused with a named, verify-first conditional remedy
+ok - fm-spawn: teardown confirmation matches the exact window, not a prefix sibling
+ok - fm-spawn: a pre-publish isolation refusal reports the endpoint teardown instead of pointing at the destroyed endpoint
+ok - fm-spawn: an unreadable backend is reported as an unconfirmed teardown, not as a removed endpoint
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=16224

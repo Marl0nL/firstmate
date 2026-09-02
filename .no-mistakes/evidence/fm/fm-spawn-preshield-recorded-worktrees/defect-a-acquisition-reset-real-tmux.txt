@@ -1,0 +1,85 @@
+Defect A - treehouse acquisition-reset: real tmux 3.5a, end to end
+==================================================================
+
+Fixture (IDENTICAL for both checkouts, rebuilt from scratch each time):
+  * a real tmux 3.5a server on a private socket, a real git project with an
+    origin remote, and a real two-slot worktree pool
+  * slot-a is task owner-a1's OWNED worktree: its own branch, a landed commit
+    (landed.txt) and uncommitted work in progress (WIP.txt)
+  * owner-a1 is a PARKED done-crew: its agent process is alive but its cwd sits
+    at the pane launch dir (the project), never inside slot-a
+  * the pane's `treehouse` function reproduces treehouse v2's rule verbatim - a
+    slot is FREE when no live process has its cwd inside it (read from
+    /proc/<pid>/cwd), and `treehouse get` RESETS the slot it hands out
+    (detach + hard reset + clean) before cd'ing into it
+
+Operator's view: spawn a new crewmate and look at what happened to the parked
+crew's worktree.
+
+-----------------------------------------------------------------------
+BASE 43ead08 - the defect: slot-a reads free, is handed out and RESET;
+owner-a1's branch, landed commit and uncommitted work are destroyed
+BEFORE the lease guard gets its chance to refuse
+-----------------------------------------------------------------------
+
+########## checkout: base  (<tmp>/src/base) ##########
+### tmux 3.5a on a private socket; treehouse stand-in judges a slot free by live-process cwd and resets what it hands out
+
+### pool BEFORE the spawn (slot-a is owner-a1's, with its landed commit and uncommitted WIP):
+  slot-a   HEAD=crew/owner-a1-work                 landed.txt=present WIP.txt=present
+  slot-b   HEAD=DETACHED at ef3be2c                landed.txt=GONE    WIP.txt=GONE
+  owner-a1's parked agent process (pid 276862) cwd: <tmp>/pre-base/project
+
+### spawn a NEW crewmate (intruder-b2) - it runs 'treehouse get' in its own pane:
+  error: treehouse get yielded worktree '<tmp>/pre-base/pool/slot-a', which task 'owner-a1' already records as its own in <tmp>/pre-base/home/state/owner-a1.meta; refusing to launch intruder-b2 into a worktree another task of this home is using. Reconcile owner-a1 first (bin/fm-crew-state.sh owner-a1), then respawn.
+  [exit 1]
+
+### pool AFTER the spawn:
+  slot-a   HEAD=DETACHED at ef3be2c                landed.txt=GONE    WIP.txt=GONE
+  slot-b   HEAD=DETACHED at ef3be2c                landed.txt=GONE    WIP.txt=GONE
+
+### which slot the spawn was handed:
+  (no record published - the spawn was refused)
+
+### processes cwd'd in each pool slot afterwards
+###   slot-a must be EMPTY: every acquisition shield is reaped on the way out.
+###   slot-b holding the spawned crewmate's own shell is correct - that is the slot it was handed.
+  slot-a    277238
+  slot-b   (none)
+
+(the pid holding slot-a at base is not a shield - base starts none. It is the
+refused spawn's own leftover pane shell, i.e. Defect B's residue, still sitting
+in the slot it was wrongly handed.)
+
+
+-----------------------------------------------------------------------
+HEAD 415cf2a - the shields hold every recorded slot for the duration of
+the get: slot-a stays owner-a1's, the spawn is handed the genuinely free
+slot-b and succeeds, and the shields are gone afterwards
+-----------------------------------------------------------------------
+
+########## checkout: head  (<tmp>/src/head) ##########
+### tmux 3.5a on a private socket; treehouse stand-in judges a slot free by live-process cwd and resets what it hands out
+
+### pool BEFORE the spawn (slot-a is owner-a1's, with its landed commit and uncommitted WIP):
+  slot-a   HEAD=crew/owner-a1-work                 landed.txt=present WIP.txt=present
+  slot-b   HEAD=DETACHED at c1b9915                landed.txt=GONE    WIP.txt=GONE
+  owner-a1's parked agent process (pid 282289) cwd: <tmp>/pre-head/project
+
+### spawn a NEW crewmate (intruder-b2) - it runs 'treehouse get' in its own pane:
+  spawned intruder-b2 harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-intruder-b2 worktree=<tmp>/pre-head/pool/slot-b
+  [exit 0]
+
+### pool AFTER the spawn:
+  slot-a   HEAD=crew/owner-a1-work                 landed.txt=present WIP.txt=present
+  slot-b   HEAD=DETACHED at c1b9915                landed.txt=GONE    WIP.txt=GONE
+
+### which slot the spawn was handed:
+  worktree=<tmp>/pre-head/pool/slot-b
+
+### processes cwd'd in each pool slot afterwards
+###   slot-a must be EMPTY: every acquisition shield is reaped on the way out.
+###   slot-b holding the spawned crewmate's own shell is correct - that is the slot it was handed.
+  slot-a   (none)
+  slot-b    282434 288386
+

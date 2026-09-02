@@ -1,0 +1,99 @@
+Defect B - failed-spawn endpoint residue: real tmux 3.5a, end to end
+====================================================================
+
+Fixture (IDENTICAL for all three checkouts, rebuilt from scratch each time):
+  * a real tmux 3.5a server on a private socket - fm-spawn's every tmux call is
+    the real binary, no fake
+  * a real git project + a real directory the pane lands in
+  * task owner-a1 already records that directory as its worktree, so the lease
+    guard refuses the new spawn AFTER its window has been created - the residue
+    path under test
+  * a `treehouse` shell function in the pane cd's into that directory, standing
+    in for the real `treehouse get`
+
+Operator's view: run the spawn, look at the tmux server, retry, and run whatever
+removal command the tool offered.
+
+--------------------------------------------------------------------
+BASE 43ead08 - the defect: the refused spawn leaves its window behind
+--------------------------------------------------------------------
+
+########## checkout: base  (<tmp>/src/base) ##########
+### tmux: tmux 3.5a   private socket: fm-e2e-base-129280
+
+### 1. spawn intruder-b2 onto a slot task owner-a1 already owns (refused AFTER the window is created)
+error: treehouse get yielded worktree '<tmp>/case-base/contested', which task 'owner-a1' already records as its own in <tmp>/case-base/home/state/owner-a1.meta; refusing to launch intruder-b2 into a worktree another task of this home is using. Reconcile owner-a1 first (bin/fm-crew-state.sh owner-a1), then respawn.
+[exit 1]
+
+### 2. ground truth - what the tmux server actually holds now:
+  0: bash
+  1: fm-intruder-b2
+
+### 3. the operator retries the same spawn:
+error: window firstmate:fm-intruder-b2 already exists
+[exit 1]
+
+### 4. run the removal command a leftover-residue warning would offer:
+$ tmux kill-window -t '=firstmate:=fm-intruder-b2'
+[exit 0]
+
+### 5. tmux windows at the end:
+  0: bash
+
+-----------------------------------------------------------------------------
+11a61e3 (this branch BEFORE the last probe fix) - teardown works, but the
+display-message probe can never confirm it, so every clean spawn is reported
+as leftover and hands over a removal command for a window that is already gone
+-----------------------------------------------------------------------------
+
+########## checkout: pre-probe-fix  (<tmp>/src/pre-probe-fix) ##########
+### tmux: tmux 3.5a   private socket: fm-e2e-pre-probe-fix-130480
+
+### 1. spawn intruder-b2 onto a slot task owner-a1 already owns (refused AFTER the window is created)
+error: treehouse get yielded worktree '<tmp>/case-pre-probe-fix/contested', which task 'owner-a1' already records as its own in <tmp>/case-pre-probe-fix/home/state/owner-a1.meta; refusing to launch intruder-b2 into a worktree another task of this home is using. Reconcile owner-a1 first (bin/fm-crew-state.sh owner-a1), then respawn.
+warning: could not tear down the tmux endpoint 'firstmate:fm-intruder-b2' left by the failed spawn of intruder-b2; remove it before retrying: tmux kill-window -t '=firstmate:=fm-intruder-b2'
+[exit 1]
+
+### 2. ground truth - what the tmux server actually holds now:
+  0: bash
+
+### 3. the operator retries the same spawn:
+error: treehouse get yielded worktree '<tmp>/case-pre-probe-fix/contested', which task 'owner-a1' already records as its own in <tmp>/case-pre-probe-fix/home/state/owner-a1.meta; refusing to launch intruder-b2 into a worktree another task of this home is using. Reconcile owner-a1 first (bin/fm-crew-state.sh owner-a1), then respawn.
+warning: could not tear down the tmux endpoint 'firstmate:fm-intruder-b2' left by the failed spawn of intruder-b2; remove it before retrying: tmux kill-window -t '=firstmate:=fm-intruder-b2'
+[exit 1]
+
+### 4. run the removal command a leftover-residue warning would offer:
+$ tmux kill-window -t '=firstmate:=fm-intruder-b2'
+can't find window: fm-intruder-b2
+[exit 1]
+
+### 5. tmux windows at the end:
+  0: bash
+
+----------------------------------------------------------------------
+HEAD 415cf2a - teardown confirmed by has-session + list-windows: window
+gone, no contradictory warning, no bogus remedy, retry is clean
+----------------------------------------------------------------------
+
+########## checkout: head  (<tmp>/src/head) ##########
+### tmux: tmux 3.5a   private socket: fm-e2e-head-131749
+
+### 1. spawn intruder-b2 onto a slot task owner-a1 already owns (refused AFTER the window is created)
+error: treehouse get yielded worktree '<tmp>/case-head/contested', which task 'owner-a1' already records as its own in <tmp>/case-head/home/state/owner-a1.meta; refusing to launch intruder-b2 into a worktree another task of this home is using. Reconcile owner-a1 first (bin/fm-crew-state.sh owner-a1), then respawn.
+[exit 1]
+
+### 2. ground truth - what the tmux server actually holds now:
+  0: bash
+
+### 3. the operator retries the same spawn:
+error: treehouse get yielded worktree '<tmp>/case-head/contested', which task 'owner-a1' already records as its own in <tmp>/case-head/home/state/owner-a1.meta; refusing to launch intruder-b2 into a worktree another task of this home is using. Reconcile owner-a1 first (bin/fm-crew-state.sh owner-a1), then respawn.
+[exit 1]
+
+### 4. run the removal command a leftover-residue warning would offer:
+$ tmux kill-window -t '=firstmate:=fm-intruder-b2'
+can't find window: fm-intruder-b2
+[exit 1]
+
+### 5. tmux windows at the end:
+  0: bash
+
