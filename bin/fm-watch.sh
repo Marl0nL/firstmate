@@ -90,8 +90,20 @@
 #                          Observation is read-only and one parent
 #                          receipt suppresses repeats for that row
 # For normal supervision, resume the session-start primary-harness protocol
-# after each printed reason. Direct duplicate invocations of this script still
-# no-op through the watcher singleton lock.
+# after each printed reason.
+#
+# Singleton admission (one owner of this contract): a watcher does supervision
+# work only while it provably holds the singleton lock. Admission acquires the
+# lock atomically (fm_lock_try_acquire), publishes identity plus the first liveness
+# beacon to SETTLE ownership, then RE-CHECKS the lock before entering the poll
+# loop. That acquire/settle-recheck pair brackets the brief mid-renewal window a
+# fresh arm can land in, so two watchers can never both proceed past admission. The
+# same ownership predicate (watcher_owns_lock) then gates every side effect: it
+# runs at the top of each poll iteration and again after the one bounded
+# mid-iteration wait (the signal grace), so a watcher that loses the lock to a
+# takeover stands down without enqueuing a duplicate wake, refreshing the beacon,
+# or absorbing a signal it no longer owns. A direct duplicate invocation likewise
+# no-ops: it fails admission and exits "already running" before any work.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1238,12 +1250,32 @@ trap 'exit 1' HUP INT TERM
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
 WATCHER_PID=${BASHPID:-$$}
+# True only while this process is still the recorded singleton-lock holder. The
+# watcher performs supervision side effects - enqueuing wakes, refreshing the
+# beacon, advancing seen-markers - ONLY while this holds, so a process that lost
+# the singleton (to a mid-renewal successor or any takeover) stands down before
+# doing duplicate work rather than continuing a full stale poll iteration. Read the
+# pid directly, never via a command substitution comparison against a subshell pid.
+watcher_owns_lock() {
+  [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$WATCHER_PID" ]
+}
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+
+# Settle ownership before any supervision work: publish the first liveness beacon
+# so a concurrent armer or guard already sees this watcher as healthy (shrinking the
+# window in which one would judge the home unsupervised and start a competitor),
+# then RE-CHECK the singleton lock. Admission (fm_lock_try_acquire above) and this
+# settle re-check bracket the mid-renewal window a fresh arm can land in: whichever
+# watcher settles as the recorded holder proceeds, and any other stands down here
+# before it touches the wake queue, so two watchers can never both proceed past
+# admission into the poll loop.
+touch "$STATE/.last-watcher-beat"
+watcher_owns_lock || exit 0
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -1280,10 +1312,9 @@ while :; do
   # down so the rightful singleton continues alone. The EXIT trap's release
   # no-ops because the lock pid is not ours, so the survivor's lock is untouched.
   # This makes any duplicate self-resolve within one poll instead of persisting
-  # and doubling every wake.
-  if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" != "$WATCHER_PID" ]; then
-    exit 0
-  fi
+  # and doubling every wake. The same check gates the in-flight signal batch below
+  # so a takeover mid-iteration cannot enqueue a duplicate before the next top.
+  watcher_owns_lock || exit 0
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
@@ -1407,6 +1438,12 @@ while :; do
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
+    # A takeover can land WHILE this watcher lingered the grace period above - the
+    # one bounded mid-iteration wait that precedes a side effect. If the singleton
+    # is no longer ours, do not enqueue or suppress this batch: the current holder
+    # owns it and will scan the still-unmarked signal itself. Abandon the iteration
+    # and stand down at the next loop top rather than doubling the wake.
+    watcher_owns_lock || continue
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do

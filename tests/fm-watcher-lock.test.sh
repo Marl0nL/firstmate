@@ -1188,6 +1188,127 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+# The singleton lock is atomic at admission, but a watcher only re-checked
+# ownership at the top of its poll loop, so a takeover landing WHILE it lingered
+# the mid-iteration signal grace let the superseded watcher finish that iteration -
+# enqueuing a duplicate wake it no longer owned. That is the field ping-pong where
+# two watchers both "proceeded" and the same parked pane was re-absorbed within
+# seconds. The atomic-admission contract now gates every side effect on still
+# owning the lock, so a superseded watcher stands down without doing any work and
+# exactly one watcher ever proceeds.
+test_evicted_watcher_does_no_work_after_takeover() {
+  local dir state fakebin out pid i
+  dir=$(make_case evicted-no-work)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  mark_pr_check_migration_complete "$state"
+  # A large signal grace makes the takeover land deterministically while the
+  # incumbent lingers mid-iteration; the crew-state fake's default unknown verdict
+  # keeps the no-verb signal ACTIONABLE, so pre-fix the incumbent would enqueue it.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=8 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && [ -s "$state/.watch.lock/pid-identity" ] \
+      && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    || fail "watcher did not take the lock before the takeover"
+  # Drop a no-verb signal and give the watcher time to enter its 8s grace linger.
+  printf 'working: crew turn ended\n' > "$state/task.status"
+  sleep 3
+  # A live successor takes over the singleton while the incumbent still lingers.
+  # $$ (the runner) is a live pid that is not the watcher - the same takeover shape
+  # test_watcher_self_evicts_on_lock_takeover uses.
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  wait_for_exit "$pid" 200 || fail "superseded watcher did not stand down after takeover"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "superseded watcher enqueued a wake it no longer owned: $(cat "$state/.wake-queue")"
+  ! grep -q 'absorbed' "$state/.watch-triage.log" 2>/dev/null \
+    || fail "superseded watcher absorbed a signal it no longer owned"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$$" ] \
+    || fail "superseded watcher clobbered the successor's lock"
+  pass "a watcher superseded mid-iteration stands down without enqueuing or absorbing"
+}
+
+# The renewal marker's in-progress predicate: a marker naming a LIVE arm means a
+# renewal hand-off is genuinely under way; a marker naming a dead arm (the hook
+# removes it only after reaping the arm), an absent marker, and a malformed marker
+# are all NOT in progress, so a fresh Stop-owned successor arm is never blocked.
+test_fm_autoarm_renewal_in_progress_predicate() {
+  local dir state live
+  dir=$(make_case renewal-in-progress-predicate)
+  state="$dir/state"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_autoarm_renewal_in_progress "$2"' _ "$LIB" "$state" \
+    && fail "absent renewal marker reported in progress"
+  sleep 300 &
+  live=$!
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_autoarm_renewal_request "$2" "$3" stop-renewal' _ "$LIB" "$state" "$live" \
+    || fail "could not write the live renewal marker"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_autoarm_renewal_in_progress "$2"' _ "$LIB" "$state" \
+    || fail "live-arm renewal marker not reported in progress"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_autoarm_renewal_in_progress "$2"' _ "$LIB" "$state" \
+    && fail "renewal marker naming a dead arm reported in progress"
+  printf 'garbage\n' > "$state/.claude-autoarm-renewal"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_autoarm_renewal_in_progress "$2"' _ "$LIB" "$state" \
+    && fail "malformed renewal marker reported in progress"
+  pass "fm_autoarm_renewal_in_progress tracks only a live-arm renewal marker"
+}
+
+# A fresh arm must not fork a competing watcher while a Claude Stop auto-arm
+# continuity renewal is genuinely in flight (marker names a LIVE arm), or it would
+# land in the renewal's brief unheld window and race the successor into a duplicate
+# cycle. It waits (bounded), then starts normally once the renewal clears.
+test_arm_refuses_fresh_watcher_during_live_renewal() {
+  local dir state fakebin armout renewer armpid lock_pid i
+  dir=$(make_case arm-renewal-refuse)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  sleep 300 &
+  renewer=$!
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_autoarm_renewal_request "$2" "$3" stop-renewal' _ "$LIB" "$state" "$renewer" \
+    || fail "could not publish the live renewal marker"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_ARM_CONFIRM_TIMEOUT=20 \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  # While the renewal names a live arm, the fresh arm must NOT start a watcher.
+  i=0
+  while [ "$i" -lt 15 ]; do
+    ! grep -qF 'watcher: started' "$armout" 2>/dev/null \
+      || fail "arm started a competing watcher during a live renewal"
+    [ ! -e "$state/.watch.lock/pid" ] \
+      || fail "arm created a watcher lock during a live renewal"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$armpid" || fail "arm exited during the renewal wait"
+  # The renamed arm dies: the marker no longer names a live arm, so the fresh arm
+  # falls through to a normal start well before its bounded wait deadline.
+  kill "$renewer" 2>/dev/null || true
+  wait "$renewer" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 120 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" \
+    || fail "arm did not start a watcher after the renewal cleared: $(cat "$armout")"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  kill "$armpid" "$lock_pid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "arm refuses a competing watcher during a live renewal and starts once it clears"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
@@ -1218,3 +1339,6 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_evicted_watcher_does_no_work_after_takeover
+test_fm_autoarm_renewal_in_progress_predicate
+test_arm_refuses_fresh_watcher_during_live_renewal

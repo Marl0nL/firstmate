@@ -461,6 +461,31 @@ if [ "$mode" = arm ] && healthy_watcher; then
   exit $?
 fi
 
+# Refuse to fork a competing watcher while a Claude Stop auto-arm continuity
+# renewal is genuinely in flight (fm_autoarm_renewal_in_progress: the marker names
+# a LIVE arm). That renewal is a controlled hand-off - it tears down the current
+# watcher and re-arms through the NEXT Stop firing - so a fresh arm forking here
+# would land in its brief unheld window and race the successor into a duplicate
+# cycle that ping-pongs the home lock. Wait a bounded window (the same confirmation
+# budget a fresh child gets) for the renewal to either surface a healthy watcher to
+# attach to or clear; only then fall through to a normal start, so a stuck renewal
+# never leaves the home blind. --restart owns its own fresh cycle and skips this.
+# A non-Claude primary has no such marker, so this is a cheap no-op there.
+if [ "$mode" = arm ] && fm_autoarm_renewal_in_progress "$STATE"; then
+  renewal_deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
+  while fm_autoarm_renewal_in_progress "$STATE"; do
+    if healthy_watcher; then
+      cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
+      cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
+      report_attached
+      attach_and_wait "$HEALTHY_PID"
+      exit $?
+    fi
+    [ "$(date +%s)" -ge "$renewal_deadline" ] && break
+    sleep 0.2
+  done
+fi
+
 # Start a watcher as a tracked child and confirm it before settling in. The child
 # stays our child for its whole life: we wait on it, so killing this arm (the
 # harness-tracked task) tears the watcher down too, and the watcher's eventual

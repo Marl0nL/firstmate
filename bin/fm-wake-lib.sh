@@ -1198,6 +1198,26 @@ fm_autoarm_renewal_claim() {  # <state-dir> <arm-pid>
   return 0
 }
 
+# True while a Claude Stop auto-arm continuity renewal is genuinely in flight for
+# this home: the marker names an arm pid that is still alive. The requesting hook
+# removes the marker only after it reaps that arm (bin/fm-claude-stop-autoarm.sh),
+# so a leftover marker naming a dead pid proves nothing and is NOT in progress -
+# the fresh Stop-owned successor arm that arms after the renamed arm dies is never
+# blocked by it. A watch-arm consults this before forking a competing watcher, so a
+# fresh arm cannot land in the renewal's brief unheld window and race the successor
+# into a duplicate cycle (bin/fm-watch-arm.sh).
+fm_autoarm_renewal_in_progress() {  # <state-dir>
+  local state=$1 line pid
+  [ -f "$state/.claude-autoarm-renewal" ] || return 1
+  IFS= read -r line 2>/dev/null < "$state/.claude-autoarm-renewal" || return 1
+  case "$line" in
+    "pid="*" successor="*) pid=${line#pid=}; pid=${pid%% *} ;;
+    *) return 1 ;;
+  esac
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  fm_pid_alive "$pid"
+}
+
 fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }

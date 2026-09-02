@@ -77,6 +77,8 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
+The watcher's own singleton admission contract - atomic acquisition, the settle re-check that brackets the mid-renewal window, and the ownership predicate that gates every supervision side effect so a superseded watcher does no work - is stated once in the `bin/fm-watch.sh` header.
+The arm complements it by refusing to fork a competing watcher while a Claude Stop auto-arm renewal is genuinely in flight (`fm_autoarm_renewal_in_progress`), so a fresh arm cannot land in that renewal's brief unheld window and race the successor into a duplicate cycle.
 
 ## Regression coverage
 
@@ -85,6 +87,7 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
 `tests/fm-watch-recovery-loop.test.sh` covers the once-per-generation announcement bound with the real Pi extension against a refused handling handshake, and a handling successor that must surface a real crew event instead of going blind.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+It also covers the atomic-admission ownership gate - a watcher superseded mid-iteration stands down without enqueuing or absorbing the signal it no longer owns - the `fm_autoarm_renewal_in_progress` predicate over live, dead, absent, and malformed markers, and the arm refusing to fork a competing watcher during a live renewal while starting normally once it clears.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, the unchanged AFK boundary, the need boundary that arms an idle home holding a pending wake queue or an in-progress deferred network stage while staying inert for a crashed stage record, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, exit-2 translation, and the declared-timeout renewal: the deadline handoff, its inertness gates, and the real arm's `continuity-renewal` ledger classification at the timeout boundary.
 The suite also drives the whole chain with real processes: a real arm and a real watcher deliver a queued wake from an idle home with no external nudge.
