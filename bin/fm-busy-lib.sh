@@ -51,11 +51,19 @@
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle) EXCEPT for
 #      claude, whose native herdr state is firstmate's own report-agent echo
-#      rather than an independent signal (see the herdr-native arm), then the
-#      muse session-log and cursor transcript pull sources, then the Grok-only
-#      temporary regex fallback classifies a grok task from its rendered tail,
-#      then unknown missing
+#      rather than an independent signal - fm_busy_native_busy owns this trust
+#      rule - then the muse session-log and cursor transcript pull sources, then
+#      the Grok-only temporary regex fallback classifies a grok task from its
+#      rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
+#
+# fm_busy_native_busy is the ONE owner of how far a backend's native
+# agent-registry verdict is trusted: busy only (never a registry idle, which
+# for a pane-typed agent is a shadow of reality - see its header and
+# docs/herdr-backend.md), and never a claude echo. The endpoint
+# delivery-confirmation observers that firstmate does NOT semantically wire
+# (secondmate pending-reply, wake-resident stand-down) apply that same rule
+# through it rather than trusting herdr's registry idle directly.
 # The Grok arm is the ONLY rendered-text classification that survives the
 # redesign, because Grok's structured lifecycle was not credited-live-verified
 # in the approved audit; it is scoped to harness=grok and can never classify
@@ -833,6 +841,36 @@ fm_busy_grok_tail_busy() {
     | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
+# fm_busy_native_busy: the ONE owner of how far a backend's NATIVE agent-registry
+# busy verdict (fm_backend_busy_state) is trusted. Returns 0 iff that verdict is
+# a trustworthy busy signal for <harness>.
+#
+# Only herdr exposes a native primitive at all - every other backend's
+# fm_backend_busy_state returns unknown, so this effectively scopes to herdr and
+# leaves the tmux verdict path unaffected. herdr's registry is authoritative for
+# BUSY (a herdr-detected turn really is running), but NOT for idle: firstmate
+# launches every crew by TYPING the launch command into a pane rather than
+# `herdr agent start`, so a pane-typed agent has no accurate turn state in the
+# registry and reads idle whatever it is doing. That is the busy/idle twin of
+# the alive/dead rule that a herdr metadata verdict is never authoritative for
+# liveness; only a pane read sees reality (docs/herdr-backend.md owns the
+# statement). claude goes further: herdr never registers or detects a claude
+# pane (agent_not_found / agent_status unknown), so any status it does carry is
+# only firstmate's OWN `pane report-agent` echo - a feedback loop that could
+# latch a wedged crew as busy - and is not an independent signal even for busy.
+#
+# So this trusts ONLY a native busy from a non-claude harness. Every other
+# verdict (idle included) returns non-zero, and the caller MUST reach a
+# reality-touching source (a pane capture, fm_busy_lines_match) before
+# concluding not-busy. Missing fm_backend_busy_state (backend layer not sourced)
+# also returns non-zero, deferring to the caller's own fallback.
+fm_busy_native_busy() {  # <backend> <target> <harness>
+  local backend=$1 target=$2 harness=${3-}
+  [ "${harness%%-*}" != claude ] || return 1
+  command -v fm_backend_busy_state >/dev/null 2>&1 || return 1
+  [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)" = busy ]
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
@@ -841,7 +879,7 @@ fm_busy_grok_tail_busy() {
 # if available, else reports unknown capture-failed.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
-  local out rc r_state r_source native log
+  local out rc r_state r_source log
   case "$harness" in
     kimi*)
       if ! fm_busy_kimi_verified; then
@@ -893,29 +931,15 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       ;;
   esac
   # No record at all. A native herdr busy verdict is semantic enough to trust
-  # for BUSY (streaming means a turn is running); native idle is narrower
-  # than turn state (a long foreground tool call reads idle) and stays
-  # unknown here.
-  #
-  # EXCEPT for claude: herdr never registers a claude crew itself (it reads
-  # agent_not_found / agent_status unknown on 0.8.2, docs/verification/
-  # runtime-backends.md "Agent recognition recalibration"), so herdr's native
-  # agent_status for a claude pane is NEVER an independent signal. Since U3
-  # firstmate publishes that pane's own working/idle/blocked state via
-  # `pane report-agent` (bin/backends/herdr.sh fm_backend_herdr_publish_agent_state),
-  # herdr's native busy for claude would just read back firstmate's OWN report
-  # - a feedback loop that could latch a wedged crew as busy and suppress stale
-  # detection. Skipping it for claude changes nothing pre-U3 (native was always
-  # unknown -> not busy) and keeps the classifier reading only firstmate's own
-  # turn record for claude. Harnesses herdr detects itself (pi, codex) keep the
-  # trusted native busy signal.
-  if [ "$backend" = herdr ] && [ "${harness%%-*}" != claude ] \
-    && command -v fm_backend_busy_state >/dev/null 2>&1; then
-    native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
-    if [ "$native" = busy ]; then
-      printf 'busy herdr-native'
-      return 0
-    fi
+  # for BUSY (streaming means a turn is running); a native idle is only a shadow
+  # of turn state for a pane-typed agent, and a claude pane's status is
+  # firstmate's own report-agent echo. fm_busy_native_busy owns that whole trust
+  # rule. The [ backend = herdr ] guard here keeps the tmux verdict path from
+  # even probing the backend (its native is always unknown), so tmux is
+  # unaffected.
+  if [ "$backend" = herdr ] && fm_busy_native_busy "$backend" "$target" "$harness"; then
+    printf 'busy herdr-native'
+    return 0
   fi
   case "$harness" in
     muse*)

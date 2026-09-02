@@ -89,6 +89,9 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-tmux-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
+# fm_busy_native_busy owns how far a backend's native busy verdict is trusted.
+# shellcheck source=bin/fm-busy-lib.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-busy-lib.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
@@ -728,11 +731,17 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
 # another read busy, and a weak rendered idle degrades to `fallback-idle`,
 # which the caller accepts as idle only after its grace window.
 fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] [harness]
-  local backend=$1 target=$2 expected_label=${3-} harness=${4-} native tail40
-  native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || printf 'unknown')
-  case "$native" in
-    busy|idle) printf '%s' "$native"; return 0 ;;
-  esac
+  local backend=$1 target=$2 expected_label=${3-} harness=${4-} tail40
+  # Only a TRUSTED native busy short-circuits (fm_busy_native_busy owns that
+  # rule: busy only, never a herdr registry idle for a pane-typed agent, never a
+  # claude echo). Every other native verdict - idle included - falls through to
+  # the reality-touching pane read below, so herdr's shadow-idle registry can
+  # never suppress a working secondmate's busy footer. This mirrors tmux, whose
+  # native verdict is always unknown and always reached this capture.
+  if fm_busy_native_busy "$backend" "$target" "$harness"; then
+    printf 'busy'
+    return 0
+  fi
   tail40=$(fm_backend_capture "$backend" "$target" 40 "$expected_label" 2>/dev/null) \
     || { printf 'unknown'; return 0; }
   if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \

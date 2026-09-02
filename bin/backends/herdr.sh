@@ -3235,6 +3235,13 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # gets real semantics" per the design report. See
 # fm_backend_herdr_classify_agent_status for the status->busy/idle/unknown
 # mapping.
+# This native verdict is NOT authoritative for a pane-typed agent (every
+# firstmate-launched crew): the registry carries no accurate turn state for one,
+# so its idle is only a shadow of reality and a claude pane's status is
+# firstmate's own report-agent echo. fm_busy_native_busy (bin/fm-busy-lib.sh)
+# owns how far callers may trust this - native busy only, never idle, never a
+# claude echo - and every consumer reaches a pane read before concluding
+# not-busy (docs/herdr-backend.md "Restart and liveness behavior").
 fm_backend_herdr_busy_state() {  # <target>
   fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
   fm_backend_herdr_classify_agent_status \

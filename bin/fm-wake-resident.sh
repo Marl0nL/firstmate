@@ -67,6 +67,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# fm_busy_native_busy owns how far a backend's native busy verdict is trusted,
+# so fm_wr_confirmed_busy never accepts herdr's registry idle as authoritative.
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 # fm_custom_check_registered (used by status) reads the trust record through
 # fm-pr-lib.sh helpers, so that lib must be present alongside fm-check-lib.sh.
 # shellcheck source=bin/fm-pr-lib.sh
@@ -404,7 +408,7 @@ cmd_standdown() {
     || die "harness '${harness:-unknown}' has no submittable exit command (grok's exit is an interactive double Ctrl+Q); stand $name down by hand instead"
 
   if [ "$force" -eq 0 ]; then
-    if fm_wr_confirmed_busy "$backend" "$target"; then
+    if fm_wr_confirmed_busy "$backend" "$target" "$harness"; then
       die "$name is busy right now; leaving it up"
     fi
     quiet=0

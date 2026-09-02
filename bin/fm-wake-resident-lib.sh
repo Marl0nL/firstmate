@@ -513,19 +513,26 @@ fm_wr_nudge_suppressed() {  # <config> <state> <name>
   return 1
 }
 
-# 0 only when the endpoint is CONFIRMED busy. An unknown busy-state falls back to
-# tmux's shared pane-regex reader and otherwise answers "not confirmed busy" -
-# the other stand-down gates carry the safety, and this one only ever adds a
-# refusal.
-fm_wr_confirmed_busy() {  # <backend> <target>
-  local backend=$1 target=$2 st
-  st=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null) || st=unknown
-  case "$st" in
-    busy) return 0 ;;
-    idle) return 1 ;;
+# 0 only when the endpoint is CONFIRMED busy. A trusted native busy is a
+# confirmed positive; otherwise the pane's own rendered busy footer is read
+# before concluding not-busy. This one only ever ADDS a refusal (the other
+# stand-down gates carry the safety), so it must never accept herdr's registry
+# idle as authoritative: for a pane-typed agent that idle is a shadow of reality
+# (fm_busy_native_busy / docs/herdr-backend.md), and trusting it would stand a
+# working secondmate down. tmux keeps its long-standing shared pane-regex reader
+# unchanged; herdr reads the pane through the backend-aware capture.
+fm_wr_confirmed_busy() {  # <backend> <target> [harness]
+  local backend=$1 target=$2 harness=${3-} cap
+  fm_busy_native_busy "$backend" "$target" "$harness" && return 0
+  case "$backend" in
+    tmux) fm_pane_is_busy "$target" ;;
+    herdr)
+      cap=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
+      printf '%s' "$cap" | grep -v '^[[:space:]]*$' | tail -12 \
+        | fm_busy_lines_match "$harness"
+      ;;
+    *) return 1 ;;
   esac
-  [ "$backend" = tmux ] || return 1
-  fm_pane_is_busy "$target"
 }
 
 # --- harness exit command ---------------------------------------------------
