@@ -1040,6 +1040,29 @@ test_renewal_active_in_marked_secondmate_home() {
   pass "auto-arm: declared-timeout renewal works identically in a marked secondmate home"
 }
 
+# The timeout Claude Code declares for the auto-arm Stop entry, read out of the
+# tracked registration it consumes. jq is optional on this project's hosts and a
+# missing optional tool must never take the rest of this suite down with it, so
+# collect each leaf hook object of the registration and report the numeric
+# timeout of the one whose command is this hook.
+declared_stop_hook_timeout() {
+  awk '
+    /^[[:space:]]*{/ { entry = ""; next }
+    /^[[:space:]]*}/ {
+      if (entry ~ /fm-claude-stop-autoarm\.sh/ \
+        && match(entry, /"timeout"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+        found = substr(entry, RSTART, RLENGTH)
+        sub(/^[^0-9]*/, "", found)
+        print found
+        exit
+      }
+      entry = ""
+      next
+    }
+    { entry = entry $0 }
+  ' "$ROOT/.claude/settings.json"
+}
+
 # The renewal only closes the blind spot while the effective budget stays BELOW
 # the timeout declared for this hook in the tracked .claude/settings.json, and
 # that bound now lives in two files. Pin the relationship through behavior: read
@@ -1049,9 +1072,7 @@ test_renewal_active_in_marked_secondmate_home() {
 # without lowering the hook's ceiling fails here.
 test_renewal_budget_reaching_the_declared_timeout_is_refused() {
   local declared dir out status
-  command -v jq >/dev/null 2>&1 || fail "test host must provide jq"
-  declared=$(jq -r '.hooks.Stop[].hooks[] | select(.command | contains("fm-claude-stop-autoarm.sh")) | .timeout' \
-    "$ROOT/.claude/settings.json")
+  declared=$(declared_stop_hook_timeout)
   case "$declared" in
     ''|*[!0-9]*) fail "the tracked Stop registration must declare a numeric auto-arm timeout, got: '$declared'" ;;
   esac
@@ -1072,6 +1093,23 @@ test_renewal_budget_reaching_the_declared_timeout_is_refused() {
   assert_contains "$out" "refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=not-a-number" \
     "an unusable budget must be refused out loud"
   pass "auto-arm: a renewal budget reaching the declared Stop-hook timeout is refused for the safe default"
+}
+
+# Only the single-flight owner that is about to park an arm may complain about
+# the budget. Every other firing - a child worktree, a non-owner session, an away
+# or idle home - governs no arm, so per this hook's own contract its exit 0 stays
+# byte-for-byte silent whatever a fleet-wide environment exports.
+test_refused_budget_is_silent_on_firings_that_never_arm() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/refused-budget-inert")
+  write_arm_fixture "$dir" actionable
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=99999
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  expect_code 0 "$status" "an idle home must stay inert whatever renewal budget the environment carries"
+  [ -z "$out" ] || fail "a firing that never arms printed a renewal-budget notice: $out"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed an idle home"
+  pass "auto-arm: a refused renewal budget stays silent on firings that never arm"
 }
 
 # The renewal TERM closes only this hook's own arm. When that arm was attached
@@ -1185,6 +1223,7 @@ test_no_renewal_before_deadline
 test_renewal_ledger_records_continuity_not_interrupt
 test_renewal_active_in_marked_secondmate_home
 test_renewal_budget_reaching_the_declared_timeout_is_refused
+test_refused_budget_is_silent_on_firings_that_never_arm
 test_renewal_with_surviving_live_watcher_is_silent
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake

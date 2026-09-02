@@ -36,8 +36,9 @@
 #     go blind at exactly that bound (verified 2026-09-02, Claude 2.1.258;
 #     docs/turnend-guard.md). Shortly before the deadline
 #     (FM_CLAUDE_AUTOARM_RENEWAL_BUDGET seconds, default 27000, safely below
-#     the declared 28800, and refused with a stderr notice when it would reach
-#     that ceiling) a watchdog closes the arm under the pid-matched renewal
+#     the declared 28800, and refused by the arming owner with a stderr notice
+#     when it would reach that ceiling) a watchdog closes the arm under the
+#     pid-matched renewal
 #     marker so the lifecycle ledger records continuity-renewal, then the owner
 #     exits 2 with a benign renewal banner: one bounded turn ends, the next
 #     Stop fires, and a fresh firing arms with a fresh budget. The renewal
@@ -93,8 +94,8 @@ esac
 # SIGTERMs this whole process group, watcher included, with no re-arm until the
 # session's next real turn end, so a budget that reaches that ceiling silently
 # reinstates the exact blind spot the renewal exists to close. Refuse any such
-# value - and any value that is not a positive number of seconds - on stderr and
-# fall back to the safe default rather than arming past the deadline.
+# value - and any value that is not a positive number of seconds - and fall back
+# to the safe default rather than arming past the deadline.
 # RENEWAL_BUDGET_CEILING mirrors the declared timeout, which lives in
 # .claude/settings.json; tests/fm-claude-stop-autoarm.test.sh pins the tracked
 # registration against this ceiling so the two files cannot drift apart.
@@ -115,10 +116,6 @@ case "$RENEWAL_BUDGET_REQUESTED" in
     fi
     ;;
 esac
-if [ "$RENEWAL_BUDGET_OK" -eq 0 ]; then
-  printf 'firstmate: refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=%s - a Claude Stop auto-arm budget must be a positive number of seconds below the %ss timeout declared for this hook, at which Claude Code kills the arm and its watcher unsupervised; using %ss instead.\n' \
-    "$RENEWAL_BUDGET_REQUESTED" "$RENEWAL_BUDGET_CEILING" "$RENEWAL_BUDGET" >&2
-fi
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -238,6 +235,14 @@ close_with_healthy_watcher() {
   [ -e "$FAILURE_ALARM" ] && exit 0
   exit 2
 }
+
+# Every firing that cannot park an arm - a child worktree, a non-owner session,
+# an away or idle home - stays byte-for-byte silent per this file's contract, so
+# the budget refusal belongs to the one owner whose arm the value would govern.
+if [ "$RENEWAL_BUDGET_OK" -eq 0 ]; then
+  printf 'firstmate: refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=%s - a Claude Stop auto-arm budget must be a positive number of seconds below the %ss timeout declared for this hook, at which Claude Code kills the arm and its watcher unsupervised; using %ss instead.\n' \
+    "$RENEWAL_BUDGET_REQUESTED" "$RENEWAL_BUDGET_CEILING" "$RENEWAL_BUDGET" >&2
+fi
 
 write_epoch arming
 
