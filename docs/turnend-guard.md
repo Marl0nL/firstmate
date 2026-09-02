@@ -30,6 +30,7 @@ For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
 Registered `state/procevent/*.source` records also require supervision even though they have no task metadata.
 A durable wake queue (`state/.wake-queue`) holding a record the drain can still acknowledge, and an in-progress deferred network stage (`bin/fm-startup-network.sh`, whose `state/.startup-network.status` reads `running` with a live, recent worker, or reads a terminal state within a short grace of its `finished` stamp while its wake is still being appended), also require supervision, so a wake enqueued out of band into an otherwise idle home - the deferred stage finishing its sweeps after the reconcile turn ended - keeps a cycle armed until the wake is delivered and acknowledged instead of sitting undelivered until the parent notices.
 Both conditions are bounded on purpose: a truncated queue row that no drain can ever consume, and a crashed or over-deadline stage record, are each inert, so neither can hold an idle home's turn open forever.
+The in-progress network stage is arming need only: `bin/fm-guard.sh` deliberately leaves it out of the mid-turn watcher-down alarm, because session start launches that stage itself and then runs the pull warning before the turn's Stop has armed any watcher, so alarming there would report an ordinary startup shape as a supervision lapse.
 The default cross-harness mode exits silently with no supervision need.
 Every mode treats `state/x-watch.check.sh` as supervision need, so Relay polling remains guarded without an in-flight task.
 Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`, the same PID-strict identity-matched lock and fresh-beacon check used by `bin/fm-watch-arm.sh`: a stale beacon blocks even when a watcher pid is live, and a fresh leftover beacon blocks when the lock is missing, dead, or identity-mismatched.
@@ -138,7 +139,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 ## Compatibility limits
 
 - Child crewmate and scout worktrees are outside scope.
-- A valid secondmate home is in scope; an idle secondmate endpoint with no Relay poll remains healthy because it has no supervision need.
+- A valid secondmate home is in scope; a genuinely quiet idle secondmate endpoint - no Relay poll, no ackable queued wake, and no in-progress deferred network stage - remains healthy because it has no supervision need.
+- An idle secondmate that holds an ackable `state/.wake-queue` row or an in-progress deferred network stage does have supervision need, so the guard blocks its turn end until a watcher is armed to deliver that wake.
 - The blocking and bounded-follow-up mechanisms are limited to the primary integrations listed above.
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
 - Cursor's `stop` step does not fire in headless `cursor-agent -p`, the same class of limit as OpenCode headless; firstmate primaries run interactive.

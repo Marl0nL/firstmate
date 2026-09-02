@@ -5,8 +5,9 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
-# Then, if a task is in flight (a state/<id>.meta exists) or X-mode relay
-# polling is active (state/x-watch.check.sh exists) and supervision is not
+# Then, if a task is in flight (a state/<id>.meta exists), a process-event source
+# is registered, X-mode relay polling is active (state/x-watch.check.sh exists),
+# or an ackable wake is queued, and supervision is not
 # healthy, prints a loud, clearly delimited banner so the agent cannot skim past
 # it in the tool output of whatever it was doing - the one channel every harness
 # has. Supervision health is MODEL-AWARE (fm_watcher_supervision_verdict in
@@ -154,8 +155,23 @@ fi
 fm_supervision_status "$STATE" "$GRACE"
 in_flight=$FM_SUP_IN_FLIGHT
 sources=$FM_SUP_SOURCES
-needed=$FM_SUP_NEEDED
 beacon_desc=$FM_SUP_BEACON_DESC
+# This guard alarms on a supervision LAPSE, so it deliberately uses a narrower
+# need than the shared FM_SUP_NEEDED that gates ARMING. A running deferred
+# network stage is a turn-end arming concern: the Stop auto-arm and the turn-end
+# guard both count it and arm the watcher at this turn's Stop. But session start
+# launches that stage itself and then runs this pull guard through the drain -
+# before that first Stop, when no watcher has been armed yet - so treating it as
+# a lapse here would fire the watcher-down banner on essentially every relaunch
+# of an idle home that is in its ordinary startup shape. Every other supervision
+# need still alarms exactly as before.
+needed=false
+if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
+  || [ "$FM_SUP_SOURCES" -gt 0 ] \
+  || [ "$FM_SUP_XWATCH" = true ] \
+  || [ "$FM_SUP_QUEUE_PENDING" = true ]; then
+  needed=true
+fi
 fm_watcher_supervision_verdict "$STATE" "$WATCH" "$GRACE" "$FM_HOME" "$FM_ROOT"
 watcher_healthy=$FM_WATCHER_VERDICT_OK
 watcher_down_reason=$FM_WATCHER_VERDICT_REASON
@@ -211,8 +227,6 @@ if [ "$watcher_healthy" = false ]; then
         printf '●  X-mode relay polling needs supervision, but %s.\n' "$watcher_cause"
       elif [ "$FM_SUP_QUEUE_PENDING" = true ]; then
         printf '●  a queued notification is waiting to be delivered, but %s.\n' "$watcher_cause"
-      elif [ "$FM_SUP_NETWORK_STAGE" = true ]; then
-        printf '●  the deferred startup network checks are still running, but %s.\n' "$watcher_cause"
       else
         printf '●  supervision is needed, but %s.\n' "$watcher_cause"
       fi

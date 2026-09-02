@@ -349,14 +349,6 @@ make_home_alias() {  # <target> <link-path>
   printf '%s\n' "$link"
 }
 
-nonexistent_pid() {
-  local pid=999999
-  while kill -0 "$pid" 2>/dev/null; do
-    pid=$((pid + 1))
-  done
-  printf '%s\n' "$pid"
-}
-
 watcher_identity() {
   local dir=$1 pid=$2
   FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"

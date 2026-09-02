@@ -168,6 +168,40 @@ test_fresh_beacon_without_live_watcher_stays_alarm() {
   pass "fm-guard stale banner: a fresh beacon without a live watcher remains unhealthy"
 }
 
+# bin/fm-session-start.sh launches the deferred network stage itself and only
+# then runs this pull guard (through bin/fm-wake-drain.sh), which is BEFORE the
+# turn's Stop arms any watcher. That home is in its ordinary startup shape, not a
+# supervision lapse, so the mid-turn alarm must stay silent for it - while the
+# turn-end guard and the Stop auto-arm still count the same stage and arm.
+test_running_network_stage_alone_does_not_alarm() {
+  local dir home out control
+  dir=$(make_guard_case network-stage-only)
+  home=$(case_home "$dir")
+  rm -f "$home/state/task.meta"
+  # This shell ($$) is a genuinely-alive worker pid for the whole run - a real
+  # live stage worker, with nothing to spawn or kill.
+  cat > "$home/state/.startup-network.status" <<EOF
+state=running
+pid=$$
+started=$(date +%s)
+locked=1
+phases=probe,sweeps
+generation=$(date +%s).$$.0
+lock_pid=0
+EOF
+  out=$(run_guard_case "$dir")
+  [ -z "$out" ] \
+    || fail "a home whose only need is a running deferred network stage must not alarm, got: $out"
+  assert_absent "$home/state/.guard-watcher-stale-banner" \
+    "a network-stage-only home must not open a stale-banner episode that would mute a later genuine lapse"
+  # Paired control on the same watcher state: a real in-flight task still alarms.
+  control=$(make_guard_case network-stage-control)
+  out=$(run_guard_case "$control")
+  assert_contains "$out" "WATCHER DOWN" \
+    "an in-flight task with no live watcher must still raise the full banner"
+  pass "fm-guard stale banner: a running deferred network stage alone is not a mid-turn lapse"
+}
+
 test_x_mode_without_live_watcher_stays_alarm() {
   local dir home out
   dir=$(make_guard_case x-mode-no-live)
@@ -699,6 +733,7 @@ test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
 test_fresh_beacon_without_live_watcher_stays_alarm
 test_x_mode_without_live_watcher_stays_alarm
+test_running_network_stage_alone_does_not_alarm
 test_healthy_recovery_rearms_next_stale_episode
 test_concurrent_same_episode_prints_one_full_banner
 test_home_isolation

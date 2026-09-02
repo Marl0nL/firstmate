@@ -68,17 +68,6 @@ make_real_chain_dir() {
   printf '%s\n' "$dir"
 }
 
-# A pid that no live process holds, found by scanning rather than by spawning and
-# killing: killing a backgrounded job can run the inherited fm_test_cleanup EXIT
-# trap in the forked child and wipe the fixture root out from under the test.
-nonexistent_pid() {
-  local pid=999999
-  while kill -0 "$pid" 2>/dev/null; do
-    pid=$((pid + 1))
-  done
-  printf '%s\n' "$pid"
-}
-
 # A genuine linked git worktree: the shape every crewmate/scout task worktree
 # has (git-dir != git-common-dir), which must keep the hook inert.
 make_crewmate_worktree_dir() {
