@@ -98,14 +98,23 @@
 # beacon to SETTLE ownership, then RE-CHECKS the lock before entering the poll
 # loop. That acquire/settle-recheck pair brackets the brief mid-renewal window a
 # fresh arm can land in, so two watchers can never both proceed past admission. The
-# same ownership predicate (watcher_owns_lock) then gates the signal batch's side
-# effects: it runs at the top of each poll iteration, again after the bounded
-# mid-iteration wait (the signal grace), and once more after the triage probe -
-# the last point before any enqueue, seen-marker write, or absorb - so a watcher
-# that loses the lock to a takeover across either bounded span stands down without
-# enqueuing a duplicate wake, refreshing the beacon, or absorbing a signal it no
-# longer owns. A direct duplicate invocation likewise no-ops: it fails admission
-# and exits "already running" before any work.
+# same ownership predicate (watcher_owns_lock) then gates every multi-second
+# supervision side-effect path, each re-checking ownership before it surfaces
+# (wake / fm_wake_append) or suppresses (.seen-* / .stale-* marker writes):
+#   - the signal batch: at the top of each poll iteration, after the grace linger,
+#     and after the triage probe - the last point before any enqueue, seen-marker
+#     write, or absorb;
+#   - the check block: before each check's network poll and again before
+#     committing its result, so a takeover mid-poll discards that result while
+#     leaving .last-check unadvanced for the holder to re-poll immediately;
+#   - the pane-stale per-window loop: before touching a window at all and again
+#     once its capture returns, before any .hash-/.count-/.stale-/.stale-since-
+#     write or herdr publish.
+# So a watcher that loses the lock to a takeover across any of those bounded spans
+# stands down without enqueuing a duplicate wake, refreshing the beacon, or
+# absorbing a signal or stale pane it no longer owns - it leaves each unmarked for
+# the rightful holder to classify. A direct duplicate invocation likewise no-ops:
+# it fails admission and exits "already running" before any work.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1375,6 +1384,13 @@ while :; do
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      # A check poll is a multi-second network span. Stand down before spending it
+      # if the singleton moved, and again below before committing its result, so a
+      # takeover landing mid-poll discards the result instead of enqueuing a wake
+      # the holder will also produce. Exiting before `touch .last-check` leaves the
+      # cadence unadvanced, so the holder re-polls immediately rather than waiting
+      # out a full CHECK_INTERVAL.
+      watcher_owns_lock || exit 0
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
@@ -1409,6 +1425,7 @@ while :; do
         fi
       fi
       if [ -n "$out" ]; then
+        watcher_owns_lock || exit 0
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
@@ -1424,6 +1441,7 @@ while :; do
       fi
     done
     if [ -n "$rejected_checks" ]; then
+      watcher_owns_lock || exit 0
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
       touch "$STATE/.last-check"
@@ -1512,6 +1530,12 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified).
   while IFS= read -r w; do
+    # A superseded watcher must not capture, classify, wedge-escalate, absorb, or
+    # suppress any window's stale state: the absorb branches below write .stale-*
+    # markers that would hide this window's stale from the rightful holder, which
+    # is the repeatedly-absorbed parked pane seen in the field. Stand down before
+    # touching a window at all, and again after its capture returns.
+    watcher_owns_lock || exit 0
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
@@ -1542,6 +1566,11 @@ EOF
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    # The capture is the longest span in the iteration, so re-check before the
+    # first write it feeds: every .hash-/.count-/.stale-/.stale-since- marker and
+    # the herdr publish below. Standing down leaves them unwritten, so the holder
+    # re-derives the same hash on its own poll.
+    watcher_owns_lock || exit 0
     # Busy match: a backend's native semantic state when available (herdr), else
     # the last 6 non-blank lines only (the TUI footer area, where every verified
     # harness renders its busy indicator) so busy-looking strings in displayed
