@@ -185,8 +185,14 @@ test_retry_on_residue_gives_actionable_message() {
   assert_contains "$out" "already exists" "the refusal must report the duplicate window"
   assert_contains "$out" "fm-stuck-e5" "the refusal must name the leftover window"
   assert_contains "$out" "tmux kill-window -t" "the refusal must carry the exact remedy command"
+  assert_not_contains "$out" "left it behind" \
+    "the refusal must not assert a cause it never established - the window may hold a LIVE agent"
+  assert_contains "$out" "Verify nothing live is running in it first" \
+    "the refusal must tell the operator to check the window before running the destructive command"
+  assert_contains "$out" "only if it is not a live agent" \
+    "the removal must be offered conditionally, never as an unconditional instruction"
   [ ! -s "$KILL_LOG" ] || fail "a dup refusal must never auto-kill the pre-existing window (it may belong to a live task)"
-  pass "fm-spawn: a retry on a leftover window is refused with an actionable, named remedy"
+  pass "fm-spawn: a retry on a leftover window is refused with a named, verify-first conditional remedy"
 }
 
 # A completed teardown must not be reported as leftover just because another
@@ -209,7 +215,28 @@ test_teardown_confirmation_ignores_prefix_sibling_window() {
   pass "fm-spawn: teardown confirmation matches the exact window, not a prefix sibling"
 }
 
+# Every pre-publish refusal is followed by the endpoint teardown, so none of them
+# may point the operator at the endpoint they are about to destroy. The isolation
+# refusal is the one that still did.
+test_isolation_refusal_does_not_point_at_the_torn_down_endpoint() {
+  local rec out status
+  rec=$(make_case isolation-refusal)
+  read_case "$rec"
+  # A real directory that is not a git worktree: the lease guard has nothing to
+  # say about it, so the isolation check is what refuses.
+  out=$(run_spawn "$rec" stray-h8 "$CONTESTED"); status=$?
+  [ "$status" -ne 0 ] || fail "a spawn whose pane never entered a worktree must exit non-zero"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "did not yield an isolated worktree" "the refusal must report the isolation failure"
+  assert_grep "fm-stray-h8" "$KILL_LOG" "the refused spawn must still tear down the window it created"
+  assert_not_contains "$out" "Inspect target" \
+    "the refusal must not send the operator to an endpoint the teardown is about to destroy"
+  assert_contains "$out" "the spawn's endpoint was cleaned up" \
+    "the refusal must say the endpoint is gone and how to diagnose instead"
+  pass "fm-spawn: a pre-publish isolation refusal reports the endpoint teardown instead of pointing at the destroyed endpoint"
+}
+
 test_guard_refusal_tears_down_created_window
 test_unconfirmed_teardown_prints_remedy
 test_retry_on_residue_gives_actionable_message
 test_teardown_confirmation_ignores_prefix_sibling_window
+test_isolation_refusal_does_not_point_at_the_torn_down_endpoint

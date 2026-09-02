@@ -570,7 +570,13 @@ test_create_task_refuses_duplicate_label() {
   assert_contains "$out" "already exists" "create_task did not report the duplicate label"
   assert_contains "$out" "tab w1:t2" "the refusal must name the leftover tab id"
   assert_contains "$out" "herdr tab close w1:t2 --session fmtest" "the refusal must carry the exact remedy command for the leftover"
-  pass "fm_backend_herdr_create_task: refuses a duplicate tab label with an actionable, named remedy"
+  assert_not_contains "$out" "left it behind" \
+    "the refusal must not assert a cause it never established - this tab may hold a LIVE agent"
+  assert_contains "$out" "Verify no live agent is working there first" \
+    "the refusal must tell the operator to check for a live agent before running the destructive command"
+  assert_contains "$out" "only if it is not live" \
+    "the removal must be offered conditionally, never as an unconditional instruction"
+  pass "fm_backend_herdr_create_task: refuses a duplicate tab label with a named, verify-first conditional remedy"
 }
 
 # --- restored-layout husk close-and-replace (herdr session.json restore) -----
@@ -777,10 +783,15 @@ test_create_task_refuses_when_preexisting_husk_tab_remains() {
   pass "fm_backend_herdr_create_task: refuses success when a preexisting husk tab remains after replacement"
 }
 
-test_create_task_leaves_residue_tab_when_it_is_the_workspaces_last() {
-  local dir log resp fb out status
-  dir="$TMP_ROOT/husk-residue-last-tab"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-lasttab","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+# run_residue_teardown_case <name> <label> <safe-close re-list json>: drive
+# create_task down the husk-replacement path to the point where the verification
+# tab list is unparseable, so it wants its own replacement tab (w1:t3) torn back
+# down, and feed <safe-close re-list json> as the tab list the safe close reads.
+# Sets RESIDUE_OUT / RESIDUE_LOG / RESIDUE_STATUS for the caller.
+run_residue_teardown_case() {  # <name> <label> <relist-json>
+  local name=$1 label=$2 relist=$3 dir log resp fb
+  dir="$TMP_ROOT/$name"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"%s","workspace_id":"w1"}]}}\n' "$label" > "$resp/1.out"
   printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
@@ -790,20 +801,40 @@ test_create_task_leaves_residue_tab_when_it_is_the_workspaces_last() {
   # 8: the verification tab list comes back unparseable, so create_task fails
   # and wants its own replacement tab torn back down.
   printf '{"result":{"tabs":"not-an-array"}}\n' > "$resp/8.out"
-  # 9: the safe-close re-list - the replacement is now the workspace's ONLY tab,
-  # so closing it would delete the whole workspace (real-herdr behavior).
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-lasttab","workspace_id":"w1"}]}}\n' > "$resp/9.out"
+  # 9: whatever the safe close itself reads back from the server.
+  printf '%s\n' "$relist" > "$resp/9.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-lasttab /tmp/proj' "$ROOT" 2>&1 )
-  status=$?
-  [ "$status" -ne 0 ] || fail "create_task must fail when the husk-removal verification cannot be parsed"
-  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the husk it replaced"
-  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t3' \
+  RESIDUE_OUT=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 '"$label"' /tmp/proj' "$ROOT" 2>&1 )
+  RESIDUE_STATUS=$?
+  RESIDUE_LOG=$(cat "$log")
+}
+
+test_create_task_leaves_residue_tab_when_it_is_the_workspaces_last() {
+  run_residue_teardown_case husk-residue-last-tab fm-lasttab \
+    '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-lasttab","workspace_id":"w1"}]}}'
+  [ "$RESIDUE_STATUS" -ne 0 ] || fail "create_task must fail when the husk-removal verification cannot be parsed"
+  assert_contains "$RESIDUE_LOG" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the husk it replaced"
+  assert_not_contains "$RESIDUE_LOG" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t3' \
     "the residue teardown must NOT close its replacement tab when that is the workspace's last tab - closing it deletes the whole workspace"
-  assert_contains "$out" "fm-lasttab" "the operator hint must name the tab left in place"
-  assert_contains "$out" "close it manually" "the operator hint must say the leftover tab has to be removed by hand"
+  assert_contains "$RESIDUE_OUT" "fm-lasttab" "the operator hint must name the tab left in place"
+  assert_contains "$RESIDUE_OUT" "close it manually" "the operator hint must say the leftover tab has to be removed by hand"
   pass "fm_backend_herdr_create_task: a failure-path residue teardown never empties the workspace, it hands the operator the leftover instead"
+}
+
+# The guard counts tabs from the SAME server that just returned a malformed
+# payload, so it must treat a non-array tabs value as "unknown", never as a
+# count: jq's length on a non-array is a nonzero number, which would wave the
+# destructive close straight through on the one branch the guard exists for.
+test_create_task_leaves_residue_tab_when_tab_list_is_not_an_array() {
+  run_residue_teardown_case husk-residue-nonarray fm-badlist \
+    '{"result":{"tabs":"herdr: internal error"}}'
+  [ "$RESIDUE_STATUS" -ne 0 ] || fail "create_task must fail when the husk-removal verification cannot be parsed"
+  assert_not_contains "$RESIDUE_LOG" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t3' \
+    "a non-array tab list is not a tab COUNT - the residue teardown must not close its replacement tab on an unreadable workspace"
+  assert_contains "$RESIDUE_OUT" "fm-badlist" "the operator hint must name the tab left in place"
+  assert_contains "$RESIDUE_OUT" "close it manually" "the operator hint must say the leftover tab has to be removed by hand"
+  pass "fm_backend_herdr_create_task: a non-array tab list never counts as enough tabs to close the residue tab safely"
 }
 
 test_create_task_refuses_when_agent_state_ambiguous() {
@@ -4847,6 +4878,7 @@ test_create_task_closes_and_replaces_no_agent_husk
 test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_leaves_residue_tab_when_it_is_the_workspaces_last
+test_create_task_leaves_residue_tab_when_tab_list_is_not_an_array
 test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_pane_agent_state_live_unregistered_claude_reads_live

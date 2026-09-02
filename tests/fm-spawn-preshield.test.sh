@@ -65,7 +65,8 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window|set-window-option|send-keys) exit 0 ;;
+  send-keys) exit "${FM_FAKE_SEND_KEYS_EXIT:-0}" ;;
+  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
 esac
 exit 0
 SH
@@ -100,23 +101,25 @@ $1
 EOF
 }
 
-# run_spawn <record> <id> <extra fm-spawn args...>: an ordinary ship spawn that
-# acquires WT_GET, with the observable shield injected.
+# run_spawn <record> <id> [extra env assignments as NAME=VAL ...]: an ordinary
+# ship spawn that acquires WT_GET, with the observable shield injected.
 run_spawn() {
   local rec=$1 id=$2
   shift 2
   read_case "$rec"
   mkdir -p "$HOME_DIR/data/$id"
   printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
-  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  env \
+    FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_GET" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' GROK_HOME="$HOME_DIR/grok-home" \
     FM_SPAWN_SHIELD_CMD="$SHIELD_SCRIPT" SHIELD_LOG="$SHIELD_LOG" \
     SHIELD_PIDDIR="$PIDDIR" GET_SNAPSHOT="$GET_SNAPSHOT" SHIELD_SLEEP=30 \
+    "$@" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off "$@" 2>&1
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
 
 # record_meta <home> <id> <key=val>...: a recorded task slot in this home.
@@ -152,7 +155,8 @@ test_shields_live_during_get_then_reaped_on_success() {
 }
 
 # A guard-refused spawn (lease conflict) still reaps every shield on the failure
-# exit path - the trap must leave no orphan sleeps behind.
+# exit path. This refusal lands AFTER the get resolved, so the inline reap is
+# what clears the shields here; the trap-only path is pinned separately below.
 test_shields_reaped_on_failure_exit() {
   local rec out status owned
   rec=$(make_case failure)
@@ -226,7 +230,29 @@ test_shields_own_id_recorded_worktree_on_reused_id() {
   pass "fm-spawn: shields the spawning id's own recorded worktree when a dead id is respawned fresh"
 }
 
+# The trap path proper: a spawn that dies BETWEEN starting the shields and the
+# inline post-get reap never runs that inline reap, so spawn_abort_cleanup is the
+# only thing left that can stop the shields - the intent's "no orphan sleeps on
+# any exit path". Here the send that launches `treehouse get` fails, so fm-spawn
+# aborts under set -e with the shields still up.
+test_shields_reaped_by_trap_when_the_get_never_starts() {
+  local rec out status owned
+  rec=$(make_case trap-reap)
+  read_case "$rec"
+  owned="$CASE_DIR/owned-wt"
+  mkdir -p "$owned"
+  record_meta "$HOME_DIR" owner-m1 "window=firstmate:fm-owner-m1" "worktree=$owned" \
+    "project=$PROJ_DIR" "harness=claude" "kind=ship"
+  out=$(run_spawn "$rec" fresh-n2 FM_FAKE_SEND_KEYS_EXIT=1); status=$?
+  [ "$status" -ne 0 ] || fail "a spawn whose 'treehouse get' send fails must exit non-zero"$'\n'"--- output ---"$'\n'"$out"
+  assert_grep $'up\t'"$owned" "$SHIELD_LOG" \
+    "the shields must have been started before the failing send (otherwise this case proves nothing about the trap)"
+  piddir_empty || fail "the abort-cleanup trap must reap every shield when the spawn dies before the inline reap (no orphan sleeps)"
+  pass "fm-spawn: the abort-cleanup trap reaps the shields when a spawn dies before the get resolves"
+}
+
 test_shields_live_during_get_then_reaped_on_success
 test_shields_reaped_on_failure_exit
+test_shields_reaped_by_trap_when_the_get_never_starts
 test_enumeration_covers_worktree_and_home_skips_vanished
 test_shields_own_id_recorded_worktree_on_reused_id

@@ -155,8 +155,10 @@
 #   process cwd'd inside it, so the pool - which judges a slot free from live
 #   process cwd - cannot hand out an owned slot; the shields are reaped the instant
 #   the get resolves and on every exit path (spawn_preshield_start/stop).
-#   FM_SPAWN_SHIELD_TTL bounds each shield's self-exit (default 90s); tests inject
-#   FM_SPAWN_SHIELD_CMD to observe them.
+#   FM_SPAWN_SHIELD_TTL bounds each shield's self-exit (default 300s - the
+#   backstop must outlast the FULL acquisition wait below, which allows 60 polls
+#   whose per-poll cost on the active-probe backends is seconds, not the 1s
+#   sleep alone); tests inject FM_SPAWN_SHIELD_CMD to observe them.
 #   A spawn that is refused or fails AFTER creating its tmux window / herdr flat
 #   tab / zellij / cmux surface tears that endpoint back down in the same failure
 #   path, so a retry does not die on the backend's "already exists"; where the
@@ -785,11 +787,16 @@ spawn_endpoint_still_present() {
 # surviving-but-dead id free to have its own slot reset out from under it.
 # FM_SPAWN_SHIELD_CMD overrides the per-shield command for tests; production holds
 # the slot with a bounded sleep that self-exits (FM_SPAWN_SHIELD_TTL) so even an
-# unreaped orphan cannot linger.
+# unreaped orphan cannot linger. That TTL is a backstop against orphans, never a
+# limit on the shield's job, so it must outlast the whole acquisition wait: the
+# poll loop below allows 60 iterations, and on zellij/cmux each iteration is an
+# active marker probe costing several CLI round trips on top of its 1s sleep, so
+# a get can resolve well past the old 90s default - a shield that self-exits mid-get
+# hands the slot straight back to the pool and reopens the reset this exists to close.
 spawn_preshield_start() {
   local meta path real seen ttl shield_cmd
   SPAWN_SHIELD_PIDS=
-  ttl=${FM_SPAWN_SHIELD_TTL:-90}
+  ttl=${FM_SPAWN_SHIELD_TTL:-300}
   shield_cmd=${FM_SPAWN_SHIELD_CMD:-sleep $ttl}
   seen=$'\n'
   for meta in "$STATE"/*.meta; do
@@ -1957,7 +1964,7 @@ PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_AB
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real hint
   assert_worktree_unleased "$source"
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
@@ -1970,7 +1977,12 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     wt_top_real=
   fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
-    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+    if [ "${SPAWN_ENDPOINT_ABORT_CLEANUP:-0}" = 1 ]; then
+      hint="the spawn's endpoint was cleaned up - re-run the spawn, or run 'treehouse get' manually to diagnose the worktree pool"
+    else
+      hint="Inspect target $inspect_target"
+    fi
+    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. $hint" >&2
     exit 1
   fi
 }
