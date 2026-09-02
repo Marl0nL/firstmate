@@ -773,9 +773,9 @@ spawn_endpoint_remedy_line() {
 # the remedy line use. It must also be `list-windows`, NOT the shared probe's
 # `display-message -p -t <target>`: real tmux marks display-message's -t as
 # CMD_FIND_CANFAIL, so an UNRESOLVABLE target does not fail - it silently falls
-# back to the current pane and exits 0 (verified on tmux 3.5a: after
-# `kill-window`, `display-message -p -t '=ses:=win' '#{pane_id}'` prints another
-# pane's id with rc=0 while `list-windows -t '=ses:=win'` fails rc=1). That makes
+# back to the current pane and exits 0 (docs/verification/runtime-backends.md
+# "Endpoint absence probe" owns the dated tmux 3.5a transcript for this whole
+# paragraph, including the prefix-match and server-down cases). That makes
 # display-message incapable of ever confirming absence, so every successfully
 # cleaned-up spawn would print a remedy for a window that is already gone.
 # list-windows fails for BOTH an absent window and an unreachable server, so the

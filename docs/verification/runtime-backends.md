@@ -173,6 +173,43 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+### Endpoint absence probe
+
+A failed spawn tears the tmux window it created back down and prints a leftover-residue remedy only when that teardown cannot be confirmed gone (`bin/fm-spawn.sh`, `spawn_endpoint_still_present`), so the probe behind the confirmation has to be one that genuinely fails for an absent window.
+tmux target resolution was verified on 2026-09-02 with tmux 3.5a on Fedora/Bazzite Linux x86_64, on a private socket, killing the `fm-a` window while a live `fm-a-sibling` remained.
+
+```sh
+tmux -L "$sock" new-session -d -s probe -n fm-a
+tmux -L "$sock" new-window -d -t probe: -n fm-a-sibling
+tmux -L "$sock" kill-window -t '=probe:=fm-a'
+tmux -L "$sock" display-message -p -t '=probe:=fm-a' '#{window_name}'; echo "rc $?"
+tmux -L "$sock" list-windows -t '=probe:=fm-a'; echo "rc $?"
+tmux -L "$sock" list-windows -t 'probe:fm-a'; echo "rc $?"
+tmux -L "$sock" kill-server
+tmux -L "$sock" has-session -t '=probe'; echo "rc $?"
+tmux -L "$sock" list-windows -t '=probe:=fm-a'; echo "rc $?"
+```
+
+Observed output:
+
+```text
+fm-a-sibling
+rc 0
+can't find window: fm-a
+rc 1
+1: fm-a-sibling* (1 panes) [80x24] [layout b25e,80x24,0,0,1] @1 (active)
+rc 0
+no server running on /tmp/tmux-1000/<socket>
+rc 1
+no server running on /tmp/tmux-1000/<socket>
+rc 1
+```
+
+`display-message` marks its `-t` as `CMD_FIND_CANFAIL`, so an unresolvable target does not fail: it silently falls back to the current pane and exits 0, which makes it incapable of ever proving that a window is gone.
+`list-windows -t` does fail for the same absent window, and the `=session:=window` exact form is required because a bare name still resolves by prefix onto a live sibling.
+`list-windows` fails identically once the server is unreachable, so `has-session` separates an absent window (confirmed gone, no remedy) from an unreachable server (not confirmed, remedy printed).
+`tests/fm-spawn-endpoint-residue.test.sh` pins that logic portably against a fake tmux modelling these same semantics; re-run the commands above after a tmux upgrade before trusting the fake.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
