@@ -770,7 +770,17 @@ spawn_endpoint_remedy_line() {
 # PREFIX - so a live sibling window whose name merely starts with fm-<id> would
 # make a completed teardown read as still present and print a remedy for a window
 # that is already gone. Use the same '=ses:=win' exact form the adapter kill and
-# the remedy line use. herdr already owns a structured proof-of-absence read
+# the remedy line use. It must also be `list-windows`, NOT the shared probe's
+# `display-message -p -t <target>`: real tmux marks display-message's -t as
+# CMD_FIND_CANFAIL, so an UNRESOLVABLE target does not fail - it silently falls
+# back to the current pane and exits 0 (verified on tmux 3.5a: after
+# `kill-window`, `display-message -p -t '=ses:=win' '#{pane_id}'` prints another
+# pane's id with rc=0 while `list-windows -t '=ses:=win'` fails rc=1). That makes
+# display-message incapable of ever confirming absence, so every successfully
+# cleaned-up spawn would print a remedy for a window that is already gone.
+# list-windows fails for BOTH an absent window and an unreachable server, so the
+# has-session check above splits them: unreachable => not confirmed (fail-safe).
+# herdr already owns a structured proof-of-absence read
 # (fm_backend_herdr_endpoint_confirmed_gone trusts only pane_not_found); the
 # other backends record id-shaped targets the shared probe resolves exactly.
 spawn_endpoint_still_present() {
@@ -778,7 +788,7 @@ spawn_endpoint_still_present() {
   case "$BACKEND" in
     tmux)
       tmux has-session -t "=$ses" >/dev/null 2>&1 || return 0
-      tmux display-message -p -t "=$ses:=${T#*:}" '#{pane_id}' >/dev/null 2>&1
+      tmux list-windows -t "=$ses:=${T#*:}" >/dev/null 2>&1
       ;;
     herdr)
       ! fm_backend_herdr_endpoint_confirmed_gone "$T" 2>/dev/null

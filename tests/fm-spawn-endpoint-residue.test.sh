@@ -21,20 +21,28 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-endpoint-residue)
 
 # A stateful fake tmux. new-window records that the window is "present"; a
-# non-sticky kill-window records it "killed" (so list-windows and the
-# '#{pane_id}' existence probe then report it gone); a sticky kill leaves it
-# present (a teardown that could not be confirmed). Every kill-window is logged
-# so a test can prove teardown was attempted. FM_FAKE_STATE toggles a
-# preexisting window by pre-touching present. FM_FAKE_SIBLING_WINDOW adds a
-# second, always-live window. FM_FAKE_SESSION_LOST makes has-session start
-# failing once the task window exists - a tmux server that becomes unreadable
-# mid-spawn, where the window's own probe also fails without the window being
-# gone.
+# non-sticky kill-window records it "killed" (so the existence reads then report
+# it gone); a sticky kill leaves it present (a teardown that could not be
+# confirmed). Every kill-window is logged so a test can prove teardown was
+# attempted. FM_FAKE_STATE toggles a preexisting window by pre-touching present.
+# FM_FAKE_SIBLING_WINDOW adds a second, always-live window. FM_FAKE_SESSION_LOST
+# makes the server die at the moment the abort teardown runs, so every later read
+# fails with "no server running" - a tmux server that becomes unreadable mid-abort,
+# where the window's own read fails without the window being gone.
 #
-# The '#{pane_id}' probe reproduces real tmux target resolution: a bare window
-# name matches by exact name and then by PREFIX, while a '=name' target matches
-# only exactly. That is what makes a sibling window whose name merely starts with
-# fm-<id> observable to a test.
+# This fake models REAL tmux target resolution, because the two commands differ in
+# exactly the way that decides whether a teardown can be confirmed (verified on
+# tmux 3.5a):
+#   - `display-message -p -t <target>` flags its -t as CMD_FIND_CANFAIL: an
+#     unresolvable target does NOT fail, it silently falls back to the current
+#     pane and exits 0. Modelling it as a strict lookup (the fake's old behavior)
+#     is stricter than the real tool and hides a probe that can never prove absence.
+#   - `list-windows -t <target>` genuinely fails (rc=1, "can't find window") when
+#     the named window does not exist, and fails distinctly ("no server running")
+#     when the server/session is unreadable.
+# Window-name matching follows tmux for both: a bare name matches by exact name and
+# then by PREFIX, while a '=name' target matches only exactly. That is what makes a
+# sibling window whose name merely starts with fm-<id> observable to a test.
 make_residue_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -43,33 +51,62 @@ make_residue_fakebin() {
 set -u
 st=${FM_FAKE_STATE:-}
 wname=${FM_FAKE_WINDOW_NAME:-}
+
+# The server died mid-abort: every read fails the way a missing server does.
+if [ -n "$st" ] && [ -f "$st/server-down" ]; then
+  echo 'no server running on /tmp/fake' >&2
+  exit 1
+fi
+
+# The windows this session currently holds.
+fake_windows() {
+  if [ -n "$st" ] && [ -f "$st/present" ] && [ ! -f "$st/killed" ]; then printf '%s\n' "$wname"; fi
+  [ -z "${FM_FAKE_SIBLING_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_SIBLING_WINDOW"
+}
+
+# The value of -t, empty when the invocation has none.
+fake_target() {
+  local prev= a
+  for a in "$@"; do
+    if [ "$prev" = "-t" ]; then printf '%s\n' "$a"; return 0; fi
+    prev=$a
+  done
+}
+
+# tmux window-name resolution: '=name' matches only that exact name, a bare name
+# matches exactly and then by PREFIX.
+fake_window_resolves() {  # <window-part-of-target>
+  local want=$1 w
+  while read -r w; do
+    [ -n "$w" ] || continue
+    case "$want" in
+      =*) [ "$w" = "${want#=}" ] && return 0 ;;
+      *) case "$w" in "$want"*) return 0 ;; esac ;;
+    esac
+  done < <(fake_windows)
+  return 1
+}
+
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
   *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_CMD:-}"; exit 0 ;;
   *"#{pane_tty}"*) exit 0 ;;
   *"#{pane_id}"*)
-    tgt=; prev=
-    for a in "$@"; do
-      if [ "$prev" = "-t" ]; then tgt=$a; break; fi
-      prev=$a
-    done
-    want=${tgt#*:}
-    live=
-    if [ -n "$st" ] && [ -f "$st/present" ] && [ ! -f "$st/killed" ]; then live=$wname; fi
-    for w in $live ${FM_FAKE_SIBLING_WINDOW:-}; do
-      case "$want" in
-        =*) [ "$w" = "${want#=}" ] && { printf '%%1\n'; exit 0; } ;;
-        *) case "$w" in "$want"*) printf '%%1\n'; exit 0 ;; esac ;;
-      esac
-    done
-    exit 1 ;;
+    # CMD_FIND_CANFAIL: an unresolvable -t falls back to the current pane, rc=0.
+    tgt=$(fake_target "$@")
+    if [ -n "$tgt" ] && fake_window_resolves "${tgt#*:}"; then printf '%%1\n'; else printf '%%0\n'; fi
+    exit 0 ;;
 esac
 case "${1:-}" in
   list-windows)
-    if [ -n "$st" ] && [ -f "$st/present" ] && [ ! -f "$st/killed" ]; then
-      printf '%s\n' "$wname"
+    tgt=$(fake_target "$@")
+    want=
+    case "$tgt" in *:*) want=${tgt#*:} ;; esac
+    if [ -n "$want" ] && ! fake_window_resolves "$want"; then
+      printf "can't find window: %s\n" "${want#=}" >&2
+      exit 1
     fi
-    [ -z "${FM_FAKE_SIBLING_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_SIBLING_WINDOW"
+    fake_windows
     exit 0 ;;
   new-window)
     [ -z "$st" ] || touch "$st/present"
@@ -77,11 +114,10 @@ case "${1:-}" in
   kill-window)
     [ -z "${FM_FAKE_KILL_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_KILL_LOG"
     if [ -n "$st" ] && [ "${FM_FAKE_KILL_STICKY:-0}" != 1 ]; then touch "$st/killed"; fi
+    if [ -n "$st" ] && [ "${FM_FAKE_SESSION_LOST:-0}" = 1 ]; then touch "$st/server-down"; fi
     exit 0 ;;
   display-message) printf 'firstmate\n'; exit 0 ;;
-  has-session)
-    if [ -n "$st" ] && [ -f "$st/present" ] && [ "${FM_FAKE_SESSION_LOST:-0}" = 1 ]; then exit 1; fi
-    exit 0 ;;
+  has-session) exit 0 ;;
   new-session|set-window-option|send-keys) exit 0 ;;
 esac
 exit 0
@@ -147,6 +183,12 @@ record_meta() {
 
 # A guard-refused spawn tears the created window back down in the same failure
 # path, and (teardown confirmed) prints no leftover remedy.
+#
+# This is also the regression for the confirmation probe itself: against a
+# `display-message -p -t` probe - whose -t is CMD_FIND_CANFAIL, so a removed
+# window still reads rc=0 - a confirmed teardown is reported as leftover and this
+# case fails with the contradictory warning plus a remedy for a window that is
+# already gone.
 test_guard_refusal_tears_down_created_window() {
   local rec out status
   rec=$(make_case teardown-clean)
@@ -158,6 +200,8 @@ test_guard_refusal_tears_down_created_window() {
   assert_contains "$out" "owner-a1" "the refusal must name the owning task"
   assert_grep "fm-intruder-b2" "$KILL_LOG" "the failed spawn must tear down the window it created"
   assert_not_contains "$out" "could not tear down" "a confirmed teardown must print no leftover remedy"
+  assert_not_contains "$out" "tmux kill-window -t" \
+    "a confirmed teardown must not hand the operator a removal command for a window that is already gone"
   assert_absent "$HOME_DIR/state/intruder-b2.meta" "an aborted spawn must not record meta"
   pass "fm-spawn: a guard-refused spawn tears down the tmux window it created, leaving no residue"
 }
@@ -182,6 +226,9 @@ test_unconfirmed_teardown_prints_remedy() {
 # the endpoint is gone - the backends keep their windows/tabs across exactly
 # those outages, so believing it silences the remedy in the one case it exists
 # for. The teardown must report unconfirmed and hand over the removal command.
+# Here the tmux server dies at the moment the abort teardown runs, so both the
+# window read and the session reachability check fail the same way; only the
+# reachability check can tell that apart from a genuinely removed window.
 test_unreadable_backend_is_not_confirmed_teardown() {
   local rec out status
   rec=$(make_case teardown-unreadable)
