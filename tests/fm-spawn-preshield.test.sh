@@ -251,8 +251,36 @@ test_shields_reaped_by_trap_when_the_get_never_starts() {
   pass "fm-spawn: the abort-cleanup trap reaps the shields when a spawn dies before the get resolves"
 }
 
+# A REMOTE secondmate's meta lives in this home's state dir but its worktree=
+# and home= name paths on ANOTHER host. Treehouse lays slots out deterministically
+# per pool and slot, so that same path can exist locally as a different,
+# genuinely free slot - shielding it protects nothing and can starve the pool of
+# the last free slot this spawn needs.
+test_remote_secondmate_rows_are_not_shielded() {
+  local rec out status remote_path local_path
+  rec=$(make_case remote-rows)
+  read_case "$rec"
+  remote_path="$CASE_DIR/remote-home"; local_path="$CASE_DIR/local-wt"
+  mkdir -p "$remote_path" "$local_path"
+  # The remote secondmate's recorded path exists HERE too - the collision this
+  # skip exists for - while an ordinary local task records the other path.
+  record_meta "$HOME_DIR" mate-r1 "window=remote:mate-r1" "worktree=$remote_path" \
+    "project=$remote_path" "harness=claude" "kind=secondmate" "home=$remote_path" \
+    "remote_host=elsewhere.local" "remote_root=/srv/fm"
+  record_meta "$HOME_DIR" owner-s2 "window=firstmate:fm-owner-s2" "worktree=$local_path" \
+    "project=$PROJ_DIR" "harness=claude" "kind=ship"
+  out=$(run_spawn "$rec" fresh-t3); status=$?
+  expect_code 0 "$status" "the spawn must succeed"$'\n'"--- output ---"$'\n'"$out"
+  assert_grep $'up\t'"$local_path" "$SHIELD_LOG" "a local task's recorded worktree must still be shielded"
+  if grep -qF "$remote_path" "$SHIELD_LOG" 2>/dev/null; then
+    fail "a REMOTE secondmate's recorded path must not be shielded locally - the local directory of that name is a different, unowned slot"
+  fi
+  pass "fm-spawn: shields skip a remote secondmate's recorded paths and still cover local rows"
+}
+
 test_shields_live_during_get_then_reaped_on_success
 test_shields_reaped_on_failure_exit
+test_remote_secondmate_rows_are_not_shielded
 test_shields_reaped_by_trap_when_the_get_never_starts
 test_enumeration_covers_worktree_and_home_skips_vanished
 test_shields_own_id_recorded_worktree_on_reused_id

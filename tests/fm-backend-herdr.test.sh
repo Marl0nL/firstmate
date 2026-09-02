@@ -819,6 +819,8 @@ test_create_task_leaves_residue_tab_when_it_is_the_workspaces_last() {
     "the residue teardown must NOT close its replacement tab when that is the workspace's last tab - closing it deletes the whole workspace"
   assert_contains "$RESIDUE_OUT" "fm-lasttab" "the operator hint must name the tab left in place"
   assert_contains "$RESIDUE_OUT" "close it manually" "the operator hint must say the leftover tab has to be removed by hand"
+  assert_contains "$RESIDUE_OUT" "herdr tab close w1:t3 --session fmtest" \
+    "the one path that deliberately leaves residue must hand over the exact removal command, like every other remedy"
   pass "fm_backend_herdr_create_task: a failure-path residue teardown never empties the workspace, it hands the operator the leftover instead"
 }
 

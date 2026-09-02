@@ -26,7 +26,10 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-endpoint-residue)
 # present (a teardown that could not be confirmed). Every kill-window is logged
 # so a test can prove teardown was attempted. FM_FAKE_STATE toggles a
 # preexisting window by pre-touching present. FM_FAKE_SIBLING_WINDOW adds a
-# second, always-live window.
+# second, always-live window. FM_FAKE_SESSION_LOST makes has-session start
+# failing once the task window exists - a tmux server that becomes unreadable
+# mid-spawn, where the window's own probe also fails without the window being
+# gone.
 #
 # The '#{pane_id}' probe reproduces real tmux target resolution: a bare window
 # name matches by exact name and then by PREFIX, while a '=name' target matches
@@ -76,7 +79,10 @@ case "${1:-}" in
     if [ -n "$st" ] && [ "${FM_FAKE_KILL_STICKY:-0}" != 1 ]; then touch "$st/killed"; fi
     exit 0 ;;
   display-message) printf 'firstmate\n'; exit 0 ;;
-  has-session|new-session|set-window-option|send-keys) exit 0 ;;
+  has-session)
+    if [ -n "$st" ] && [ -f "$st/present" ] && [ "${FM_FAKE_SESSION_LOST:-0}" = 1 ]; then exit 1; fi
+    exit 0 ;;
+  new-session|set-window-option|send-keys) exit 0 ;;
 esac
 exit 0
 SH
@@ -172,6 +178,26 @@ test_unconfirmed_teardown_prints_remedy() {
   pass "fm-spawn: an unconfirmed endpoint teardown prints the exact one-line remedy"
 }
 
+# An endpoint read that fails because the BACKEND became unreadable is not proof
+# the endpoint is gone - the backends keep their windows/tabs across exactly
+# those outages, so believing it silences the remedy in the one case it exists
+# for. The teardown must report unconfirmed and hand over the removal command.
+test_unreadable_backend_is_not_confirmed_teardown() {
+  local rec out status
+  rec=$(make_case teardown-unreadable)
+  read_case "$rec"
+  record_meta "$HOME_DIR" owner-j9 "window=firstmate:fm-owner-j9" "worktree=$CONTESTED" \
+    "project=$PROJ_DIR" "harness=claude" "kind=ship"
+  out=$(run_spawn "$rec" intruder-k1 "$CONTESTED" FM_FAKE_SESSION_LOST=1); status=$?
+  [ "$status" -ne 0 ] || fail "a spawn onto an owned slot must exit non-zero"$'\n'"--- output ---"$'\n'"$out"
+  assert_grep "fm-intruder-k1" "$KILL_LOG" "teardown must still be attempted"
+  assert_contains "$out" "could not tear down" \
+    "an endpoint read that failed because the backend is unreadable must not count as a confirmed teardown"
+  assert_contains "$out" "tmux kill-window -t '=firstmate:=fm-intruder-k1'" \
+    "the unconfirmed teardown must still carry the exact one-line remedy"
+  pass "fm-spawn: an unreadable backend is reported as an unconfirmed teardown, not as a removed endpoint"
+}
+
 # A retry landing on a preexisting leftover window gets an actionable refusal
 # that names the leftover and the exact command to remove it.
 test_retry_on_residue_gives_actionable_message() {
@@ -240,3 +266,4 @@ test_unconfirmed_teardown_prints_remedy
 test_retry_on_residue_gives_actionable_message
 test_teardown_confirmation_ignores_prefix_sibling_window
 test_isolation_refusal_does_not_point_at_the_torn_down_endpoint
+test_unreadable_backend_is_not_confirmed_teardown

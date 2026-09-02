@@ -2210,7 +2210,7 @@ fm_backend_herdr_close_residue_tab() {  # <session> <workspace_id> <tab_id> <lab
   tab_count=$(printf '%s' "$tabs" | jq -r 'if (.result.tabs | type) == "array" then (.result.tabs | length) else 0 end' 2>/dev/null)
   case "$tab_count" in
     ''|*[!0-9]*|0|1)
-      echo "warning: leaving herdr tab '$label' ($tab_id) in workspace $wsid (session $session) in place: it may be that workspace's last tab, and closing that would delete the whole workspace - close it manually before retrying" >&2
+      echo "warning: leaving herdr tab '$label' ($tab_id) in workspace $wsid (session $session) in place: it may be that workspace's last tab, and closing that would delete the whole workspace - close it manually before retrying: herdr tab close $tab_id --session $session" >&2
       return 0
       ;;
   esac

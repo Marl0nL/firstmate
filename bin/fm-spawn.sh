@@ -753,19 +753,45 @@ spawn_endpoint_remedy_line() {
   esac
 }
 
-# spawn_endpoint_still_present: did the endpoint named by $BACKEND/$T survive the
-# teardown? tmux needs its own probe rather than the shared
+# spawn_endpoint_still_present: is the endpoint named by $BACKEND/$T still
+# holding its slot after the teardown? Answers with PROOF OF ABSENCE, not with a
+# plain existence probe: an endpoint read that fails because the BACKEND is
+# unreadable (herdr server stopped or restarting mid-abort, zellij session gone,
+# cmux app relaunching) looks identical to an endpoint that is gone, and the
+# backends persist their endpoints across exactly those events - so believing
+# "unreadable" means "removed" silences the remedy line in precisely the case it
+# exists for. Every branch therefore proves the CONTAINER is readable first and
+# reports still-present whenever absence cannot be established, including for an
+# unrecognized backend.
+#
+# tmux additionally needs its own probe rather than the shared
 # fm_backend_target_exists: on this path $T is always "<session>:fm-<id>", a bare
 # window NAME, and tmux resolves a bare name by exact match, then fnmatch, then
 # PREFIX - so a live sibling window whose name merely starts with fm-<id> would
 # make a completed teardown read as still present and print a remedy for a window
 # that is already gone. Use the same '=ses:=win' exact form the adapter kill and
-# the remedy line use. Every other backend records an id-shaped target, which the
-# shared probe already resolves exactly.
+# the remedy line use. herdr already owns a structured proof-of-absence read
+# (fm_backend_herdr_endpoint_confirmed_gone trusts only pane_not_found); the
+# other backends record id-shaped targets the shared probe resolves exactly.
 spawn_endpoint_still_present() {
+  local ses=${T%%:*}
   case "$BACKEND" in
-    tmux) tmux display-message -p -t "=${T%%:*}:=${T#*:}" '#{pane_id}' >/dev/null 2>&1 ;;
-    *) fm_backend_target_exists "$BACKEND" "$T" 2>/dev/null ;;
+    tmux)
+      tmux has-session -t "=$ses" >/dev/null 2>&1 || return 0
+      tmux display-message -p -t "=$ses:=${T#*:}" '#{pane_id}' >/dev/null 2>&1
+      ;;
+    herdr)
+      ! fm_backend_herdr_endpoint_confirmed_gone "$T" 2>/dev/null
+      ;;
+    zellij)
+      fm_backend_zellij_session_exists "$ses" 2>/dev/null || return 0
+      fm_backend_target_exists zellij "$T" 2>/dev/null
+      ;;
+    cmux)
+      fm_backend_cmux_cli list-windows --json --id-format uuids >/dev/null 2>&1 || return 0
+      fm_backend_target_exists cmux "$T" 2>/dev/null
+      ;;
+    *) return 0 ;;
   esac
 }
 
@@ -779,12 +805,16 @@ spawn_endpoint_still_present() {
 # worktree keeps that slot visibly taken for the duration of the get; the shields
 # are reaped immediately after acquisition (spawn_preshield_stop) and on every
 # exit path via the abort-cleanup trap. Both a task's own worktree= and a
-# secondmate's home= are recorded slots; a path that no longer exists is the only
-# one skipped. EVERY recorded worktree is shielded, including the spawning task's
-# own: this runs only on the fresh treehouse-acquire path (a --relaunch adopts its
-# recorded worktree in place and never gets here), so exempting $ID's own record
-# would protect no legitimate reacquisition and would leave a respawn onto a
-# surviving-but-dead id free to have its own slot reset out from under it.
+# secondmate's home= are recorded slots; a path that no longer exists, and a
+# REMOTE secondmate's rows (remote_host= set - its worktree=/home= name paths on
+# another host, and treehouse's deterministic per-pool/slot layout can make that
+# same path exist locally as an unrelated, genuinely free slot this home must not
+# hold), are the only ones skipped. EVERY other recorded worktree is shielded,
+# including the spawning task's own: this runs only on the fresh acquire path (a
+# --relaunch adopts its recorded worktree in place and never gets here), so
+# exempting $ID's own record would protect no legitimate reacquisition and would
+# leave a respawn onto a surviving-but-dead id free to have its own slot reset
+# out from under it.
 # FM_SPAWN_SHIELD_CMD overrides the per-shield command for tests; production holds
 # the slot with a bounded sleep that self-exits (FM_SPAWN_SHIELD_TTL) so even an
 # unreaped orphan cannot linger. That TTL is a backstop against orphans, never a
@@ -801,6 +831,7 @@ spawn_preshield_start() {
   seen=$'\n'
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
+    [ -z "$(fm_meta_get "$meta" remote_host)" ] || continue
     for path in "$(fm_meta_get "$meta" worktree)" "$(fm_meta_get "$meta" home)"; do
       [ -n "$path" ] || continue
       [ -d "$path" ] || continue
@@ -1977,7 +2008,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     wt_top_real=
   fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
-    if [ "${SPAWN_ENDPOINT_ABORT_CLEANUP:-0}" = 1 ]; then
+    if [ "${SPAWN_ENDPOINT_ABORT_CLEANUP:-0}" = 1 ] || [ "${HERDR_PROJECTION_ABORT_CLEANUP:-0}" = 1 ]; then
       hint="the spawn's endpoint was cleaned up - re-run the spawn, or run 'treehouse get' manually to diagnose the worktree pool"
     else
       hint="Inspect target $inspect_target"
