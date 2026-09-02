@@ -176,6 +176,7 @@ When that section reports its checks still in progress it names exactly what is 
 6. **Network checks** - after the fleet-state digest, the deferred stage's result, or an explicit statement of what it has not confirmed yet.
    A read-only session runs no network checks at all and says so.
 7. **Context digest and next step** - last of the bulk sections, the full contents of `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, each clearly delimited, followed by the closing reminder.
+   On a `clear` or `compact` re-emit the three memory files instead lead the digest in an `OPERATIONAL MEMORY` section ahead of the wake queue, bounded per file so they land inside the harness's inline preview, and this section only points back to them; there, re-read a memory file only when it printed its own truncation pointer, and only from the full path that pointer names ([`docs/sessionstart-nudge.md`](docs/sessionstart-nudge.md)).
    A file that does not exist prints an explicit `ABSENT` marker, never confused with an empty-but-present file: absence is meaningful (`captain.md` absent means use the firstmate repo's built-in defaults, `projects.md` absent means rebuild it from the clones under `projects/`, etc.).
    The closing reminder points back to the emitted supervision block and preserves only the lock, afk, Relay, and read-once reminders.
 
