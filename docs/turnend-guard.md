@@ -13,7 +13,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 
 `bin/fm-guard.sh` is a pull-based warning that runs only when another supervision command invokes it.
 The turn-end guard closes the remaining gap at the primary's own turn boundary.
-When work, a process-event source, or Relay polling needs supervision at that boundary and no identity-matched watcher has a fresh beacon, the harness integration must either block the turn end or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
+When work, a process-event source, Relay polling, a pending durable wake queue, or an in-progress deferred network stage needs supervision at that boundary and no identity-matched watcher has a fresh beacon, the harness integration must either block the turn end or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
 The mid-turn pull warning uses the model-aware supervision verdict described below, while the turn-end guard keeps the PID-strict watcher predicate.
 The guard remains a backstop; [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
 
@@ -28,6 +28,9 @@ It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
 For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
 Registered `state/procevent/*.source` records also require supervision even though they have no task metadata.
+A durable wake queue (`state/.wake-queue`) holding a record the drain can still acknowledge, and an in-progress deferred network stage (`bin/fm-startup-network.sh`, whose `state/.startup-network.status` reads `running` with a live, recent worker, or reads a terminal state within a short grace of its `finished` stamp while its wake is still being appended), also require supervision, so a wake enqueued out of band into an otherwise idle home - the deferred stage finishing its sweeps after the reconcile turn ended - keeps a cycle armed until the wake is delivered and acknowledged instead of sitting undelivered until the parent notices.
+Both conditions are bounded on purpose: a truncated queue row that no drain can ever consume, and a crashed or over-deadline stage record, are each inert, so neither can hold an idle home's turn open forever.
+Both are arming need only: `bin/fm-guard.sh` deliberately leaves the pending wake queue and the in-progress network stage out of the mid-turn watcher-down alarm, because session start enqueues and launches them itself and then runs the pull warning before the turn's Stop has armed any watcher, so alarming there would report an ordinary startup shape as a supervision lapse.
 The default cross-harness mode exits silently with no supervision need.
 Every mode treats `state/x-watch.check.sh` as supervision need, so Relay polling remains guarded without an in-flight task.
 Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`, the same PID-strict identity-matched lock and fresh-beacon check used by `bin/fm-watch-arm.sh`: a stale beacon blocks even when a watcher pid is live, and a fresh leftover beacon blocks when the lock is missing, dead, or identity-mismatched.
@@ -136,7 +139,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 ## Compatibility limits
 
 - Child crewmate and scout worktrees are outside scope.
-- A valid secondmate home is in scope; an idle secondmate endpoint with no Relay poll remains healthy because it has no supervision need.
+- A valid secondmate home is in scope; a genuinely quiet idle secondmate endpoint - no Relay poll, no ackable queued wake, and no in-progress deferred network stage - remains healthy because it has no supervision need.
+- An idle secondmate that holds an ackable `state/.wake-queue` row or an in-progress deferred network stage does have supervision need, so the guard blocks its turn end until a watcher is armed to deliver that wake.
 - The blocking and bounded-follow-up mechanisms are limited to the primary integrations listed above.
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
 - Cursor's `stop` step does not fire in headless `cursor-agent -p`, the same class of limit as OpenCode headless; firstmate primaries run interactive.
@@ -153,8 +157,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 ## Regression coverage
 
-`tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, the abandoned auto-arm claim cases that must block or clear instead of allowing a blind stop, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
-`tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and stale-beacon alarm, and the extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi and pi-signed harness routing.
+`tests/fm-turnend-guard.test.sh` covers the predicate, including the pending-wake-queue and deferred-network-stage arming cases, the unackable-only queue and the crashed or over-deadline stage record that stay inert, the bounded terminal-state grace across the publish-then-enqueue gap, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, the abandoned auto-arm claim cases that must block or clear instead of allowing a blind stop, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+`tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the narrower alarm need that exempts a running network stage and a pending queued wake from the mid-turn banner, the unackable-only queue that advises no drain, the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and stale-beacon alarm, and the extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi and pi-signed harness routing.
 It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, child-worktree exclusion, and that the adapter never exits 2.
 `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` is the opt-in guard that proves the same behavior against the installed cursor-agent and fails naming the harness and version.

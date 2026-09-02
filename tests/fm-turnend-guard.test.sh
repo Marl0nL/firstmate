@@ -71,10 +71,166 @@ test_predicate_queue_pending_flag() {
   mkdir -p "$state"
   fm_supervision_status "$state" 300
   [ "$FM_SUP_QUEUE_PENDING" = false ] || fail "empty/absent wake queue must not read as pending"
-  printf 'record\n' > "$state/.wake-queue"
+  printf '%s\t1\tsignal\ttask\tsignal: crewmate needs a decision\n' "$(date +%s)" > "$state/.wake-queue"
   fm_supervision_status "$state" 300
-  [ "$FM_SUP_QUEUE_PENDING" = true ] || fail "a non-empty wake queue must read as pending"
+  [ "$FM_SUP_QUEUE_PENDING" = true ] || fail "a queued wake record must read as pending"
   pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
+}
+
+# bin/fm-wake-drain.sh RETAINS any row with fewer than 5 fields or a non-numeric
+# sequence, so such a row survives every acknowledgement. Counting it as pending
+# would arm supervision in an idle home on every turn end, forever, with nothing
+# able to clear it.
+test_predicate_corrupt_queue_row_is_inert() {
+  local state="$TMP_ROOT/pred-queue-corrupt/state"
+  mkdir -p "$state"
+  printf '%s\t1\tcheck\tstartup\n' "$(date +%s)" > "$state/.wake-queue"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_QUEUE_PENDING" = false ] || fail "a truncated (4-field) wake row must not read as pending"
+  [ "$FM_SUP_NEEDED" = false ] || fail "an unacknowledgeable wake row must not hold an idle home's turn open"
+  printf '%s\tnotaseq\tcheck\tstartup-network\tcheck: startup-network: finished\n' "$(date +%s)" > "$state/.wake-queue"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_QUEUE_PENDING" = false ] || fail "a wake row with a non-numeric sequence must not read as pending"
+  [ "$FM_SUP_NEEDED" = false ] || fail "a non-numeric-sequence row must not hold an idle home's turn open"
+  # Paired positive control on the same idle home: one ackable row still arms.
+  printf '%s\t7\tcheck\tstartup-network\tcheck: startup-network: finished\n' "$(date +%s)" >> "$state/.wake-queue"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_QUEUE_PENDING" = true ] || fail "a valid ackable wake row must read as pending"
+  [ "$FM_SUP_NEEDED" = true ] || fail "a valid ackable wake row must need supervision"
+  pass "fm_supervision_status: a corrupt-only wake queue is inert, a valid row still arms"
+}
+
+# bin/fm-startup-network.sh writes this key=value status record; only its
+# state/pid/started fields drive the supervision liveness gate.
+write_network_status() {  # <state-dir> <state-value> <pid> <started-epoch>
+  mkdir -p "$1"
+  cat > "$1/.startup-network.status" <<EOF
+state=$2
+pid=$3
+started=$4
+locked=1
+phases=probe,sweeps
+generation=$4.$$.0
+lock_pid=$$
+EOF
+  [ -f "$1/.startup-network.status" ] || fail "could not write the network-stage status fixture into $1"
+}
+
+test_predicate_queue_pending_needs_supervision() {
+  local state="$TMP_ROOT/pred-queue-need/state"
+  mkdir -p "$state"
+  # A wake enqueued out of band into an otherwise idle home (no state/*.meta):
+  # exactly the deferred network stage finishing after the reconcile turn ended.
+  printf '%s\t1\tcheck\tstartup-network\tcheck: startup-network: finished\n' "$(date +%s)" > "$state/.wake-queue"
+  fm_supervision_needed "$state" 300 || fail "a pending wake queue must register as supervision need"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a pending queue must not be counted as an in-flight task"
+  [ "$FM_SUP_QUEUE_PENDING" = true ] || fail "a non-empty wake queue must read as pending"
+  [ "$FM_SUP_NEEDED" = true ] || fail "a pending wake queue must set FM_SUP_NEEDED"
+  fm_supervision_unhealthy "$state" 300 || fail "a pending queue with no beacon must be unhealthy"
+  pass "fm_supervision_needed: a pending durable wake queue needs supervision"
+}
+
+test_predicate_network_stage_running_needs_supervision() {
+  local state="$TMP_ROOT/pred-net-run/state"
+  mkdir -p "$state"
+  # This shell ($$) is a genuinely-alive pid for the whole run - a real live
+  # worker for the kill -0 liveness check, with nothing to spawn or kill.
+  write_network_status "$state" running "$$" "$(date +%s)"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_NETWORK_STAGE" = true ] || fail "a live running deferred network stage must set FM_SUP_NETWORK_STAGE"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a network stage must not be counted as a task"
+  [ "$FM_SUP_NEEDED" = true ] || fail "an in-progress deferred network stage must set FM_SUP_NEEDED"
+  pass "fm_supervision_status: an in-progress deferred network stage needs supervision"
+}
+
+test_predicate_network_stage_dead_worker_not_needed() {
+  local state="$TMP_ROOT/pred-net-dead/state" dead
+  mkdir -p "$state"
+  # A worker killed with its process group (the truncated-digest case) leaves the
+  # running record behind; a dead recorded pid must never hold an idle turn open.
+  dead=$(nonexistent_pid)
+  write_network_status "$state" running "$dead" "$(date +%s)"
+  [ -f "$state/.startup-network.status" ] || fail "dead-worker fixture status file is missing (would pass vacuously)"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_NETWORK_STAGE" = false ] || fail "a running record with a dead worker pid must NOT read as an active stage"
+  [ "$FM_SUP_NEEDED" = false ] || fail "a crashed network stage must not hold an idle turn open"
+  pass "fm_supervision_status: a crashed network stage (dead worker) is not a supervision need"
+}
+
+test_predicate_network_stage_overage_not_needed() {
+  local state="$TMP_ROOT/pred-net-old/state"
+  mkdir -p "$state"
+  # A live pid ($$) but started far past the stage's own aggregate deadline: a
+  # recycled pid that happens to be alive must not pin supervision on forever.
+  write_network_status "$state" running "$$" "$(( $(date +%s) - 100000 ))"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_NETWORK_STAGE" = false ] || fail "a running record older than the stage deadline must not read as active (recycled-pid guard)"
+  pass "fm_supervision_status: a stale over-deadline running record is not an active stage"
+}
+
+# The terminal record bin/fm-startup-network.sh publish() writes BEFORE it appends
+# the `check: startup-network` wake; only its state/finished fields matter here.
+write_network_status_terminal() {  # <state-dir> <state-value> <finished-epoch>
+  mkdir -p "$1"
+  cat > "$1/.startup-network.status" <<EOF
+state=$2
+pid=$$
+started=$(( $3 - 5 ))
+finished=$3
+rc=0
+locked=1
+phases=probe,sweeps
+generation=$3.$$.0
+lock_pid=$$
+report_published=1
+EOF
+  [ -f "$1/.startup-network.status" ] || fail "could not write the terminal network-stage status fixture into $1"
+}
+
+test_predicate_network_stage_terminal_grace_bridges_wake() {
+  local state="$TMP_ROOT/pred-net-terminal/state"
+  mkdir -p "$state"
+  # publish() promotes the status to a terminal state and only then appends the
+  # wake. Sampled in that gap, the queue is still empty and the stage no longer
+  # reads `running`: without the bridge an idle home reports no supervision need
+  # microseconds before the wake it must deliver arrives.
+  write_network_status_terminal "$state" 'done' "$(date +%s)"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_NETWORK_STAGE" = true ] || fail "a just-finished stage must still read as active while its wake is being appended"
+  [ "$FM_SUP_NEEDED" = true ] || fail "the terminal-grace bridge must keep supervision needed across the publish gap"
+  # An inline harvest already claimed the result, so no wake is coming.
+  : > "$state/.startup-network.delivered"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_NETWORK_STAGE" = false ] || fail "an already-delivered result must end the bridge immediately"
+  rm -f "$state/.startup-network.delivered"
+  # The wake row is appended: the queue condition owns the need from here on, so
+  # the bridge must switch off rather than double-count a stage that is finished.
+  printf '%s\t1\tcheck\tstartup-network\tcheck: startup-network: finished\n' "$(date +%s)" > "$state/.wake-queue"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_NETWORK_STAGE" = false ] || fail "once the wake is queued the bridge must end; the queue condition owns the need"
+  [ "$FM_SUP_QUEUE_PENDING" = true ] || fail "the appended wake row must read as pending"
+  [ "$FM_SUP_NEEDED" = true ] || fail "the queued wake must keep supervision needed with no gap"
+  # A row no drain can ever consume is not the appended wake, so it must not hand
+  # the need over to a queue condition that will never see it either.
+  printf '%s\t1\tcheck\tstartup\n' "$(date +%s)" > "$state/.wake-queue"
+  write_network_status_terminal "$state" 'done' "$(date +%s)"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_QUEUE_PENDING" = false ] || fail "a truncated row must not read as an ackable queued wake"
+  [ "$FM_SUP_NETWORK_STAGE" = true ] || fail "an unackable-only queue must not switch the bridge off; nothing else would hold the need"
+  [ "$FM_SUP_NEEDED" = true ] || fail "the pre-append gap must stay covered when the queue holds only an unackable row"
+  rm -f "$state/.wake-queue"
+  # And the bridge is bounded: an old terminal record cannot pin supervision on.
+  write_network_status_terminal "$state" 'done' "$(( $(date +%s) - 600 ))"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_NETWORK_STAGE" = false ] || fail "a terminal record past the grace must not read as active"
+  [ "$FM_SUP_NEEDED" = false ] || fail "a long-finished stage must not hold an idle turn open"
+  # A drained-and-acknowledged cycle: empty queue again, but seconds past the
+  # grace, so a finished stage is never reported as one still in progress.
+  write_network_status_terminal "$state" 'done' "$(( $(date +%s) - 10 ))"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_NETWORK_STAGE" = false ] || fail "a stage that finished 10s ago and whose wake was already drained must not read as active"
+  [ "$FM_SUP_NEEDED" = false ] || fail "a completed and acknowledged cycle must not block the next turn end"
+  pass "fm_supervision_status: the terminal-state grace bridges the publish-then-enqueue gap, bounded"
 }
 
 test_predicate_x_mode_needs_supervision() {
@@ -215,14 +371,6 @@ make_home_alias() {  # <target> <link-path>
   printf '%s\n' "$link"
 }
 
-nonexistent_pid() {
-  local pid=999999
-  while kill -0 "$pid" 2>/dev/null; do
-    pid=$((pid + 1))
-  done
-  printf '%s\n' "$pid"
-}
-
 watcher_identity() {
   local dir=$1 pid=$2
   FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
@@ -268,6 +416,29 @@ test_hook_blocks_source_only_home() {
   expect_code 2 "$status" "non-Claude hook must block when a source-only home has no watcher"
   assert_contains "$out" "1 process-event source(s) registered" "block reason must identify the source-only supervision need"
   pass "fm-turnend-guard: non-Claude path blocks a source-only home"
+}
+
+test_hook_blocks_queue_pending_only_home() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-queue-only")
+  # No task metadata: an idle home that still holds a wake queued out of band.
+  printf '%s\t1\tcheck\tstartup-network\tcheck: startup-network: finished\n' "$(date +%s)" > "$dir/state/.wake-queue"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "non-Claude hook must block when only a pending wake queue needs supervision"
+  assert_contains "$out" "a queued notification is waiting to be delivered" "block reason must name the pending-wake supervision need, not misreport X-mode"
+  pass "fm-turnend-guard: non-Claude path blocks an idle home holding a pending wake queue"
+}
+
+test_hook_blocks_network_stage_only_home() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-network-stage-only")
+  # No metadata, no queue, no X-mode: only a live deferred stage. This shell ($$)
+  # is a genuinely-alive worker pid for the whole run.
+  write_network_status "$dir/state" running "$$" "$(date +%s)"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "non-Claude hook must block while only a deferred network stage needs supervision"
+  assert_contains "$out" "the deferred startup network checks are still running" "block reason must name the network-stage supervision need, not misreport X-mode"
+  pass "fm-turnend-guard: non-Claude path blocks an idle home running a deferred network stage"
 }
 
 test_hook_blocks_when_dead_lock_has_fresh_beacon() {
@@ -1777,11 +1948,19 @@ test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
+test_predicate_corrupt_queue_row_is_inert
+test_predicate_queue_pending_needs_supervision
+test_predicate_network_stage_running_needs_supervision
+test_predicate_network_stage_dead_worker_not_needed
+test_predicate_network_stage_overage_not_needed
+test_predicate_network_stage_terminal_grace_bridges_wake
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
+test_hook_blocks_queue_pending_only_home
+test_hook_blocks_network_stage_only_home
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_silent_when_lock_armed_from_real_and_hook_runs_via_alias

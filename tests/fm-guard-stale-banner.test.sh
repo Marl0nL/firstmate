@@ -168,6 +168,63 @@ test_fresh_beacon_without_live_watcher_stays_alarm() {
   pass "fm-guard stale banner: a fresh beacon without a live watcher remains unhealthy"
 }
 
+# bin/fm-session-start.sh launches the deferred network stage itself and only
+# then runs this pull guard (through bin/fm-wake-drain.sh), which is BEFORE the
+# turn's Stop arms any watcher. That home is in its ordinary startup shape, not a
+# supervision lapse, so the mid-turn alarm must stay silent for it - while the
+# turn-end guard and the Stop auto-arm still count the same stage and arm.
+test_running_network_stage_alone_does_not_alarm() {
+  local dir home out control
+  dir=$(make_guard_case network-stage-only)
+  home=$(case_home "$dir")
+  rm -f "$home/state/task.meta"
+  # This shell ($$) is a genuinely-alive worker pid for the whole run - a real
+  # live stage worker, with nothing to spawn or kill.
+  cat > "$home/state/.startup-network.status" <<EOF
+state=running
+pid=$$
+started=$(date +%s)
+locked=1
+phases=probe,sweeps
+generation=$(date +%s).$$.0
+lock_pid=0
+EOF
+  out=$(run_guard_case "$dir")
+  [ -z "$out" ] \
+    || fail "a home whose only need is a running deferred network stage must not alarm, got: $out"
+  assert_absent "$home/state/.guard-watcher-stale-banner" \
+    "a network-stage-only home must not open a stale-banner episode that would mute a later genuine lapse"
+  # Paired control on the same watcher state: a real in-flight task still alarms.
+  control=$(make_guard_case network-stage-control)
+  out=$(run_guard_case "$control")
+  assert_contains "$out" "WATCHER DOWN" \
+    "an in-flight task with no live watcher must still raise the full banner"
+  pass "fm-guard stale banner: a running deferred network stage alone is not a mid-turn lapse"
+}
+
+# The same startup shape as the network-stage case: bin/fm-session-start.sh runs
+# the drain, which presents the queued wake and then calls this pull guard - all
+# before the turn's Stop arms the watcher that will deliver it. A leftover
+# undelivered wake after a host restart is that ordinary shape, not a lapse.
+test_pending_wake_alone_does_not_alarm() {
+  local dir home out control
+  dir=$(make_guard_case pending-wake-only)
+  home=$(case_home "$dir")
+  rm -f "$home/state/task.meta"
+  printf '%s\t1\tcheck\tstartup-network\tcheck: startup-network: finished\n' "$(date +%s)" > "$home/state/.wake-queue"
+  out=$(run_guard_case "$dir")
+  assert_not_contains "$out" "WATCHER DOWN" \
+    "a home whose only need is a queued wake must not raise the mid-turn watcher-down alarm"
+  assert_absent "$home/state/.guard-watcher-stale-banner" \
+    "a queue-only home must not open a stale-banner episode that would mute a later genuine lapse"
+  # Paired control on the same watcher state: a real in-flight task still alarms.
+  control=$(make_guard_case pending-wake-control)
+  out=$(run_guard_case "$control")
+  assert_contains "$out" "WATCHER DOWN" \
+    "an in-flight task with no live watcher must still raise the full banner"
+  pass "fm-guard stale banner: a pending queued wake alone is not a mid-turn lapse"
+}
+
 test_x_mode_without_live_watcher_stays_alarm() {
   local dir home out
   dir=$(make_guard_case x-mode-no-live)
@@ -254,13 +311,36 @@ test_queued_wake_warning_stays_independent() {
   out1=$(run_guard_case "$dir")
   [ "$(count_text "$out1" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "first stale call did not print the full banner before queued wake case: $out1"
-  printf 'signal: %s/state/task.status\n' "$home" > "$home/state/.wake-queue"
+  printf '%s\t1\tsignal\ttask\tsignal: %s/state/task.status\n' "$(date +%s)" "$home" > "$home/state/.wake-queue"
   out2=$(run_guard_case "$dir")
   assert_contains "$out2" "full banner already printed this episode" \
     "same-episode stale call should still print its concise reminder"
   assert_contains "$out2" "queued wakes pending" \
     "queued wake warning must not be suppressed by stale-banner deduplication"
   pass "fm-guard stale banner: queued-wake warning remains independent"
+}
+
+# bin/fm-wake-drain.sh RETAINS a row with fewer than 5 fields or a non-numeric
+# sequence on every acknowledgement, so "drain them" can never succeed for one.
+# The advice must not be given for a queue that holds only such rows.
+test_unackable_queue_row_does_not_advise_draining() {
+  local dir home out
+  dir=$(make_guard_case unackable-queue)
+  home=$(case_home "$dir")
+  # An in-flight task keeps the guard past its early exit, so the queue warning
+  # is reached and this is a real test of the warning's own condition.
+  printf '%s\t1\tcheck\tstartup\n' "$(date +%s)" > "$home/state/.wake-queue"
+  out=$(run_guard_case "$dir")
+  assert_contains "$out" "WATCHER DOWN" \
+    "the in-flight task must still alarm, or the queue warning was never reached"
+  assert_not_contains "$out" "queued wakes pending" \
+    "a queue holding only rows no drain can consume must not advise draining them"
+  # Paired control: one ackable row in the same home does warn.
+  printf '%s\t2\tsignal\ttask\tsignal: crewmate needs a decision\n' "$(date +%s)" >> "$home/state/.wake-queue"
+  out=$(run_guard_case "$dir")
+  assert_contains "$out" "queued wakes pending" \
+    "a queue holding an ackable row must still warn"
+  pass "fm-guard stale banner: an unackable-only queue does not advise draining"
 }
 
 test_read_only_before_writable_does_not_consume_full_banner() {
@@ -699,10 +779,13 @@ test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
 test_fresh_beacon_without_live_watcher_stays_alarm
 test_x_mode_without_live_watcher_stays_alarm
+test_running_network_stage_alone_does_not_alarm
+test_pending_wake_alone_does_not_alarm
 test_healthy_recovery_rearms_next_stale_episode
 test_concurrent_same_episode_prints_one_full_banner
 test_home_isolation
 test_queued_wake_warning_stays_independent
+test_unackable_queue_row_does_not_advise_draining
 test_read_only_before_writable_does_not_consume_full_banner
 test_read_only_during_episode_observes_without_mutating_marker
 test_healthy_read_only_does_not_clear_marker

@@ -150,6 +150,17 @@ fm_test_reap_orphans() {
 
 fm_test_reap_orphans
 
+# A pid that no live process holds, found by scanning rather than by spawning and
+# killing: killing a backgrounded job can run the inherited fm_test_cleanup EXIT
+# trap in the forked child and wipe the fixture root out from under the test.
+nonexistent_pid() {
+  local pid=999999
+  while kill -0 "$pid" 2>/dev/null; do
+    pid=$((pid + 1))
+  done
+  printf '%s\n' "$pid"
+}
+
 # --- fakebin / PATH shims ---------------------------------------------------
 #
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to

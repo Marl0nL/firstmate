@@ -5,8 +5,9 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
-# Then, if a task is in flight (a state/<id>.meta exists) or X-mode relay
-# polling is active (state/x-watch.check.sh exists) and supervision is not
+# Then, if a task is in flight (a state/<id>.meta exists), a process-event source
+# is registered, or X-mode relay polling is active (state/x-watch.check.sh
+# exists), and supervision is not
 # healthy, prints a loud, clearly delimited banner so the agent cannot skim past
 # it in the tool output of whatever it was doing - the one channel every harness
 # has. Supervision health is MODEL-AWARE (fm_watcher_supervision_verdict in
@@ -37,7 +38,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 GRACE=${FM_GUARD_GRACE:-300}
-queue_pending=false
 READ_ONLY=${FM_GUARD_READ_ONLY:-0}
 case "$READ_ONLY" in 1|true|TRUE|yes|YES) READ_ONLY=1 ;; *) READ_ONLY=0 ;; esac
 CONTINUE_LINE=${FM_GUARD_CONTINUE_LINE:-This is a supervision warning only; the guarded operation WILL still run.}
@@ -154,8 +154,23 @@ fi
 fm_supervision_status "$STATE" "$GRACE"
 in_flight=$FM_SUP_IN_FLIGHT
 sources=$FM_SUP_SOURCES
-needed=$FM_SUP_NEEDED
 beacon_desc=$FM_SUP_BEACON_DESC
+# This guard alarms on a supervision LAPSE, so it deliberately uses a narrower
+# need than the shared FM_SUP_NEEDED that gates ARMING. A pending queued wake and
+# a running deferred network stage are turn-end arming concerns: the Stop
+# auto-arm and the turn-end guard both count them through FM_SUP_NEEDED, arm the
+# watcher at this turn's Stop, and the watcher's resurface then delivers. Session
+# start reaches this pull guard with exactly that shape - it launches the stage
+# itself and runs the drain, which calls this guard BEFORE that first Stop has
+# armed anything - so alarming on either would fire the watcher-down banner on
+# essentially every relaunch of an idle home in its ordinary startup shape. Only
+# the persistent mid-turn needs, which no arm is already pending for, alarm here.
+needed=false
+if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
+  || [ "$FM_SUP_SOURCES" -gt 0 ] \
+  || [ "$FM_SUP_XWATCH" = true ]; then
+  needed=true
+fi
 fm_watcher_supervision_verdict "$STATE" "$WATCH" "$GRACE" "$FM_HOME" "$FM_ROOT"
 watcher_healthy=$FM_WATCHER_VERDICT_OK
 watcher_down_reason=$FM_WATCHER_VERDICT_REASON
@@ -167,7 +182,6 @@ if [ "$needed" = false ]; then
   exit 0
 fi
 
-[ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
 
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line. Later
@@ -185,7 +199,7 @@ if [ "$watcher_healthy" = false ]; then
     afk=0
     [ -e "$STATE/.afk" ] && afk=1
     queue_arg=0
-    "$queue_pending" && queue_arg=1
+    [ "$FM_SUP_QUEUE_PENDING" = true ] && queue_arg=1
     x_mode=0
     [ -f "$CONFIG/x-mode.env" ] && x_mode=1
     fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
@@ -207,8 +221,10 @@ if [ "$watcher_healthy" = false ]; then
         printf '●  %s task(s) in flight, but %s.\n' "$in_flight" "$watcher_cause"
       elif [ "$sources" -gt 0 ]; then
         printf '●  %s process-event source(s) registered, but %s.\n' "$sources" "$watcher_cause"
-      else
+      elif [ "$FM_SUP_XWATCH" = true ]; then
         printf '●  X-mode relay polling needs supervision, but %s.\n' "$watcher_cause"
+      else
+        printf '●  supervision is needed, but %s.\n' "$watcher_cause"
       fi
       if [ "$READ_ONLY" -eq 1 ]; then
         printf '●  This read-only session should report the lapse, not repair it.\n'
@@ -232,7 +248,7 @@ fi
 # Queued wakes are an independent hazard; warn whenever they are pending, even if
 # a watcher is alive. Kept after the banner so the no-watcher alarm reads first.
 # Dedup of the watcher-down banner never suppresses this warning.
-if "$queue_pending"; then
+if [ "$FM_SUP_QUEUE_PENDING" = true ]; then
   if [ "$READ_ONLY" -eq 1 ]; then
     echo "WARNING: queued wakes pending - left untouched because this session lacks verified fleet-lock ownership." >&2
   else
