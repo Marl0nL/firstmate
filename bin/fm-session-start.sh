@@ -37,6 +37,13 @@
 #                       fleet sync) also run only when
 #                       locked; the four network sweeps run in the deferred
 #                       stage rather than this synchronous bootstrap section.
+#  2b. operational-memory - RE-EMIT ONLY: this home's durable memory
+#                       (data/captain.md, data/captain-shared.md,
+#                       data/learnings.md), bounded per file, led here - ahead of
+#                       the unbudgeted wake queue and the bulky fleet state - so a
+#                       /clear or compaction re-emit delivers it inside the
+#                       preview a cleared agent acts on. A startup never emits
+#                       this stage; its memory prints in step 8.
 #   3. inactive outcomes + wake-drain - runs the local bounded inactive-outcome
 #                       reconciliation before presenting durable wakes and advancing
 #                       recovery handling state, so both only run when locked.
@@ -57,8 +64,10 @@
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
 #
-# Those nine names are also the runtime-bound stage list below, so a truncated
-# startup can name exactly which of them never ran.
+# Those names are also the runtime-bound stage list below, so a truncated
+# startup can name exactly which of them never ran; the list is selected by path,
+# so operational-memory appears in it only on a re-emit, which is the only path
+# that emits it.
 #
 # NO NETWORK ON THE BLOCKING PATH. This digest runs on a session-open hook that
 # blocks session initialization, so anything it waits for is time the captain
@@ -95,6 +104,24 @@
 # honest when a stage below it never ran.
 # The LOCK/BOOTSTRAP/WAKE-QUEUE safety preamble keeps its order: it establishes
 # mutation authority and this turn's work queue before anything else is read.
+#
+# The RE-EMIT path (a /clear or compaction) inverts the fleet-state-first choice
+# for one group only: this home's durable memory (captain/captain-shared/
+# learnings) leads, in its own OPERATIONAL MEMORY section right after BOOTSTRAP
+# and ahead of the WAKE QUEUE, and CONTEXT then only points back to it. A re-emit
+# is delivered to a session that already reconciled the fleet at startup and lost
+# only its context, through a channel that persists an oversized payload and
+# previews it from the HEAD (Claude caps the inline delivery at about 10,000
+# characters). The memory is what a clear actually destroyed and what nothing
+# else re-injects, so it is exactly what must stay inside the preview - the
+# reverse of the startup case, where a fresh agent reconciles the whole digest
+# and the live-task inventory is what a tail-truncating delivery must keep. That
+# group is also bounded per file there, so one large home memory cannot swallow
+# the preview it was moved into; and it leads the WAKE QUEUE, which has no
+# aggregate budget of its own, so that per-file bound is a guarantee for a busy
+# home and not only a quiet one. The queue loses nothing by following: it is
+# durable, unacknowledged until WAKE_ACK_REQUIRED runs, and re-drained at the
+# start of every wake-handling turn. See the --reemit note below.
 #
 # On a Pi primary, the supervision-block step also checks whether Pi's two
 # tracked primary extensions are loaded and prints a PI_WATCH_EXTENSION
@@ -200,6 +227,20 @@
 #             this session's own harness holds as its own, so the re-emit
 #             proceeds, while a lock another live session took meanwhile still
 #             produces the ordinary read-only path.
+#             MEMORY LEADS ON A RE-EMIT: the durable memory a /clear or
+#             compaction destroyed (data/captain.md, data/captain-shared.md,
+#             data/learnings.md) is printed in its own OPERATIONAL MEMORY section
+#             right after bootstrap - ahead of the WAKE QUEUE as well as the
+#             bulky fleet state, because the queue section carries no aggregate
+#             byte budget - and the CONTEXT section then only points back to it. This channel persists
+#             an oversized payload to a file and shows the agent a HEAD preview
+#             (Claude's inline cap is about 10,000 characters), so leading with
+#             memory keeps the cleared knowledge inside that preview instead of
+#             past it. Each of the three files is capped there
+#             (REEMIT_MEMORY_FILE_CAP) and an over-cap file prints its head plus
+#             a pointer to its full path and size, so a large home memory cannot
+#             consume the preview it was moved into. A true startup keeps memory
+#             in CONTEXT, uncapped (see ORDERING).
 #
 #   --source  The native session-open source, supplied only by
 #             fm-sessionstart-run.sh. A genuine `startup` that owns the active
@@ -255,7 +296,18 @@ done
 # The ordered stage list is the contract behind the truncation banner: the child
 # names the stage it is entering, and the parent reports every stage at or after
 # that one as never emitted. Keep it in the exact order the digest prints.
-SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
+# A re-emit prints one stage a startup does not - operational-memory, this home's
+# durable memory led ahead of the wake queue and the fleet state - so the list is
+# selected by the path actually being run. Listing it unconditionally would make
+# a truncated STARTUP tell the agent to reconcile a section that startup never
+# emits; leaving it out entirely would make a re-emit truncated inside the memory
+# blame 'bootstrap' and send the agent to 'context', which on a re-emit no longer
+# carries the memory at all.
+if [ "$REEMIT" -eq 1 ]; then
+  SESSION_START_STAGES='lock bootstrap operational-memory wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
+else
+  SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
+fi
 
 stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
   [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
@@ -377,6 +429,75 @@ print_file_or_absent() {
   else
     printf 'ABSENT\n'
   fi
+}
+
+# The CONTEXT digest splits into two groups so a context re-emit can lead with
+# the group a freshly cleared agent most needs while the bulky live fleet state
+# still absorbs any tail truncation on startup:
+#   - navigation: data/projects.md, data/secondmates.md - the fleet map.
+#   - memory: data/captain.md, data/captain-shared.md, data/learnings.md - this
+#     home's durable operating knowledge, the irreplaceable thing a /clear or a
+#     compaction discards (AGENTS.md is re-injected by the harness; the charter
+#     and prior context are not). On a re-emit this memory leads the digest from
+#     just after bootstrap, bounded per file (see the OPERATIONAL MEMORY section
+#     below); on a true startup both groups print here in CONTEXT in the original
+#     order, in full.
+print_context_navigation() {
+  print_file_or_absent "$DATA/projects.md" "data/projects.md"
+  print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
+}
+
+print_context_memory() {
+  print_file_or_absent "$DATA/captain.md" "data/captain.md"
+  print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
+  print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+}
+
+# Per-file byte cap for the RE-EMIT memory section only. Leading with memory only
+# helps if the group itself fits the preview it is sized for: these files are
+# bounded by config/startup-memory-budget in *estimated tokens*, so a home can
+# hold ~20KB of sanctioned memory and still be "within budget" - enough for one
+# file to consume the whole ~10k-character preview and push the fleet state, the
+# read-once contract, and the memory's own tail back out of it. Three files at
+# this cap total <=6000 bytes, and the section is emitted while the only thing
+# ahead of it is the fixed-size lock/bootstrap preamble - the unbudgeted wake
+# queue follows it - so the preamble, the memory, and the supervision block after
+# it stay inside the preview for any home, not just a quiet one. Deliberately a
+# constant and not a knob: it is a property of the delivery channel, not of a
+# home.
+REEMIT_MEMORY_FILE_CAP=2000
+
+# print_file_or_absent's absent/empty contract, plus a byte cap: an over-cap file
+# prints its head and then exactly one pointer line naming the full path and size
+# so nothing is lost, only deferred. Startup never uses this - it prints in full.
+print_file_capped() {  # <path> <label> <cap-bytes>
+  local path=$1 label=$2 cap=$3 size
+  subsection "$label"
+  if [ ! -f "$path" ]; then
+    printf 'ABSENT\n'
+    return 0
+  fi
+  if [ ! -s "$path" ]; then
+    printf '(present, empty)\n'
+    return 0
+  fi
+  # An unreadable size falls open to printing in full: losing the cap costs
+  # preview budget, losing the memory costs the recovery this section exists for.
+  size=$(wc -c < "$path" 2>/dev/null | tr -d ' ')
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  if [ "$size" -le "$cap" ]; then
+    cat "$path"
+    return 0
+  fi
+  head -c "$cap" "$path"
+  printf '\n... [truncated to fit the re-emit preview budget; read the full file at %s (%s bytes)] ...\n' \
+    "$path" "$size"
+}
+
+print_reemit_memory() {
+  print_file_capped "$DATA/captain.md" "data/captain.md" "$REEMIT_MEMORY_FILE_CAP"
+  print_file_capped "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)" "$REEMIT_MEMORY_FILE_CAP"
+  print_file_capped "$DATA/learnings.md" "data/learnings.md" "$REEMIT_MEMORY_FILE_CAP"
 }
 
 print_backlog_pointer() {
@@ -688,6 +809,51 @@ else
   printf '(silent - all good)\n'
 fi
 
+# --- 2b. operational memory (context re-emit only) -------------------------
+# A /clear or a compaction discards this session's charter and prior context;
+# AGENTS.md is re-injected by the harness, but data/captain.md and
+# data/learnings.md reach the agent only through this digest. This digest is
+# delivered on a session-open channel that persists an oversized payload to a
+# file and hands the agent only a HEAD preview (Claude caps that inline at about
+# 10,000 characters), and a freshly cleared agent acts on the preview. So on a
+# re-emit this home's durable memory must LEAD - ahead of the wake queue and the
+# bulky fleet state, within that inline budget - or the very knowledge the clear
+# destroyed lands past the preview and the agent stays naive until its next full
+# startup. It is printed once: the CONTEXT section below prints only the
+# navigation files and points back here. A true startup keeps memory in CONTEXT
+# (it reconciles the whole digest rather than acting on a preview of context it
+# never held), so the live-task inventory still absorbs any tail truncation there.
+# Leading is only half of it: the group must also FIT, so each file is capped at
+# REEMIT_MEMORY_FILE_CAP here (see that constant) and an over-cap file prints its
+# head plus a pointer to its full path and size. Without the cap one large-but-
+# sanctioned memory file would consume the whole preview and push the fleet
+# state, the read-once contract, and the rest of the memory back out of it - the
+# same failure this reorder exists to fix, just relocated. Startup is unaffected:
+# print_context_memory below still prints these files in full there.
+#
+# WHY IT LEADS THE WAKE QUEUE and not just the fleet state: the wake-queue
+# section below has no aggregate budget - fm-wake-drain.sh bounds OPEN DECISIONS
+# at 4000 bytes and RECORD DIVERGENCE at 2000, but prints the deduped wake rows
+# and UNREAD STATUS unbounded, and OPEN DECISIONS is fleet-wide and runs even on
+# the empty-queue fast path. Emitting memory after it would make the per-file cap
+# a guarantee only for a home with a quiet queue; a busy one would push the
+# memory back past the preview, including its own truncation pointer, which is
+# exactly the failure this section exists to prevent. Leading it costs the queue
+# nothing: the queue is durable and stays unacknowledged until WAKE_ACK_REQUIRED
+# runs, AGENTS.md section 8 re-drains it at the start of every wake-handling turn,
+# and the drain contract independently forces it before any action - so a preview
+# that cuts into the queue re-presents it, while a cut memory delivery has no
+# such second chance. That makes the budget guarantee unconditional.
+if [ "$REEMIT" -eq 1 ]; then
+  stage operational-memory
+  section "OPERATIONAL MEMORY (context re-emit priority)"
+  printf 'This home'"'"'s durable memory, led here so a context re-emit delivers it within the\n'
+  printf 'session-open inline budget instead of past the preview a cleared agent acts on.\n'
+  printf 'Each file is bounded to fit that budget; one that was cut says so and names the\n'
+  printf 'full path to read the rest from.\n'
+  print_reemit_memory
+fi
+
 # --- 3. inactive outcomes + wake-drain -----------------------------------
 # The existing locked session-start path runs the same local inactive-outcome
 # reconciliation as the watcher poll before it presents the resulting durable
@@ -760,10 +926,13 @@ fi
 stage read-once
 section "READ-ONCE CONTRACT"
 cat <<'EOF'
-Everything below is printed in full for this session start: every state/*.meta,
+Everything in this session-start digest is printed in full: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
 data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
+and data/learnings.md (on a context re-emit the captain and learnings memory is
+printed above under OPERATIONAL MEMORY rather than below in CONTEXT, bounded per
+file to fit that delivery - only a memory file that printed its own truncation
+pointer there is worth re-reading, and only from the path that pointer names).
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
@@ -883,11 +1052,15 @@ fi
 # take (see this file's ORDERING note).
 stage context
 section "CONTEXT"
-print_file_or_absent "$DATA/projects.md" "data/projects.md"
-print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
-print_file_or_absent "$DATA/captain.md" "data/captain.md"
-print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
-print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+print_context_navigation
+if [ "$REEMIT" -eq 1 ]; then
+  printf '\ndata/captain.md, data/captain-shared.md, and data/learnings.md were printed above under\n'
+  printf 'OPERATIONAL MEMORY (context re-emit priority), ahead of the wake queue and the bulky fleet\n'
+  printf 'state, so this re-emit delivers this home'"'"'s memory within the session-open inline budget.\n'
+  printf 'Each was bounded to fit it; any file cut there named its own full path to read the rest from.\n'
+else
+  print_context_memory
+fi
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step

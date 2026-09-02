@@ -4,7 +4,9 @@
 #
 # ONE owner of the steering-inbox contract: the record format, sequence
 # allocation, the idempotent re-enqueue dedup, the handled/ acknowledgement,
-# the self-describing doorbell line, and the watcher's re-ring ladder policy.
+# the self-describing doorbell line (including the correlated-reply directive it
+# appends for a from-firstmate marked request), and the watcher's re-ring ladder
+# policy.
 # bin/fm-send.sh writes and rings locally, the host-local remote steer leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) writes idempotently and rings
 # on the remote host, bin/fm-watch.sh polls and re-rings, and the brief
@@ -70,6 +72,11 @@ _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_TASK_INBOX_LIB_DIR/fm-wake-lib.sh"
 # shellcheck source=/dev/null
 . "$_FM_TASK_INBOX_LIB_DIR/fm-backend.sh"
+# The from-firstmate carrier constant, so the doorbell can recognise a marked
+# secondmate request without restating the marker bytes. fm-operational-input.sh
+# is dependency-free and side-effect-free on source.
+# shellcheck source=bin/fm-operational-input.sh
+. "$_FM_TASK_INBOX_LIB_DIR/fm-operational-input.sh"
 
 FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
@@ -238,14 +245,93 @@ fm_task_inbox_body() {  # <record-path>
   return 1
 }
 
+# 0 when a record is a from-firstmate MARKED request: its body begins with the
+# from-firstmate carrier and carries a corr= correlation token. Reads the record
+# body once; a missing or unreadable record, or one without the carrier, is
+# treated as not marked. This is a doorbell-only classifier: the durable record
+# body is the pinned wire contract (bin/fm-send.sh), so nothing here rewrites it.
+fm_task_inbox_record_is_marked() {  # <record-path>
+  local rec=$1 body
+  [ -f "$rec" ] || return 1
+  body=$(fm_task_inbox_body "$rec" 2>/dev/null) || return 1
+  case "$body" in
+    "$FM_FROMFIRST_MARK"*) ;;
+    *) return 1 ;;
+  esac
+  printf '%s' "$body" | grep -Eq 'corr=[A-Fa-f0-9]{16}'
+}
+
 # The constant self-describing doorbell line for the inbox containing a record.
 # Self-describing on purpose: a worker whose brief predates the inbox contract
 # still receives the complete instruction in the line itself.
+#
+# A from-firstmate MARKED request (a request routed to a secondmate, carrying a
+# corr= token) gets a correlated-reply directive appended to the SAME single
+# line. This is the backstop for a secondmate whose context was cleared: a /clear
+# discards its charter (which is where the "reply with the corr token on your
+# status channel" rule lives) and its own learnings, and only its next full
+# startup would restore them - so without this a freshly cleared mate does the
+# work and answers only in its pane, and the parent's missed-report guard reposts
+# the request it is already handling. The directive rides the doorbell because
+# the durable record body is a pinned wire contract (bin/fm-send.sh) that the
+# remote idempotent enqueue and the request summary both depend on. It is
+# GENERIC - it never inlines this record's own corr value, only names the token -
+# so every marked record in one inbox still rings an identical drain-all
+# doorbell.
+#
+# WHERE the directive sends the reply depends on which leg wrote the record. A
+# cleared mate cannot be sent to a file nothing reads, and it also cannot be
+# sent to its charter - the charter is precisely what /clear destroyed, and no
+# digest section re-injects it - so the directive names a concrete path for
+# every inbox shape this library actually owns, and only falls back to
+# charter-relative phrasing for a shape it does not recognise:
+#   - the canonical LOCAL secondmate inbox, <home>/state/<id>.inbox, whose
+#     sibling <home>/state/<id>.status is exactly the parent's correlated reply
+#     channel (bin/fm-send.sh writes there, bin/fm-pending-reply-lib.sh reads
+#     it). There the directive names that concrete sibling.
+#   - the host-local remote steer leg, which writes under
+#     <remote-home>/state/parent-route/<id>.inbox
+#     (bin/fm-remote-secondmate-control.sh CONTROL_STATE). There the derived
+#     sibling would be parent-route/<id>.status, which NOTHING reads: a remote
+#     mate's replies reach the parent only through the fixed append-only relay
+#     log <remote-home>/state/parent-replies.status, the path
+#     bin/fm-remote-home-seed.sh writes into that home's charter copy and
+#     bin/fm-procevent-remote-reply.sh mirrors back. That log is a per-home
+#     constant, not a per-record derivation, so it is named directly from the
+#     directory CONTAINING parent-route.
+#   - any OTHER sub-plane is one this library does not own; it guesses no path
+#     and defers to the charter, which is still better than an authoritative
+#     wrong one.
+# The discriminator is the inbox directory's PARENT basename: 'state' is the
+# home-state shape, 'parent-route' is the remote steer leg, anything else is an
+# unrecognised sub-plane.
 fm_task_inbox_doorbell_line() {  # <record-path>
-  local dir=${1%/*} abs
+  local dir=${1%/*} abs line parent home_state status_file
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
-  printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then mv each handled file to %s/handled/.' \
-    "$abs" "$abs"
+  line=$(printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then mv each handled file to %s/handled/.' \
+    "$abs" "$abs")
+  if fm_task_inbox_record_is_marked "$1"; then
+    parent=${abs%/*}
+    home_state=${parent%/*}
+    status_file=
+    case "${parent##*/}" in
+      state) status_file="${abs%.inbox}.status" ;;
+      parent-route)
+        # A parent with no directory component of its own is not the shape this
+        # names, so it falls through to the path-agnostic wording rather than
+        # inventing a relative path.
+        if [ -n "$home_state" ] && [ "$home_state" != "$parent" ]; then
+          status_file="$home_state/parent-replies.status"
+        fi
+        ;;
+    esac
+    if [ -n "$status_file" ]; then
+      line="$line Each is a from-firstmate request: after doing it, append one status line that includes its corr=<id> token (shown in the request) to $status_file - the main firstmate reads only that status file, not this pane, so a reply only here is lost."
+    else
+      line="$line Each is a from-firstmate request: after doing it, reply on your parent status channel (the report file your charter names) including its corr=<id> token (shown in the request), never only in this pane, or the parent never sees it."
+    fi
+  fi
+  printf '%s' "$line"
 }
 
 # Ring the doorbell, best-effort: one advisory composer pre-check, then the

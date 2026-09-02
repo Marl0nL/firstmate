@@ -240,6 +240,160 @@ test_run_clear_and_compact_reemit() {
   pass "run wrapper: clear and compact re-emit the digest without repeating startup sweeps"
 }
 
+# A /clear (and a compaction) discards this session's charter and prior context;
+# AGENTS.md is re-injected by the harness, but data/captain.md and
+# data/learnings.md reach the agent only through this digest. The run-tier
+# channel persists an oversized payload to a file and previews it from the HEAD
+# (Claude's inline cap is ~10k characters), so a re-emit must LEAD with that
+# memory instead of ordering it last behind the bulky fleet state. It must also
+# lead the WAKE QUEUE, which carries no aggregate byte budget of its own, or the
+# per-file memory bound only holds for a home with a quiet queue. This drives
+# the real fm-session-start.sh through the run wrapper and pins that the cleared
+# memory now lands ahead of both the WAKE QUEUE and FLEET STATE and within the
+# inline budget, printed once, while a true startup keeps the original
+# memory-after-fleet-state order.
+test_run_clear_reemit_leads_with_home_memory() {
+  local root="$TMP_ROOT/run-clear-memory" out status=0
+  local mark op_line wake_line fleet_line ctx_line mark_line
+  local startup_out s_mark_line s_fleet_line s_wake_line
+  local prefix offset
+  mark="LEARNING-MARKER-reply-to-a-marked-request-with-its-corr-token"
+  make_run_primary "$root"
+  printf '# learnings\n\n## %s\nreply on the parent status channel including the corr= token.\n' "$mark" \
+    > "$root/data/learnings.md"
+  printf '# captain\n- terse status lines.\n' > "$root/data/captain.md"
+  # A live task so FLEET STATE has real bulk that memory must precede.
+  printf 'id=deploy\nkind=crewmate\nharness=claude\nbackend=tmux\nwindow=fm-deploy\n' \
+    > "$root/state/deploy.meta"
+  printf 'working: implementing the change\n' > "$root/state/deploy.status"
+
+  run_hook "$root" --source startup </dev/null >/dev/null
+  assert_present "$root/state/.session-start-complete" \
+    "startup did not publish the completion proof the clear re-emit needs"
+
+  out=$(run_hook "$root" --source clear </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper clear re-emit with home memory"
+
+  assert_contains "$out" "$REEMIT_BANNER$root" "clear did not re-emit the digest"
+  assert_contains "$out" "OPERATIONAL MEMORY (context re-emit priority)" \
+    "the clear re-emit did not lead with an operational-memory section"
+  assert_contains "$out" "$mark" "the clear re-emit dropped this home's learnings memory"
+
+  op_line=$(printf '%s\n' "$out" | grep -n 'OPERATIONAL MEMORY (context re-emit priority)' | head -1 | cut -d: -f1)
+  wake_line=$(printf '%s\n' "$out" | grep -n '^WAKE QUEUE$' | head -1 | cut -d: -f1)
+  fleet_line=$(printf '%s\n' "$out" | grep -n '^FLEET STATE$' | head -1 | cut -d: -f1)
+  ctx_line=$(printf '%s\n' "$out" | grep -n '^CONTEXT$' | head -1 | cut -d: -f1)
+  mark_line=$(printf '%s\n' "$out" | grep -n "$mark" | head -1 | cut -d: -f1)
+  [ -n "$op_line" ] && [ -n "$wake_line" ] && [ -n "$fleet_line" ] && [ -n "$ctx_line" ] \
+    && [ -n "$mark_line" ] \
+    || fail "clear re-emit missing a required section header: $out"
+  # Ahead of the unbudgeted wake queue, so the per-file memory bound is a
+  # preview guarantee for a busy home and not only a quiet one.
+  [ "$op_line" -lt "$wake_line" ] \
+    || fail "OPERATIONAL MEMORY did not precede the WAKE QUEUE on the clear re-emit"
+  [ "$mark_line" -lt "$wake_line" ] \
+    || fail "the cleared learnings memory landed behind the unbudgeted wake queue"
+  [ "$op_line" -lt "$fleet_line" ] \
+    || fail "OPERATIONAL MEMORY did not precede FLEET STATE on the clear re-emit"
+  [ "$mark_line" -lt "$fleet_line" ] \
+    || fail "the cleared learnings memory landed behind the bulky FLEET STATE"
+  [ "$fleet_line" -lt "$ctx_line" ] \
+    || fail "FLEET STATE did not precede CONTEXT on the clear re-emit"
+
+  # Printed once: CONTEXT points back to the memory section instead of repeating it.
+  [ "$(printf '%s\n' "$out" | grep -c "$mark")" -eq 1 ] \
+    || fail "the cleared memory was printed more than once on the re-emit: $out"
+  assert_contains "$out" "were printed above under" \
+    "CONTEXT did not point back to the operational-memory section on the re-emit"
+
+  # Within the documented inline budget: the memory a cleared agent needs lands
+  # in the HEAD preview rather than the persisted-to-file tail.
+  prefix=${out%%"$mark"*}
+  offset=$(printf '%s' "$prefix" | wc -m | tr -d ' ')
+  [ "$offset" -le 10000 ] \
+    || fail "the cleared learnings memory landed at char $offset, past the ~10k inline preview budget"
+
+  # A true startup is unchanged: memory stays in CONTEXT, after the live fleet
+  # state that a tail-truncating startup delivery must keep.
+  startup_out=$(run_hook "$root" --source startup </dev/null)
+  assert_not_contains "$startup_out" "OPERATIONAL MEMORY (context re-emit priority)" \
+    "a true startup wrongly moved memory into the re-emit-only section"
+  s_mark_line=$(printf '%s\n' "$startup_out" | grep -n "$mark" | head -1 | cut -d: -f1)
+  s_fleet_line=$(printf '%s\n' "$startup_out" | grep -n '^FLEET STATE$' | head -1 | cut -d: -f1)
+  s_wake_line=$(printf '%s\n' "$startup_out" | grep -n '^WAKE QUEUE$' | head -1 | cut -d: -f1)
+  [ -n "$s_mark_line" ] && [ -n "$s_fleet_line" ] && [ -n "$s_wake_line" ] \
+    || fail "startup digest missing memory, WAKE QUEUE, or FLEET STATE: $startup_out"
+  [ "$s_fleet_line" -lt "$s_mark_line" ] \
+    || fail "startup regressed: memory no longer sits behind the live fleet state"
+  [ "$s_wake_line" -lt "$s_fleet_line" ] \
+    || fail "startup regressed: the wake queue no longer leads the fleet state"
+
+  pass "run wrapper: a clear re-emit leads with home memory within the inline budget; startup order is unchanged"
+}
+
+# Leading with memory only helps if the memory itself FITS: config/startup-memory
+# -budget sanctions homes far larger than the ~10k-character inline preview, so
+# an unbounded lead would let one file consume the whole preview and push the
+# fleet state, the read-once contract, and the rest of the memory back out of it
+# - the same delivery failure the reorder exists to fix, relocated. So the
+# re-emit section bounds each memory file and an over-cap file names its own full
+# path to read the rest from. The startup path must stay uncapped: it prints for
+# an agent that reconciles the whole digest, not one acting on a preview.
+test_run_clear_reemit_bounds_oversized_home_memory() {
+  local root="$TMP_ROOT/run-clear-memory-cap" out startup_out status=0
+  local head_mark tail_mark small_mark size
+  head_mark="LEARNING-HEAD-reply-with-the-corr-token"
+  tail_mark="LEARNING-TAIL-past-any-sane-preview-budget"
+  small_mark="CAPTAIN-SMALL-terse-status-lines"
+  make_run_primary "$root"
+  {
+    printf '# learnings\n\n## %s\n' "$head_mark"
+    # Well past any per-file bound, but still an ordinary within-budget home.
+    for _ in $(seq 1 200); do
+      printf 'a durable operating lesson that is long enough to matter here.\n'
+    done
+    printf '## %s\n' "$tail_mark"
+  } > "$root/data/learnings.md"
+  printf '# captain\n- %s\n' "$small_mark" > "$root/data/captain.md"
+
+  run_hook "$root" --source startup </dev/null >/dev/null
+  assert_present "$root/state/.session-start-complete" \
+    "startup did not publish the completion proof the clear re-emit needs"
+
+  out=$(run_hook "$root" --source clear </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper clear re-emit with oversized home memory"
+
+  # The head survives; the tail is cut and replaced by one recoverable pointer.
+  assert_contains "$out" "$head_mark" "the bounded re-emit dropped the head of this home's learnings"
+  assert_not_contains "$out" "$tail_mark" \
+    "an oversized learnings file was printed unbounded into the re-emit preview"
+  assert_contains "$out" "read the full file at $root/data/learnings.md" \
+    "the truncated memory file did not name the full path to read the rest from"
+  size=$(wc -c < "$root/data/learnings.md" | tr -d ' ')
+  assert_contains "$out" "($size bytes)" \
+    "the truncation pointer did not name the file's full size"
+  [ "$(printf '%s\n' "$out" | grep -c 'truncated to fit the re-emit preview budget')" -eq 1 ] \
+    || fail "the bounded memory file did not emit exactly one truncation pointer: $out"
+
+  # A file inside the bound is still printed whole, pointer and all absent.
+  assert_contains "$out" "$small_mark" "a small memory file was not printed in full on the re-emit"
+
+  # The whole preview-critical head - memory plus the supervision block that
+  # follows it - now fits the delivered budget instead of one file eating it.
+  assert_contains "$out" "READ-ONCE CONTRACT" "the bounded re-emit lost a section behind the memory"
+  [ "$(printf '%s' "${out%%READ-ONCE CONTRACT*}" | wc -m | tr -d ' ')" -le 10000 ] \
+    || fail "the re-emit preamble plus bounded memory still overran the ~10k inline preview budget"
+
+  # Startup is unbounded: it prints the same file whole, tail included.
+  startup_out=$(run_hook "$root" --source startup </dev/null)
+  assert_contains "$startup_out" "$tail_mark" \
+    "startup regressed: the re-emit-only bound leaked into the full digest"
+  assert_not_contains "$startup_out" "truncated to fit the re-emit preview budget" \
+    "startup wrongly truncated a memory file it prints in full"
+
+  pass "run wrapper: a clear re-emit bounds oversized home memory with a recoverable pointer; startup stays whole"
+}
+
 test_run_rebuild_forwards_source_to_drifted_instruction_refresh() {
   local root="$TMP_ROOT/run-instruction-refresh" baseline compact_out clear_out resume_out
   make_run_primary "$root"
@@ -543,6 +697,8 @@ test_owned_lock_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit
+test_run_clear_reemit_leads_with_home_memory
+test_run_clear_reemit_bounds_oversized_home_memory
 test_run_rebuild_forwards_source_to_drifted_instruction_refresh
 test_run_compact_without_completion_refreshes_before_finishing_startup
 test_run_clear_without_completion_finishes_startup
