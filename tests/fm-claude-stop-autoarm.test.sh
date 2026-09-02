@@ -731,8 +731,8 @@ test_arming_claim_is_never_reclaimed() {
   sleep 60 &
   pid=$!
   record_autoarm_owner "$dir" "$pid"
-  # An owner foregrounds the arm for the whole watcher cycle, so "arming" is in
-  # progress no matter how old its ledger entry is.
+  # An owner waits on its arm child for the whole watcher cycle, so "arming" is
+  # in progress no matter how old its ledger entry is.
   record_autoarm_epoch "$dir" 464 "$pid" arming
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   kill "$pid" 2>/dev/null || true
@@ -1043,23 +1043,31 @@ test_renewal_active_in_marked_secondmate_home() {
 # The timeout Claude Code declares for the auto-arm Stop entry, read out of the
 # tracked registration it consumes. jq is optional on this project's hosts and a
 # missing optional tool must never take the rest of this suite down with it, so
-# collect each leaf hook object of the registration and report the numeric
-# timeout of the one whose command is this hook.
+# this walks the registration's brace structure instead of its line shape: the
+# innermost object carrying this hook's command is the one whose "timeout"
+# governs it, and a purely cosmetic reflow - that object put on one line, or
+# split differently - is a semantically identical edit that must keep resolving
+# to the same number rather than silently reading as "no declared timeout".
 declared_stop_hook_timeout() {
   awk '
-    /^[[:space:]]*{/ { entry = ""; next }
-    /^[[:space:]]*}/ {
-      if (entry ~ /fm-claude-stop-autoarm\.sh/ \
-        && match(entry, /"timeout"[[:space:]]*:[[:space:]]*[0-9]+/)) {
-        found = substr(entry, RSTART, RLENGTH)
-        sub(/^[^0-9]*/, "", found)
-        print found
-        exit
+    { text = text $0 " " }
+    END {
+      depth = 0
+      for (i = 1; i <= length(text); i++) {
+        c = substr(text, i, 1)
+        if (c == "{") { start[++depth] = i; continue }
+        if (c != "}" || depth == 0) continue
+        object = substr(text, start[depth], i - start[depth] + 1)
+        depth--
+        if (object ~ /fm-claude-stop-autoarm\.sh/ \
+          && match(object, /"timeout"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+          found = substr(object, RSTART, RLENGTH)
+          sub(/^[^0-9]*/, "", found)
+          print found
+          exit
+        }
       }
-      entry = ""
-      next
     }
-    { entry = entry $0 }
   ' "$ROOT/.claude/settings.json"
 }
 
@@ -1067,11 +1075,13 @@ declared_stop_hook_timeout() {
 # the timeout declared for this hook in the tracked .claude/settings.json, and
 # that bound now lives in two files. Pin the relationship through behavior: read
 # the declared timeout out of the registration Claude Code actually consumes,
-# and prove the hook refuses a budget that large instead of parking past the
-# deadline the way the original blind spot did. Lowering the declared timeout
-# without lowering the hook's ceiling fails here.
+# prove the hook refuses a budget that large instead of parking past the deadline
+# the way the original blind spot did, and prove the budget it falls back to -
+# what an unconfigured home actually parks for - is itself below that deadline.
+# Lowering the declared timeout without lowering the hook's ceiling fails here,
+# and so does leaving the fallback behind when the ceiling comes down.
 test_renewal_budget_reaching_the_declared_timeout_is_refused() {
-  local declared dir out status
+  local declared dir out status fallback
   declared=$(declared_stop_hook_timeout)
   case "$declared" in
     ''|*[!0-9]*) fail "the tracked Stop registration must declare a numeric auto-arm timeout, got: '$declared'" ;;
@@ -1086,6 +1096,20 @@ test_renewal_budget_reaching_the_declared_timeout_is_refused() {
   assert_contains "$out" "refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=$declared" \
     "a budget reaching the declared Stop-hook timeout must be refused out loud, not accepted silently"
   assert_contains "$out" "firstmate watcher wake" "the refusal swallowed the ordinary wake banner"
+  fallback=$(printf '%s\n' "$out" | sed -n 's/.*using \([0-9][0-9]*\)s instead.*/\1/p' | head -1)
+  case "$fallback" in
+    ''|*[!0-9]*) fail "the refusal must name the numeric budget it fell back to, got: '$fallback'" ;;
+  esac
+  [ "$fallback" -gt 0 ] && [ "$fallback" -lt "$declared" ] \
+    || fail "the built-in renewal budget ${fallback}s must stay below the ${declared}s timeout declared for this hook"
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=00
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  expect_code 2 "$status" "a zero renewal budget must leave ordinary translation intact"
+  assert_contains "$out" "refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=00" \
+    "a leading-zeros budget normalizing to zero must be refused, not accepted as an instant renewal"
+  assert_present "$dir/state/arm-ran" "a refused zero budget must still park a real arm"
+  assert_contains "$out" "firstmate watcher wake" "a refused zero budget must keep ordinary translation intact"
   export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=not-a-number
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET

@@ -1038,8 +1038,8 @@ fm_failure_episode_reset() {
 # lock BEFORE it writes "arming", so until it does the ledger still names the
 # PREVIOUS owner and the two pids cannot match; a just-started claim is never
 # mistaken for an abandoned one. Condition 4 treats "arming" as in progress no
-# matter how old, because the owner foregrounds fm-watch-arm.sh for the whole
-# watcher cycle, which legitimately runs for hours.
+# matter how old, because the owner waits on its fm-watch-arm.sh child for the
+# whole watcher cycle, which legitimately runs for hours.
 #
 # The ledger alone cannot prove every abandonment, though: an entry still reading
 # "arming", or no entry at all, says nothing about a recorded pid the operating

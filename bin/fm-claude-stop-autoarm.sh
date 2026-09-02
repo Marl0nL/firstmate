@@ -99,18 +99,28 @@ esac
 # RENEWAL_BUDGET_CEILING mirrors the declared timeout, which lives in
 # .claude/settings.json; tests/fm-claude-stop-autoarm.test.sh pins the tracked
 # registration against this ceiling so the two files cannot drift apart.
+# The fallback is DERIVED from that ceiling rather than written beside it, so the
+# ceiling binds the unconfigured default too: lowering the declared timeout and
+# this ceiling lowers every home's budget with them instead of leaving a stale
+# default parked past the kill timer, which would restore the original blind spot
+# for exactly the homes that configured nothing.
 HOOK_START=$(date +%s)
 RENEWAL_BUDGET_CEILING=28800
-RENEWAL_BUDGET_DEFAULT=27000
+RENEWAL_BUDGET_DEFAULT=$((RENEWAL_BUDGET_CEILING - RENEWAL_BUDGET_CEILING / 16))
 RENEWAL_BUDGET_REQUESTED=${FM_CLAUDE_AUTOARM_RENEWAL_BUDGET:-$RENEWAL_BUDGET_DEFAULT}
 RENEWAL_BUDGET=$RENEWAL_BUDGET_DEFAULT
 RENEWAL_BUDGET_OK=0
 case "$RENEWAL_BUDGET_REQUESTED" in
   # The nine-digit arm keeps the comparison below inside the shell's integer
   # range; anything that long is far past the ceiling anyway.
-  ''|*[!0-9]*|0|[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*) : ;;
+  ''|*[!0-9]*|[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*) : ;;
   *)
-    if [ "$((10#$RENEWAL_BUDGET_REQUESTED))" -lt "$RENEWAL_BUDGET_CEILING" ]; then
+    # "10#" strips leading zeros, and the positive test is what refuses the
+    # zeros a case pattern cannot enumerate - "00", "000" - rather than letting
+    # them through as budget 0, which renews the instant the arm starts and
+    # rewakes forever without a watcher ever running.
+    if [ "$((10#$RENEWAL_BUDGET_REQUESTED))" -gt 0 ] &&
+      [ "$((10#$RENEWAL_BUDGET_REQUESTED))" -lt "$RENEWAL_BUDGET_CEILING" ]; then
       RENEWAL_BUDGET=$((10#$RENEWAL_BUDGET_REQUESTED))
       RENEWAL_BUDGET_OK=1
     fi
