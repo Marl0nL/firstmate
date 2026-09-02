@@ -202,6 +202,29 @@ EOF
   pass "fm-guard stale banner: a running deferred network stage alone is not a mid-turn lapse"
 }
 
+# The same startup shape as the network-stage case: bin/fm-session-start.sh runs
+# the drain, which presents the queued wake and then calls this pull guard - all
+# before the turn's Stop arms the watcher that will deliver it. A leftover
+# undelivered wake after a host restart is that ordinary shape, not a lapse.
+test_pending_wake_alone_does_not_alarm() {
+  local dir home out control
+  dir=$(make_guard_case pending-wake-only)
+  home=$(case_home "$dir")
+  rm -f "$home/state/task.meta"
+  printf '%s\t1\tcheck\tstartup-network\tcheck: startup-network: finished\n' "$(date +%s)" > "$home/state/.wake-queue"
+  out=$(run_guard_case "$dir")
+  assert_not_contains "$out" "WATCHER DOWN" \
+    "a home whose only need is a queued wake must not raise the mid-turn watcher-down alarm"
+  assert_absent "$home/state/.guard-watcher-stale-banner" \
+    "a queue-only home must not open a stale-banner episode that would mute a later genuine lapse"
+  # Paired control on the same watcher state: a real in-flight task still alarms.
+  control=$(make_guard_case pending-wake-control)
+  out=$(run_guard_case "$control")
+  assert_contains "$out" "WATCHER DOWN" \
+    "an in-flight task with no live watcher must still raise the full banner"
+  pass "fm-guard stale banner: a pending queued wake alone is not a mid-turn lapse"
+}
+
 test_x_mode_without_live_watcher_stays_alarm() {
   local dir home out
   dir=$(make_guard_case x-mode-no-live)
@@ -757,6 +780,7 @@ test_persistent_no_watcher_episode_survives_beacon_touch
 test_fresh_beacon_without_live_watcher_stays_alarm
 test_x_mode_without_live_watcher_stays_alarm
 test_running_network_stage_alone_does_not_alarm
+test_pending_wake_alone_does_not_alarm
 test_healthy_recovery_rearms_next_stale_episode
 test_concurrent_same_episode_prints_one_full_banner
 test_home_isolation

@@ -210,6 +210,14 @@ test_predicate_network_stage_terminal_grace_bridges_wake() {
   [ "$FM_SUP_NETWORK_STAGE" = false ] || fail "once the wake is queued the bridge must end; the queue condition owns the need"
   [ "$FM_SUP_QUEUE_PENDING" = true ] || fail "the appended wake row must read as pending"
   [ "$FM_SUP_NEEDED" = true ] || fail "the queued wake must keep supervision needed with no gap"
+  # A row no drain can ever consume is not the appended wake, so it must not hand
+  # the need over to a queue condition that will never see it either.
+  printf '%s\t1\tcheck\tstartup\n' "$(date +%s)" > "$state/.wake-queue"
+  write_network_status_terminal "$state" 'done' "$(date +%s)"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_QUEUE_PENDING" = false ] || fail "a truncated row must not read as an ackable queued wake"
+  [ "$FM_SUP_NETWORK_STAGE" = true ] || fail "an unackable-only queue must not switch the bridge off; nothing else would hold the need"
+  [ "$FM_SUP_NEEDED" = true ] || fail "the pre-append gap must stay covered when the queue holds only an unackable row"
   rm -f "$state/.wake-queue"
   # And the bridge is bounded: an old terminal record cannot pin supervision on.
   write_network_status_terminal "$state" 'done' "$(( $(date +%s) - 600 ))"
