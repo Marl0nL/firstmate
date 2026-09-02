@@ -761,6 +761,9 @@ test_create_task_refuses_when_preexisting_husk_tab_remains() {
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/6.out"
   printf '1\n' > "$resp/7.exit"
   printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-stale-husk","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-stale-husk","workspace_id":"w1"}]}}\n' > "$resp/8.out"
+  # 9: the safe-close re-list - the stale husk is still there alongside the
+  # replacement, so tearing the replacement down cannot empty the workspace.
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-stale-husk","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-stale-husk","workspace_id":"w1"}]}}\n' > "$resp/9.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-stale-husk /tmp/proj' "$ROOT" 2>&1 )
@@ -772,6 +775,35 @@ test_create_task_refuses_when_preexisting_husk_tab_remains() {
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t3' \
     "create_task must tear its own replacement tab back down on the failure path (otherwise a retry dies on the leftover label)"
   pass "fm_backend_herdr_create_task: refuses success when a preexisting husk tab remains after replacement"
+}
+
+test_create_task_leaves_residue_tab_when_it_is_the_workspaces_last() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/husk-residue-last-tab"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-lasttab","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
+  herdr_pi_shell > "$resp/5.out"   # process-info: bare shell -> husk
+  # 6: tab create -> the replacement; 7: tab close of the husk (silent success)
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/6.out"
+  # 8: the verification tab list comes back unparseable, so create_task fails
+  # and wants its own replacement tab torn back down.
+  printf '{"result":{"tabs":"not-an-array"}}\n' > "$resp/8.out"
+  # 9: the safe-close re-list - the replacement is now the workspace's ONLY tab,
+  # so closing it would delete the whole workspace (real-herdr behavior).
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-lasttab","workspace_id":"w1"}]}}\n' > "$resp/9.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-lasttab /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must fail when the husk-removal verification cannot be parsed"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the husk it replaced"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t3' \
+    "the residue teardown must NOT close its replacement tab when that is the workspace's last tab - closing it deletes the whole workspace"
+  assert_contains "$out" "fm-lasttab" "the operator hint must name the tab left in place"
+  assert_contains "$out" "close it manually" "the operator hint must say the leftover tab has to be removed by hand"
+  pass "fm_backend_herdr_create_task: a failure-path residue teardown never empties the workspace, it hands the operator the leftover instead"
 }
 
 test_create_task_refuses_when_agent_state_ambiguous() {
@@ -4814,6 +4846,7 @@ test_create_task_closes_and_replaces_dead_pane_husk
 test_create_task_closes_and_replaces_no_agent_husk
 test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains
+test_create_task_leaves_residue_tab_when_it_is_the_workspaces_last
 test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_pane_agent_state_live_unregistered_claude_reads_live
