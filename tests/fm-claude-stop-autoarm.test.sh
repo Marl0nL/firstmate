@@ -1040,6 +1040,70 @@ test_renewal_active_in_marked_secondmate_home() {
   pass "auto-arm: declared-timeout renewal works identically in a marked secondmate home"
 }
 
+# The renewal only closes the blind spot while the effective budget stays BELOW
+# the timeout declared for this hook in the tracked .claude/settings.json, and
+# that bound now lives in two files. Pin the relationship through behavior: read
+# the declared timeout out of the registration Claude Code actually consumes,
+# and prove the hook refuses a budget that large instead of parking past the
+# deadline the way the original blind spot did. Lowering the declared timeout
+# without lowering the hook's ceiling fails here.
+test_renewal_budget_reaching_the_declared_timeout_is_refused() {
+  local declared dir out status
+  command -v jq >/dev/null 2>&1 || fail "test host must provide jq"
+  declared=$(jq -r '.hooks.Stop[].hooks[] | select(.command | contains("fm-claude-stop-autoarm.sh")) | .timeout' \
+    "$ROOT/.claude/settings.json")
+  case "$declared" in
+    ''|*[!0-9]*) fail "the tracked Stop registration must declare a numeric auto-arm timeout, got: '$declared'" ;;
+  esac
+  dir=$(make_primary_dir "$TMP_ROOT/renewal-budget-ceiling")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET="$declared"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  expect_code 2 "$status" "a refused renewal budget must leave ordinary translation intact"
+  assert_contains "$out" "refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=$declared" \
+    "a budget reaching the declared Stop-hook timeout must be refused out loud, not accepted silently"
+  assert_contains "$out" "firstmate watcher wake" "the refusal swallowed the ordinary wake banner"
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=not-a-number
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  expect_code 2 "$status" "an unusable renewal budget must leave ordinary translation intact"
+  assert_contains "$out" "refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=not-a-number" \
+    "an unusable budget must be refused out loud"
+  pass "auto-arm: a renewal budget reaching the declared Stop-hook timeout is refused for the safe default"
+}
+
+# The renewal TERM closes only this hook's own arm. When that arm was attached
+# to a peer watcher, the peer survives with a fresh beacon, so the home is still
+# supervised and waking the model would spend a turn for nothing.
+test_renewal_with_surviving_live_watcher_is_silent() {
+  local dir out status pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/renewal-live-watcher")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" parks
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the live watcher holder for the renewal close"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  printf 'session=sess-autoarm\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  export FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=2
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  unset FM_CLAUDE_AUTOARM_RENEWAL_BUDGET
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a renewal close that leaves a live fresh watcher must not spend a turn"
+  [ -z "$out" ] || fail "renewal with a surviving watcher produced output: $out"
+  [ "$(epoch_outcome "$dir")" = clean ] || fail "renewal with a surviving watcher must record outcome=clean, got: $(epoch_outcome "$dir")"
+  assert_present "$dir/state/arm-terminated" "the renewal did not close the parked arm"
+  assert_absent "$dir/state/.claude-autoarm-renewal" "renewal left its marker behind"
+  assert_absent "$dir/state/.turnend-claude-blocks" "a benign renewal close must clear the prior block budget"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "a benign renewal close must clear the failure episode"
+  pass "auto-arm: a renewal leaving a verified live watcher closes silently for zero turns"
+}
+
 test_need_vanished_mid_cycle_closes_quietly() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/vanished")
@@ -1120,6 +1184,8 @@ test_renewal_budget_does_not_widen_owner_gate
 test_no_renewal_before_deadline
 test_renewal_ledger_records_continuity_not_interrupt
 test_renewal_active_in_marked_secondmate_home
+test_renewal_budget_reaching_the_declared_timeout_is_refused
+test_renewal_with_surviving_live_watcher_is_silent
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home

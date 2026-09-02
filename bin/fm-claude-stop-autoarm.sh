@@ -36,13 +36,15 @@
 #     go blind at exactly that bound (verified 2026-09-02, Claude 2.1.258;
 #     docs/turnend-guard.md). Shortly before the deadline
 #     (FM_CLAUDE_AUTOARM_RENEWAL_BUDGET seconds, default 27000, safely below
-#     the declared 28800) a watchdog closes the arm under the pid-matched
-#     renewal marker so the lifecycle ledger records continuity-renewal, then
-#     the owner exits 2 with a benign renewal banner: one bounded turn ends,
-#     the next Stop fires, and a fresh firing arms with a fresh budget. The
-#     renewal re-checks the AFK, supervision-need, and post-alarm gates first
-#     and records outcome=renewal so the synchronous guard treats it as owned
-#     recovery without consuming its block budget.
+#     the declared 28800, and refused with a stderr notice when it would reach
+#     that ceiling) a watchdog closes the arm under the pid-matched renewal
+#     marker so the lifecycle ledger records continuity-renewal, then the owner
+#     exits 2 with a benign renewal banner: one bounded turn ends, the next
+#     Stop fires, and a fresh firing arms with a fresh budget. The renewal
+#     re-checks the AFK, supervision-need, live-watcher, and post-alarm gates
+#     first - a close that leaves another verified live watcher costs no turn
+#     at all - and otherwise records outcome=renewal so the synchronous guard
+#     treats it as owned recovery without consuming its block budget.
 #   - Translation: while supervision is still needed and AFK remains inactive,
 #     an actionable arm close (signal:/stale:/check:/heartbeat) prints one
 #     rewake banner to stderr and exits 2, which wakes Claude even while idle
@@ -86,15 +88,37 @@ case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
   *) AUTOARM_ATTEMPTS=2 ;;
 esac
-# Seconds this hook may hold an arm open before renewing continuity. Must stay
-# safely below the declared "timeout" on this hook's .claude/settings.json entry
-# (28800), because at that bound Claude Code SIGTERMs this whole process group,
-# watcher included, with no re-arm until the session's next real turn end.
+# Seconds this hook may hold an arm open before renewing continuity. At the
+# declared "timeout" on this hook's .claude/settings.json entry Claude Code
+# SIGTERMs this whole process group, watcher included, with no re-arm until the
+# session's next real turn end, so a budget that reaches that ceiling silently
+# reinstates the exact blind spot the renewal exists to close. Refuse any such
+# value - and any value that is not a positive number of seconds - on stderr and
+# fall back to the safe default rather than arming past the deadline.
+# RENEWAL_BUDGET_CEILING mirrors the declared timeout, which lives in
+# .claude/settings.json; tests/fm-claude-stop-autoarm.test.sh pins the tracked
+# registration against this ceiling so the two files cannot drift apart.
 HOOK_START=$(date +%s)
-RENEWAL_BUDGET=${FM_CLAUDE_AUTOARM_RENEWAL_BUDGET:-27000}
-case "$RENEWAL_BUDGET" in
-  ''|*[!0-9]*|0) RENEWAL_BUDGET=27000 ;;
+RENEWAL_BUDGET_CEILING=28800
+RENEWAL_BUDGET_DEFAULT=27000
+RENEWAL_BUDGET_REQUESTED=${FM_CLAUDE_AUTOARM_RENEWAL_BUDGET:-$RENEWAL_BUDGET_DEFAULT}
+RENEWAL_BUDGET=$RENEWAL_BUDGET_DEFAULT
+RENEWAL_BUDGET_OK=0
+case "$RENEWAL_BUDGET_REQUESTED" in
+  # The nine-digit arm keeps the comparison below inside the shell's integer
+  # range; anything that long is far past the ceiling anyway.
+  ''|*[!0-9]*|0|[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*) : ;;
+  *)
+    if [ "$((10#$RENEWAL_BUDGET_REQUESTED))" -lt "$RENEWAL_BUDGET_CEILING" ]; then
+      RENEWAL_BUDGET=$((10#$RENEWAL_BUDGET_REQUESTED))
+      RENEWAL_BUDGET_OK=1
+    fi
+    ;;
 esac
+if [ "$RENEWAL_BUDGET_OK" -eq 0 ]; then
+  printf 'firstmate: refusing FM_CLAUDE_AUTOARM_RENEWAL_BUDGET=%s - a Claude Stop auto-arm budget must be a positive number of seconds below the %ss timeout declared for this hook, at which Claude Code kills the arm and its watcher unsupervised; using %ss instead.\n' \
+    "$RENEWAL_BUDGET_REQUESTED" "$RENEWAL_BUDGET_CEILING" "$RENEWAL_BUDGET" >&2
+fi
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -159,8 +183,8 @@ fi
 
 # --- single-flight owner claim ------------------------------------------------
 # Claude runs one background process per firing with no dedupe. Exactly one
-# owner foregrounds the arm and translates its close; every other firing exits
-# 0 so one watcher cycle maps to at most one exit-2 rewake.
+# owner runs the arm as a waited child and translates its close; every other
+# firing exits 0 so one watcher cycle maps to at most one exit-2 rewake.
 #
 # A claim whose own ledger entry or recorded pid-identity proves its supervision
 # decision already finished is abandoned, not in flight: deferring to it forever
@@ -197,6 +221,22 @@ write_epoch() {  # <outcome>
     "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" > "$tmp" 2>/dev/null \
     && mv -f "$tmp" "$EPOCH" 2>/dev/null
   rm -f "$tmp" 2>/dev/null || true
+}
+
+# Terminal handling for any close this home survives with a verified live,
+# identity-matched watcher still beating: the supervision the model would be
+# woken for already exists, so the failure episode is over and this firing
+# stays silent. When the episode reset cannot complete (its lock is busy) the
+# episode is still unresolved, so keep the Stop-owned retry alive exactly as the
+# failure progression does, unless the attended fail-open already fired.
+close_with_healthy_watcher() {
+  if fm_failure_episode_reset "$STATE"; then
+    write_epoch clean
+    exit 0
+  fi
+  write_epoch failed-suppressed
+  [ -e "$FAILURE_ALARM" ] && exit 0
+  exit 2
 }
 
 write_epoch arming
@@ -312,12 +352,13 @@ done
 # --- renewal close ------------------------------------------------------------
 # The arm was closed under the continuity-renewal marker because this hook was
 # approaching its declared timeout with nothing actionable. Re-check the same
-# gates that keep an away or idle home quiet, then hand continuity to the next
-# Stop-owned firing through one benign bounded turn: exit 2 rewakes the primary,
-# its handling turn ends, the next Stop fires, and a fresh firing arms with a
-# fresh declared-timeout budget. A renewal is owned recovery, not a duplicate
-# continuation: it records outcome=renewal for the synchronous guard and never
-# advances the guard's block budget or the failure progression.
+# gates that keep an away, idle, or already-supervised home quiet, then hand
+# continuity to the next Stop-owned firing through one benign bounded turn:
+# exit 2 rewakes the primary, its handling turn ends, the next Stop fires, and a
+# fresh firing arms with a fresh declared-timeout budget. A renewal is owned
+# recovery, not a duplicate continuation: it records outcome=renewal for the
+# synchronous guard and never advances the guard's block budget or the failure
+# progression.
 if [ "$RENEWED" -eq 1 ]; then
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   if [ -e "$STATE/.afk" ]; then
@@ -327,6 +368,13 @@ if [ "$RENEWED" -eq 1 ]; then
   if ! need_supervision; then
     write_epoch clean
     exit 0
+  fi
+  # An attached arm closes only itself: the peer watcher it was following is
+  # untouched by the renewal TERM, so a home that still has a verified live
+  # watcher with a fresh beacon needs no turn at all. Zero-turn continuity is
+  # the point, so take the same benign close every other healthy path takes.
+  if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+    close_with_healthy_watcher
   fi
   # After the guard consumed the episode's attended fail-open, do not create
   # another exit-2 continuation that could defeat it.
@@ -351,15 +399,8 @@ if ! need_supervision; then
 fi
 
 if [ "$HEALTHY" -eq 1 ]; then
-  if fm_failure_episode_reset "$STATE"; then
-    write_epoch clean
-    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-    exit 0
-  fi
-  write_epoch failed-suppressed
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-  [ -e "$FAILURE_ALARM" ] && exit 0
-  exit 2
+  close_with_healthy_watcher
 fi
 
 # After the synchronous guard has consumed the episode's attended fail-open,

@@ -7,7 +7,7 @@
 # classify. Reliability depends on arming through a mechanism that SURVIVES the
 # call and NOTIFIES on exit, so firstmate must run this script as the harness's
 # own tracked background task (e.g. run_in_background), or - for a Claude
-# primary - inside the Stop asyncRewake hook's foreground process tree
+# primary - as a waited child inside the Stop asyncRewake hook's process tree
 # (bin/fm-claude-stop-autoarm.sh), where the harness owns the process group and
 # the hook's exit-2 rewake is the notification. Run it as its own standalone
 # background task, never bundled onto the tail of another command.
