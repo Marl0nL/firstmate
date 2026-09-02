@@ -846,17 +846,46 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # going through fm_backend_herdr_target_ready (which auto-starts the herdr
 # server as a side effect via fm_backend_herdr_server_ensure - fine for an
 # operation that is about to use the pane, wrong for a passive liveness
-# probe). A gone tmux window or an unqueryable herdr pane (server down, pane
-# closed), missing zellij pane, or unreadable Orca terminal simply fails, which
-# IS "does not exist" for this purpose.
+# probe). An unqueryable herdr pane (server down, pane closed), missing zellij
+# pane, or unreadable Orca terminal reads as "does not exist" here.
+# The tmux branch does NOT use `display-message -p -t <target>`: tmux marks
+# display-message's -t as CMD_FIND_CANFAIL, so an unresolvable target does NOT
+# fail - it silently falls back to the current pane and exits 0, so a gone
+# target could never read as absent (docs/verification/runtime-backends.md
+# "Endpoint absence probe" owns the dated tmux 3.5a transcript). It instead
+# probes with a listing command that genuinely fails for a gone target, matched
+# to the target shape callers pass:
+#   - a bare pane id ($TMUX_PANE) or window id (`%N`/`@N`, no colon) is already
+#     an exact selector, so `list-panes -t "$target"` reads it directly;
+#   - a "session:window" endpoint uses the exact `=ses:=win` form so a live
+#     prefix-sibling window cannot satisfy a gone target (window indices resolve
+#     under this form too), the same shape spawn_endpoint_still_present
+#     (bin/fm-spawn.sh) uses.
+# Both fail for an unreadable server/session, which IS "does not exist" here, so
+# this helper needs no has-session split (unlike spawn_endpoint_still_present,
+# which uses one to hold an unreadable server as "still present").
 # Mirrors fm-crew-state.sh's pane_readable check; exists here as one shared
 # primitive so callers that only need a fast alive/dead read (recovery
 # digests, the session-start fleet digest) do not re-derive it inline.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
-  local backend=$1 target=$2 expected_label=${3:-} session pane
+  local backend=$1 target=$2 expected_label=${3:-} session window pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      case "$target" in
+        *:*:*|'':*|*:'') return 1 ;;
+        *:*)
+          # session:window (a pinned fm-<id> name, or a window index)
+          session=${target%%:*}
+          window=${target#*:}
+          tmux list-windows -t "=$session:=$window" >/dev/null 2>&1
+          ;;
+        %*|@*)
+          # a bare pane id ($TMUX_PANE, the supervisor target) or window id
+          tmux list-panes -t "$target" >/dev/null 2>&1
+          ;;
+        # a bare window name or other shape resolves nothing exact here
+        *) return 1 ;;
+      esac
       ;;
     herdr)
       fm_backend_source herdr || return 1

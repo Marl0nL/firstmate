@@ -60,6 +60,20 @@ case "${1:-}" in
     printf '╭────╮\n│    │\n╰────╯\n'
     exit 0 ;;
   list-windows)
+    # -a (fm_backend_tmux_resolve_bare_selector) lists every window; -t <target>
+    # (fm_backend_target_exists's exact-form '=ses:=win' probe) models exact
+    # window resolution and FAILS for the configured dead target, exactly as real
+    # tmux's list-windows does (display-message's CMD_FIND_CANFAIL could not).
+    tgt=
+    while [ $# -gt 0 ]; do case "$1" in -t) tgt=$2; shift 2 ;; *) shift ;; esac; done
+    if [ -n "$tgt" ]; then
+      norm=${tgt//=/}
+      if [ -n "${FM_FAKE_TMUX_DEAD_TARGET:-}" ] && [ "$norm" = "$FM_FAKE_TMUX_DEAD_TARGET" ]; then
+        exit 1
+      fi
+      printf '%s\n' "${norm#*:}"
+      exit 0
+    fi
     printf 'foreign:%s\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
     exit 0 ;;
 esac

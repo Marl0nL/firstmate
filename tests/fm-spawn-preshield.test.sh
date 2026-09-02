@@ -308,7 +308,7 @@ test_shields_outlive_the_endpoint_teardown_on_the_acquisition_timeout() {
   # get never resolved and could still be waiting for a slot.
   out=$(run_spawn "$rec" stalled-v5 FM_FAKE_PANE_PATH="$PROJ_DIR" FM_FAKE_FAST_POLL=1); status=$?
   [ "$status" -ne 0 ] || fail "a spawn whose get never enters a worktree must exit non-zero"$'\n'"--- output ---"$'\n'"$out"
-  assert_contains "$out" "did not enter a worktree within 60s" "the timeout refusal must report the stalled get"
+  assert_contains "$out" "did not enter a worktree within 60 polling attempts" "the timeout refusal must report the stalled get"
   assert_grep $'up\t'"$owned" "$SHIELD_LOG" "the owned worktree must have been shielded for the get"
   teardown_line=$(grep -n $'^teardown\t' "$SHIELD_LOG" | head -1 | cut -d: -f1)
   down_line=$(grep -n $'^down\t' "$SHIELD_LOG" | head -1 | cut -d: -f1)

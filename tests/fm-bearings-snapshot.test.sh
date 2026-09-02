@@ -34,6 +34,10 @@ SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
+  # fm_backend_target_exists now probes with list-windows (an absent window
+  # genuinely fails, unlike display-message's CMD_FIND_CANFAIL); model a dead
+  # target the same way for both so the endpoint-liveness read is unchanged.
+  list-windows) case "$*" in *dead-*) exit 1 ;; *) exit 0 ;; esac ;;
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
   capture-pane)
     case "$*" in

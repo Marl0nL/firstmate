@@ -2572,7 +2572,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; the spawn's endpoint was cleaned up - re-run the spawn, or run 'treehouse get' manually to diagnose the worktree pool" >&2
+    echo "error: treehouse get did not enter a worktree within 60 polling attempts (over a minute of waiting, and longer on zellij/cmux where each attempt adds several marker-probe round trips on top of its 1s sleep); the spawn's endpoint was cleaned up - re-run the spawn, or run 'treehouse get' manually to diagnose the worktree pool" >&2
     exit 1
   fi
   # Past the timeout refusal, so acquisition IS resolved (the pool has leased and,
