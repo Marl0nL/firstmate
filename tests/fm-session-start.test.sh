@@ -1795,6 +1795,41 @@ EOF
   pass "the pure-Bash watchdog bounds session start, kills its hung grandchild, and emits the truncation contract"
 }
 
+# The banner's reconcile list is only useful if it names the sections this run
+# would actually have printed. A re-emit prints one a startup never does - the
+# OPERATIONAL MEMORY section that leads a /clear with this home's durable memory
+# - and on a re-emit CONTEXT deliberately no longer carries that memory. So a
+# truncated re-emit that omitted 'operational-memory' would send the agent to
+# reconcile 'context' and still never reach captain.md or learnings.md, and a
+# truncated startup that listed it would name a section startup never emits.
+# The sibling case above pins the startup list; this pins the re-emit list.
+test_runtime_bound_banner_names_the_reemit_only_memory_stage() {
+  local rec root home fakebin out status=0
+  rec=$(new_world runtime-bound-reemit)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_hanging_tool "$fakebin" git
+
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_SESSION_START_TIMEOUT=3 FM_STARTUP_NETWORK_TIMEOUT=2 \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    "$SESSION_START" --reemit) || status=$?
+
+  expect_code 0 "$status" "a truncated re-emit must still exit 0 so the session can open"
+  assert_contains "$out" "STARTUP TRUNCATED - SESSION START HIT ITS" "a truncated re-emit did not say so"
+  assert_contains "$out" \
+    "bootstrap wake-queue operational-memory supervision-instructions read-once fleet-state network-checks context next-step" \
+    "the re-emit truncation banner did not list the re-emit-only memory stage for reconciliation"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_STARTUP_NETWORK_TIMEOUT=2 \
+    "$ROOT/bin/fm-startup-network.sh" wait 30 >/dev/null || true
+
+  pass "a truncated re-emit names operational-memory for reconciliation; a truncated startup does not"
+}
+
 test_portable_timeout_escalates_term_resistant_process() {
   local fakebin="$TMP_ROOT/portable-kill-after" driver status=0
   mkdir -p "$fakebin"
@@ -2435,6 +2470,7 @@ test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker
 test_runtime_bound_truncates_loudly_and_exits_zero
+test_runtime_bound_banner_names_the_reemit_only_memory_stage
 test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom

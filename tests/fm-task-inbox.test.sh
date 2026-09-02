@@ -217,6 +217,58 @@ test_marked_request_doorbell_carries_reply_directive() {
   pass "inbox: a marked from-firstmate request's doorbell carries the correlated-reply directive"
 }
 
+# The status file is derivable from the inbox path for exactly one inbox shape:
+# the canonical home-state inbox <home>/state/<id>.inbox, whose sibling
+# <home>/state/<id>.status IS the channel the parent reads. The host-local remote
+# steer leg writes its records under <remote-home>/state/parent-route/<id>.inbox
+# instead (bin/fm-remote-secondmate-control.sh CONTROL_STATE), where the same
+# derivation yields parent-route/<id>.status - a file nothing reads and nothing
+# mirrors back to the parent, because a remote mate's replies travel only via
+# state/parent-replies.status. Naming it would authoritatively send a cleared
+# remote mate's correlated reply into a dead file, the exact loss this directive
+# exists to prevent. So a non-home-state inbox must fall back to charter-relative
+# phrasing and name no path at all.
+test_marked_doorbell_names_no_derived_path_off_the_home_state_inbox() {
+  local state route mark r_local r_route d_local d_route
+  state="$TMP_ROOT/marked-doorbell-route/state"
+  route="$state/parent-route"
+  mkdir -p "$route"
+  mark=$(bash -c '. "$1"; printf %s "$FM_FROMFIRST_MARK"' _ "$ROOT/bin/fm-operational-input.sh")
+  [ -n "$mark" ] || fail "could not load the from-firstmate carrier constant"
+
+  r_local=$(inbox_lib "$state" fm_task_inbox_write "$state" ios \
+    "${mark}corr=0123456789abcdef audit the ledger") || fail "local marked write failed"
+  # The remote leg's own write, into the same sub-plane it really uses.
+  r_route=$(inbox_lib "$state" fm_task_inbox_write "$route" ios \
+    "${mark}corr=0123456789abcdef audit the ledger") || fail "routed marked write failed"
+
+  d_local=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$r_local")
+  d_route=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$r_route")
+
+  # The canonical home-state shape still names its real sibling status file.
+  assert_contains "$d_local" "to $state/ios.status" \
+    "the home-state marked doorbell stopped naming the status file the parent reads"
+
+  # The routed shape still carries the directive, but names no derived path.
+  assert_contains "$d_route" "Firstmate instruction waiting: list $route/ios.inbox/*.msg" \
+    "the routed doorbell lost its constant drain-all instruction"
+  assert_contains "$d_route" "including its corr=<id> token" \
+    "the routed marked doorbell dropped the correlated-reply directive"
+  assert_contains "$d_route" "your parent status channel (the report file your charter names)" \
+    "the routed marked doorbell did not defer to the charter's own reply channel"
+  case "$d_route" in
+    *"$route/ios.status"*)
+      fail "the routed doorbell named parent-route/ios.status, which nothing reads: $d_route" ;;
+    *.status*)
+      fail "the routed doorbell named a status path it cannot know: $d_route" ;;
+  esac
+  case "$d_route" in
+    *$'\n'*) fail "the routed marked doorbell must stay a single line" ;;
+  esac
+
+  pass "inbox: a marked request outside the home-state inbox defers to the charter's reply channel"
+}
+
 test_idempotent_write_dedups_exact_body() {
   local state r1 r2 r3 r4 count text
   state="$TMP_ROOT/idem/state"; mkdir -p "$state"
@@ -538,6 +590,7 @@ test_watcher_escalates_once_after_budget() {
 
 test_write_is_durable_and_exact
 test_marked_request_doorbell_carries_reply_directive
+test_marked_doorbell_names_no_derived_path_off_the_home_state_inbox
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence

@@ -277,16 +277,40 @@ fm_task_inbox_record_is_marked() {  # <record-path>
 # remote idempotent enqueue and the request summary both depend on. It is
 # GENERIC - it never inlines this record's own corr value, only names the token -
 # so every marked record in one inbox still rings an identical drain-all
-# doorbell, and it names the status file derived from the inbox path so even a
-# fully naive mate knows exactly where to reply.
+# doorbell.
+#
+# WHERE the directive sends the reply depends on which leg wrote the record,
+# because only ONE inbox shape has a status file derivable from its own path:
+#   - the canonical LOCAL secondmate inbox, <home>/state/<id>.inbox, whose
+#     sibling <home>/state/<id>.status is exactly the parent's correlated reply
+#     channel (bin/fm-send.sh writes there, bin/fm-pending-reply-lib.sh reads
+#     it). There the directive names that concrete path.
+#   - any OTHER location - in practice the host-local remote steer leg, which
+#     writes under <remote-home>/state/parent-route/<id>.inbox
+#     (bin/fm-remote-secondmate-control.sh CONTROL_STATE). There the derived
+#     sibling would be parent-route/<id>.status, which NOTHING reads: a remote
+#     mate's replies reach the parent only through
+#     <remote-home>/state/parent-replies.status, the path
+#     bin/fm-remote-home-seed.sh writes into its charter and
+#     bin/fm-procevent-remote-reply.sh mirrors back. Naming the derived path
+#     there would steer a cleared mate off its only mirrored channel, so the
+#     directive stays path-agnostic and defers to the charter instead.
+# The discriminator is the inbox directory's PARENT basename: 'state' is the
+# home-state shape, anything else is a routed sub-plane whose reply channel this
+# library does not own.
 fm_task_inbox_doorbell_line() {  # <record-path>
-  local dir=${1%/*} abs line status_file
+  local dir=${1%/*} abs line parent status_file
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
   line=$(printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then mv each handled file to %s/handled/.' \
     "$abs" "$abs")
   if fm_task_inbox_record_is_marked "$1"; then
-    status_file="${abs%.inbox}.status"
-    line="$line Each is a from-firstmate request: after doing it, append one status line that includes its corr=<id> token (shown in the request) to $status_file - the main firstmate reads only that status file, not this pane, so a reply only here is lost."
+    parent=${abs%/*}
+    if [ "${parent##*/}" = state ]; then
+      status_file="${abs%.inbox}.status"
+      line="$line Each is a from-firstmate request: after doing it, append one status line that includes its corr=<id> token (shown in the request) to $status_file - the main firstmate reads only that status file, not this pane, so a reply only here is lost."
+    else
+      line="$line Each is a from-firstmate request: after doing it, reply on your parent status channel (the report file your charter names) including its corr=<id> token (shown in the request), never only in this pane, or the parent never sees it."
+    fi
   fi
   printf '%s' "$line"
 }

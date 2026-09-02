@@ -316,6 +316,69 @@ test_run_clear_reemit_leads_with_home_memory() {
   pass "run wrapper: a clear re-emit leads with home memory within the inline budget; startup order is unchanged"
 }
 
+# Leading with memory only helps if the memory itself FITS: config/startup-memory
+# -budget sanctions homes far larger than the ~10k-character inline preview, so
+# an unbounded lead would let one file consume the whole preview and push the
+# fleet state, the read-once contract, and the rest of the memory back out of it
+# - the same delivery failure the reorder exists to fix, relocated. So the
+# re-emit section bounds each memory file and an over-cap file names its own full
+# path to read the rest from. The startup path must stay uncapped: it prints for
+# an agent that reconciles the whole digest, not one acting on a preview.
+test_run_clear_reemit_bounds_oversized_home_memory() {
+  local root="$TMP_ROOT/run-clear-memory-cap" out startup_out status=0
+  local head_mark tail_mark small_mark size
+  head_mark="LEARNING-HEAD-reply-with-the-corr-token"
+  tail_mark="LEARNING-TAIL-past-any-sane-preview-budget"
+  small_mark="CAPTAIN-SMALL-terse-status-lines"
+  make_run_primary "$root"
+  {
+    printf '# learnings\n\n## %s\n' "$head_mark"
+    # Well past any per-file bound, but still an ordinary within-budget home.
+    for _ in $(seq 1 200); do
+      printf 'a durable operating lesson that is long enough to matter here.\n'
+    done
+    printf '## %s\n' "$tail_mark"
+  } > "$root/data/learnings.md"
+  printf '# captain\n- %s\n' "$small_mark" > "$root/data/captain.md"
+
+  run_hook "$root" --source startup </dev/null >/dev/null
+  assert_present "$root/state/.session-start-complete" \
+    "startup did not publish the completion proof the clear re-emit needs"
+
+  out=$(run_hook "$root" --source clear </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper clear re-emit with oversized home memory"
+
+  # The head survives; the tail is cut and replaced by one recoverable pointer.
+  assert_contains "$out" "$head_mark" "the bounded re-emit dropped the head of this home's learnings"
+  assert_not_contains "$out" "$tail_mark" \
+    "an oversized learnings file was printed unbounded into the re-emit preview"
+  assert_contains "$out" "read the full file at $root/data/learnings.md" \
+    "the truncated memory file did not name the full path to read the rest from"
+  size=$(wc -c < "$root/data/learnings.md" | tr -d ' ')
+  assert_contains "$out" "($size bytes)" \
+    "the truncation pointer did not name the file's full size"
+  [ "$(printf '%s\n' "$out" | grep -c 'truncated to fit the re-emit preview budget')" -eq 1 ] \
+    || fail "the bounded memory file did not emit exactly one truncation pointer: $out"
+
+  # A file inside the bound is still printed whole, pointer and all absent.
+  assert_contains "$out" "$small_mark" "a small memory file was not printed in full on the re-emit"
+
+  # The whole preview-critical head - memory plus the supervision block that
+  # follows it - now fits the delivered budget instead of one file eating it.
+  assert_contains "$out" "READ-ONCE CONTRACT" "the bounded re-emit lost a section behind the memory"
+  [ "$(printf '%s' "${out%%READ-ONCE CONTRACT*}" | wc -m | tr -d ' ')" -le 10000 ] \
+    || fail "the re-emit preamble plus bounded memory still overran the ~10k inline preview budget"
+
+  # Startup is unbounded: it prints the same file whole, tail included.
+  startup_out=$(run_hook "$root" --source startup </dev/null)
+  assert_contains "$startup_out" "$tail_mark" \
+    "startup regressed: the re-emit-only bound leaked into the full digest"
+  assert_not_contains "$startup_out" "truncated to fit the re-emit preview budget" \
+    "startup wrongly truncated a memory file it prints in full"
+
+  pass "run wrapper: a clear re-emit bounds oversized home memory with a recoverable pointer; startup stays whole"
+}
+
 test_run_rebuild_forwards_source_to_drifted_instruction_refresh() {
   local root="$TMP_ROOT/run-instruction-refresh" baseline compact_out clear_out resume_out
   make_run_primary "$root"
@@ -620,6 +683,7 @@ test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit
 test_run_clear_reemit_leads_with_home_memory
+test_run_clear_reemit_bounds_oversized_home_memory
 test_run_rebuild_forwards_source_to_drifted_instruction_refresh
 test_run_compact_without_completion_refreshes_before_finishing_startup
 test_run_clear_without_completion_finishes_startup
