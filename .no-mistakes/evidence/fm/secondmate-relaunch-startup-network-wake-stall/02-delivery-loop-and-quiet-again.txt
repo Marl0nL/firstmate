@@ -1,0 +1,32 @@
+===================================================================
+ EVIDENCE 2 - THE FULL DELIVERY LOOP THE AGENT EXPERIENCES
+ target 1f74523
+===================================================================
+
+###############################################################
+# END-TO-END DELIVERY LOOP - relaunched secondmate, idle home  #
+###############################################################
+
+STEP 1 - the deferred startup-network stage finishes AFTER the reconcile
+         turn ended and publishes its durable wake into an idle home.
+    tasks in flight: 0  |  state/.wake-queue rows: 1
+
+STEP 2 - the turn ends. The home's own Stop hook decides:
+    firstmate watcher wake - one supervision event needs a handling turn now.
+    check: rearm-resurface
+    Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.
+    [hook exit code: 2]
+
+STEP 3 - the forced handling turn runs bin/fm-wake-drain.sh.
+         This is the text the agent reads:
+    1788337327	1	check	startup-network	check: startup-network: deferred startup network checks finished (done)
+    WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 1956609.1788337327.L7mXUN
+
+STEP 4 - the agent handles the wake and acknowledges it:
+    $ bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 1956609.1788337327.L7mXUN
+    state/.wake-queue rows now: 0
+
+STEP 5 - the handling turn ends. With nothing left to deliver the hook
+         must go quiet again (no rewake loop):
+    
+    [hook exit code: 0]

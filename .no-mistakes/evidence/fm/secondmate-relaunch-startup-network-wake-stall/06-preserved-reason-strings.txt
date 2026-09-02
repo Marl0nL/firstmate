@@ -1,0 +1,34 @@
+===================================================================
+ EVIDENCE 6 - THE THREE PRE-EXISTING REASON STRINGS ARE PRESERVED
+ (intent tradeoff 2: new reasons were ADDED, none replaced)
+===================================================================
+
+###################### BEFORE (base 43ead08) ######################
+CODE UNDER TEST: BASE commit 43ead08 (before the fix)
+
+-- in-flight task --
+   turn-end guard: ●  1 task(s) in flight, but no live watcher holds this home lock (last beat: never).
+   pull guard:     ●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 999s).
+
+-- registered process-event source --
+   turn-end guard: ●  1 process-event source(s) registered, but no live watcher holds this home lock (last beat: never).
+   pull guard:     ●  1 process-event source(s) registered, but no watcher has a fresh beacon (last beat: never, grace 999s).
+
+-- X-mode relay poll --
+   turn-end guard: ●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: never).
+   pull guard:     ●  X-mode relay polling needs supervision, but no watcher has a fresh beacon (last beat: never, grace 999s).
+
+###################### AFTER (target 1f74523) #####################
+CODE UNDER TEST: TARGET commit 1f74523 (with the fix)
+
+-- in-flight task --
+   turn-end guard: ●  1 task(s) in flight, but no live watcher holds this home lock (last beat: never).
+   pull guard:     ●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 999s).
+
+-- registered process-event source --
+   turn-end guard: ●  1 process-event source(s) registered, but no live watcher holds this home lock (last beat: never).
+   pull guard:     ●  1 process-event source(s) registered, but no watcher has a fresh beacon (last beat: never, grace 999s).
+
+-- X-mode relay poll --
+   turn-end guard: ●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: never).
+   pull guard:     ●  X-mode relay polling needs supervision, but no watcher has a fresh beacon (last beat: never, grace 999s).

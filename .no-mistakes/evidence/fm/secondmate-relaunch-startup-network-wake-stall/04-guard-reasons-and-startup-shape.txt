@@ -1,0 +1,87 @@
+===================================================================
+ EVIDENCE 4 - WHAT THE TWO GUARDS TELL THE AGENT
+===================================================================
+
+###################### BEFORE (base 43ead08) ######################
+
+CODE UNDER TEST: BASE commit 43ead08 (before the fix)
+
+==============================================================
+E. TURN-END GUARD (bin/fm-turnend-guard.sh) - the harness-independent
+   backstop that every primary harness shares. What does it tell the
+   agent when the ONLY supervision need is one of the new shapes?
+--------------------------------------------------------------
+E1. idle home, a queued wake waiting to be delivered:
+  [exit 0]
+  | (no output - the turn is allowed to end)
+
+E2. idle home, the deferred startup network checks still running:
+  [exit 0]
+  | (no output - the turn is allowed to end)
+
+==============================================================
+F. PULL GUARD (bin/fm-guard.sh) - fires MID-turn through tool output.
+   Session start launches the stage and drains the queue itself, then
+   runs this guard BEFORE the turn's Stop has armed anything, so these
+   two shapes must NOT raise the watcher-down alarm.
+--------------------------------------------------------------
+F1. relaunched idle home, no watcher yet, a leftover queued wake:
+  | (silent)
+
+F2. relaunched idle home, no watcher yet, stage still running:
+  | (silent)
+
+F3. CONTROL, same dead-watcher state - a real in-flight task IS a lapse:
+  | ●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  | ●  WATCHER DOWN - SUPERVISION IS OFF
+  | ●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 999s).
+  | ●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+  | ●  This is a supervision warning only; the guarded operation WILL still run.
+  | ●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+  | ●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+###################### AFTER (target 1f74523) #####################
+
+CODE UNDER TEST: TARGET commit 1f74523 (with the fix)
+
+==============================================================
+E. TURN-END GUARD (bin/fm-turnend-guard.sh) - the harness-independent
+   backstop that every primary harness shares. What does it tell the
+   agent when the ONLY supervision need is one of the new shapes?
+--------------------------------------------------------------
+E1. idle home, a queued wake waiting to be delivered:
+  [exit 2]
+  | ●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  | ●  TURN WOULD END BLIND - SUPERVISION IS OFF
+  | ●  a queued notification is waiting to be delivered, but no live watcher holds this home lock (last beat: never).
+  | ●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+  | ●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+E2. idle home, the deferred startup network checks still running:
+  [exit 2]
+  | ●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  | ●  TURN WOULD END BLIND - SUPERVISION IS OFF
+  | ●  the deferred startup network checks are still running, but no live watcher holds this home lock (last beat: never).
+  | ●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+  | ●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+==============================================================
+F. PULL GUARD (bin/fm-guard.sh) - fires MID-turn through tool output.
+   Session start launches the stage and drains the queue itself, then
+   runs this guard BEFORE the turn's Stop has armed anything, so these
+   two shapes must NOT raise the watcher-down alarm.
+--------------------------------------------------------------
+F1. relaunched idle home, no watcher yet, a leftover queued wake:
+  | (silent)
+
+F2. relaunched idle home, no watcher yet, stage still running:
+  | (silent)
+
+F3. CONTROL, same dead-watcher state - a real in-flight task IS a lapse:
+  | ●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  | ●  WATCHER DOWN - SUPERVISION IS OFF
+  | ●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 999s).
+  | ●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+  | ●  This is a supervision warning only; the guarded operation WILL still run.
+  | ●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+  | ●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

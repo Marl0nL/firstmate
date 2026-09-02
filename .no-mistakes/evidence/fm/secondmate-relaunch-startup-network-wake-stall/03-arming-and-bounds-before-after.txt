@@ -1,0 +1,62 @@
+===================================================================
+ EVIDENCE 3 - THE OTHER HALF OF THE FIX, AND ITS DELIBERATE BOUNDS
+===================================================================
+
+###################### BEFORE (base 43ead08) ######################
+
+CODE UNDER TEST: BASE commit 43ead08 (before the fix)
+
+--------------------------------------------------------------
+A. The turn ends while the deferred network stage is STILL RUNNING
+   (its wake has not been published yet). The cycle must stay armed
+   so the mate is still supervised when that wake lands.
+   Measured by what actually supervises the home: a live watcher process.
+  => NOT ARMED: no watcher holds this home; the session went idle
+     while the deferred stage was still running.  <-- the reported stall
+
+--------------------------------------------------------------
+B. BOUND: the stage worker was killed with its process group and left
+   state=running behind. A dead worker must never pin an idle home open.
+  => QUIET (exit 0) - the idle home is released, as it must be
+
+--------------------------------------------------------------
+C. BOUND: the stage record is live but far past its own aggregate
+   deadline (a recycled pid). It must not hold supervision on forever.
+  => QUIET (exit 0) - the idle home is released, as it must be
+
+--------------------------------------------------------------
+D. BOUND: a wake row truncated by a hard host restart. Every drain
+   RETAINS it, so counting it would arm this idle home forever.
+  => QUIET (exit 0) - the idle home is released, as it must be
+     ... and the same home once a genuine ackable row is appended:
+  => NOT ARMED (exit 0)  <-- the reported stall
+
+###################### AFTER (target 1f74523) #####################
+
+CODE UNDER TEST: TARGET commit 1f74523 (with the fix)
+
+--------------------------------------------------------------
+A. The turn ends while the deferred network stage is STILL RUNNING
+   (its wake has not been published yet). The cycle must stay armed
+   so the mate is still supervised when that wake lands.
+   Measured by what actually supervises the home: a live watcher process.
+  => ARMED: a real watcher process holds the home lock and is supervising:
+       1962489       00:00 bash /tmp/fm-e2e-demo/bounds-2Pj7O2/stage-running/bin/fm-watch.sh
+     state/.last-watcher-beat present: yes
+
+--------------------------------------------------------------
+B. BOUND: the stage worker was killed with its process group and left
+   state=running behind. A dead worker must never pin an idle home open.
+  => QUIET (exit 0) - the idle home is released, as it must be
+
+--------------------------------------------------------------
+C. BOUND: the stage record is live but far past its own aggregate
+   deadline (a recycled pid). It must not hold supervision on forever.
+  => QUIET (exit 0) - the idle home is released, as it must be
+
+--------------------------------------------------------------
+D. BOUND: a wake row truncated by a hard host restart. Every drain
+   RETAINS it, so counting it would arm this idle home forever.
+  => QUIET (exit 0) - the idle home is released, as it must be
+     ... and the same home once a genuine ackable row is appended:
+  => ARMED (exit 2): firstmate watcher wake - one supervision event needs a handling turn now.

@@ -1,0 +1,21 @@
+===================================================================
+ EVIDENCE 5 - SAME FIX REACHES A STRUCTURALLY DIFFERENT HARNESS
+ Cursor cannot block its stop step, so it parks and renders the wake
+ as a bounded follow-up. It shares the same predicate.
+===================================================================
+
+###################### BEFORE (base 43ead08) ######################
+CODE UNDER TEST: BASE commit 43ead08 (before the fix)   (harness: Cursor)
+  idle home, tasks in flight: 0, wake rows queued: 1
+  the Cursor stop hook fires (bin/fm-turnend-guard-cursor.sh):
+  | (no follow-up emitted)
+  => NOT DELIVERED: the Cursor session ends with the wake still queued.  <-- the reported stall
+
+###################### AFTER (target 1f74523) #####################
+CODE UNDER TEST: TARGET commit 1f74523 (with the fix)   (harness: Cursor)
+  idle home, tasks in flight: 0, wake rows queued: 1
+  the Cursor stop hook fires (bin/fm-turnend-guard-cursor.sh):
+  | {
+  |   "followup_message": "⁣FIRSTMATE_OP: v1 watcher: firstmate watcher wake - one supervision event needs a handling turn now.\ncheck: rearm-resurface\n\nRun bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This stop hook owns watcher continuity: when the handling turn ends, the next needed cycle parks automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake."
+  | }
+  => DELIVERED as a Cursor follow-up turn.

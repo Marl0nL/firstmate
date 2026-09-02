@@ -1,0 +1,83 @@
+===================================================================
+ EVIDENCE 1 - THE COMPLETE REAL CHAIN, BEFORE AND AFTER
+ branch: fm/secondmate-relaunch-startup-network-wake-stall
+ base:   43ead08   target: 1f74523
+===================================================================
+
+Real bin/fm-startup-network.sh worker, real publish()/await_delivery,
+real Stop hook, real bin/fm-watch.sh. Only bin/fm-bootstrap.sh is stood
+in for (a sleep), so no external network call is made.
+
+###################### BEFORE (base 43ead08) ######################
+
+CODE UNDER TEST: BASE commit 43ead08 (before the fix)
+
+T0  session start launches the deferred network stage off the blocking
+    path, exactly as bin/fm-session-start.sh does:
+    $ bin/fm-startup-network.sh start --locked 0 --harvest-pid $$
+    stage: state=running, worker pid=1949924
+    home is idle: tasks in flight = 0, wake queue rows = 0
+
+T1  the reconcile turn ends RIGHT NOW, while that worker is still running.
+    Claude fires the Stop hook. Nothing else in this demo will touch the
+    home from here on - no nudge, no second invocation, no manual arm.
+    the hook returned after 0s with exit code 0
+    | (no output)
+
+T2  meanwhile the stage finished on its own and published its result:
+    stage state: running
+    state/.wake-queue:
+      (empty)
+
+T3  the session is now idle and unsupervised. Wait for the worker to
+    finish and publish its wake into that idle home:
+    stage state: done
+    state/.wake-queue:
+      1788337302	1	check	startup-network	check: startup-network: deferred startup network checks finished (done); read them with /tmp/fm-e2e-demo/full-O7U30i/root/bin/fm-startup-network.sh report
+
+T4  and the NEXT turn end still refuses to deliver it:
+    hook exit code: 0
+    | (no output)
+
+    RESULT: the wake sits undelivered in an idle home - one wasted
+            primary turn per mate until the parent's stall detector
+            nudges it.  <-- the reported bug
+
+###################### AFTER (target 1f74523) #####################
+
+CODE UNDER TEST: TARGET commit 1f74523 (with the fix)
+
+T0  session start launches the deferred network stage off the blocking
+    path, exactly as bin/fm-session-start.sh does:
+    $ bin/fm-startup-network.sh start --locked 0 --harvest-pid $$
+    stage: state=running, worker pid=1952702
+    home is idle: tasks in flight = 0, wake queue rows = 0
+
+T1  the reconcile turn ends RIGHT NOW, while that worker is still running.
+    Claude fires the Stop hook. Nothing else in this demo will touch the
+    home from here on - no nudge, no second invocation, no manual arm.
+    the hook returned after 16s with exit code 2
+    | firstmate watcher wake - one supervision event needs a handling turn now.
+    | check: rearm-resurface
+    | Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.
+
+T2  meanwhile the stage finished on its own and published its result:
+    stage state: done
+    state/.wake-queue:
+      1788337311	1	check	startup-network	check: startup-network: deferred startup network checks finished (done); read them with /tmp/fm-e2e-demo/full-wk9fHI/root/bin/fm-startup-network.sh report
+
+T3  the forced handling turn drains it. The agent reads the real report
+    the stage produced:
+    | 1788337311	1	check	startup-network	check: startup-network: deferred startup network checks finished (done); read them with /tmp/fm-e2e-demo/full-wk9fHI/root/bin/fm-startup-network.sh report
+    | WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 1954433.1788337311.N8OgKc
+    $ bin/fm-startup-network.sh report
+    | completed off the startup path in 8s: GitHub authentication.
+    | gh auth: ok
+    | secondmate sweeps: 2 mates reachable
+    | These ran AFTER the sections above were composed, so re-read any record a line here names.
+    | TIMINGS - where the deferred network checks spent their time (ms):
+    |   stage       network-checks probe                       start=+0       elapsed=8012
+    |   slowest: stage network-checks probe 8012ms
+
+    RESULT: the relaunched mate delivered its own startup-network wake,
+            from an idle home, with no parent nudge.
