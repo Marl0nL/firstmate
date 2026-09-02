@@ -231,8 +231,8 @@ The poll density bounds the residual possibility of an extremely fast complete t
 The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
 This generous floor is required for small composer and peek reads.
 
-Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
-The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that, and a Claude pane's native state is skipped entirely because it is firstmate's own published echo (see [Restart and liveness behavior](#restart-and-liveness-behavior)).
+Herdr's native agent state is positive evidence of activity only when it reads `busy` for a harness Herdr detects itself, and is never evidence that a worker has stopped, so every consumer reaches the pane before concluding not-busy.
+[Restart and liveness behavior](#restart-and-liveness-behavior) owns that trust rule and why a registry `idle` or a Claude pane's status is only a shadow of reality.
 A human-blocked permission dialog has no busy banner and still surfaces.
 
 ## Composer and injection safety
