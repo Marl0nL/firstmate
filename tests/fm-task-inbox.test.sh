@@ -160,6 +160,63 @@ test_write_is_durable_and_exact() {
   pass "inbox: a steer is written durably and round-trips byte-exact with a self-describing doorbell"
 }
 
+# A secondmate whose context was cleared loses its charter's "reply with the
+# corr token on your status channel" rule and its own learnings, and only its
+# next full startup would restore them. The doorbell is the backstop: for a
+# from-firstmate MARKED request it carries the correlated-reply directive inline,
+# so even a fully naive mate replies where the parent reads instead of only in
+# its pane. This must not touch the unmarked doorbell, must stay a single line,
+# must name the status file derived from the inbox path, and - because the
+# directive is generic rather than per-record - every marked record in one inbox
+# must still ring an identical drain-all doorbell.
+test_marked_request_doorbell_carries_reply_directive() {
+  local state mark r_plain r_marked r_marked2 d_plain d_marked d_marked2
+  state="$TMP_ROOT/marked-doorbell/state"; mkdir -p "$state"
+  # The from-firstmate carrier constant, from the production owner - not a
+  # hand-copied byte sequence.
+  mark=$(bash -c '. "$1"; printf %s "$FM_FROMFIRST_MARK"' _ "$ROOT/bin/fm-operational-input.sh")
+  [ -n "$mark" ] || fail "could not load the from-firstmate carrier constant"
+
+  r_plain=$(inbox_lib "$state" fm_task_inbox_write "$state" crew "do the crew thing") \
+    || fail "plain write failed"
+  r_marked=$(inbox_lib "$state" fm_task_inbox_write "$state" domain \
+    "${mark}corr=0123456789abcdef audit the ledger") || fail "marked write failed"
+  r_marked2=$(inbox_lib "$state" fm_task_inbox_write "$state" domain \
+    "${mark}corr=fedcba9876543210 second request") || fail "second marked write failed"
+
+  d_plain=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$r_plain")
+  d_marked=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$r_marked")
+  d_marked2=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$r_marked2")
+
+  # An unmarked steer keeps exactly the constant doorbell - no reply directive.
+  assert_contains "$d_plain" "Firstmate instruction waiting: list $state/crew.inbox/*.msg" \
+    "unmarked doorbell lost its constant instruction"
+  case "$d_plain" in
+    *corr=*|*"reads only that status file"*)
+      fail "unmarked doorbell leaked the marked-request reply directive: $d_plain" ;;
+  esac
+
+  # A marked request keeps the constant drain-all instruction AND appends the
+  # correlated-reply directive naming the corr token and the derived status file.
+  assert_contains "$d_marked" "Firstmate instruction waiting: list $state/domain.inbox/*.msg" \
+    "marked doorbell lost its constant drain-all instruction"
+  assert_contains "$d_marked" "includes its corr=<id> token" \
+    "marked doorbell did not name the corr token to reply with"
+  assert_contains "$d_marked" "to $state/domain.status" \
+    "marked doorbell did not name the status file derived from the inbox path"
+  assert_contains "$d_marked" "reads only that status file, not this pane" \
+    "marked doorbell did not warn that a pane-only reply is lost"
+  case "$d_marked" in
+    *$'\n'*) fail "the marked doorbell must stay a single line" ;;
+  esac
+
+  # Generic, not per-record: two marked records in one inbox ring the same line.
+  [ "$d_marked" = "$d_marked2" ] \
+    || fail "marked records in one inbox rang different doorbells (directive leaked a per-record corr)"
+
+  pass "inbox: a marked from-firstmate request's doorbell carries the correlated-reply directive"
+}
+
 test_idempotent_write_dedups_exact_body() {
   local state r1 r2 r3 r4 count text
   state="$TMP_ROOT/idem/state"; mkdir -p "$state"
@@ -480,6 +537,7 @@ test_watcher_escalates_once_after_budget() {
 }
 
 test_write_is_durable_and_exact
+test_marked_request_doorbell_carries_reply_directive
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence

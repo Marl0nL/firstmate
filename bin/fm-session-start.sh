@@ -96,6 +96,18 @@
 # The LOCK/BOOTSTRAP/WAKE-QUEUE safety preamble keeps its order: it establishes
 # mutation authority and this turn's work queue before anything else is read.
 #
+# The RE-EMIT path (a /clear or compaction) inverts the fleet-state-first choice
+# for one group only: this home's durable memory (captain/captain-shared/
+# learnings) leads, in its own OPERATIONAL MEMORY section right after the wake
+# queue, and CONTEXT then only points back to it. A re-emit is delivered to a
+# session that already reconciled the fleet at startup and lost only its context,
+# through a channel that persists an oversized payload and previews it from the
+# HEAD (Claude caps the inline delivery at about 10,000 characters). The memory
+# is what a clear actually destroyed and what nothing else re-injects, so it is
+# exactly what must stay inside the preview - the reverse of the startup case,
+# where a fresh agent reconciles the whole digest and the live-task inventory is
+# what a tail-truncating delivery must keep. See the --reemit note below.
+#
 # On a Pi primary, the supervision-block step also checks whether Pi's two
 # tracked primary extensions are loaded and prints a PI_WATCH_EXTENSION
 # reminder line when one is missing.
@@ -200,6 +212,15 @@
 #             this session's own harness holds as its own, so the re-emit
 #             proceeds, while a lock another live session took meanwhile still
 #             produces the ordinary read-only path.
+#             MEMORY LEADS ON A RE-EMIT: the durable memory a /clear or
+#             compaction destroyed (data/captain.md, data/captain-shared.md,
+#             data/learnings.md) is printed in its own OPERATIONAL MEMORY section
+#             right after the wake queue, ahead of the bulky fleet state, and the
+#             CONTEXT section then only points back to it. This channel persists
+#             an oversized payload to a file and shows the agent a HEAD preview
+#             (Claude's inline cap is about 10,000 characters), so leading with
+#             memory keeps the cleared knowledge inside that preview instead of
+#             past it. A true startup keeps memory in CONTEXT (see ORDERING).
 #
 #   --source  The native session-open source, supplied only by
 #             fm-sessionstart-run.sh. A genuine `startup` that owns the active
@@ -377,6 +398,27 @@ print_file_or_absent() {
   else
     printf 'ABSENT\n'
   fi
+}
+
+# The CONTEXT digest splits into two groups so a context re-emit can lead with
+# the group a freshly cleared agent most needs while the bulky live fleet state
+# still absorbs any tail truncation on startup:
+#   - navigation: data/projects.md, data/secondmates.md - the fleet map.
+#   - memory: data/captain.md, data/captain-shared.md, data/learnings.md - this
+#     home's durable operating knowledge, the irreplaceable thing a /clear or a
+#     compaction discards (AGENTS.md is re-injected by the harness; the charter
+#     and prior context are not). On a re-emit this memory leads the digest (see
+#     the OPERATIONAL MEMORY section below); on a true startup both groups print
+#     here in CONTEXT in the original order.
+print_context_navigation() {
+  print_file_or_absent "$DATA/projects.md" "data/projects.md"
+  print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
+}
+
+print_context_memory() {
+  print_file_or_absent "$DATA/captain.md" "data/captain.md"
+  print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
+  print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 }
 
 print_backlog_pointer() {
@@ -723,6 +765,28 @@ else
   fi
 fi
 
+# --- 3b. operational memory (context re-emit only) -------------------------
+# A /clear or a compaction discards this session's charter and prior context;
+# AGENTS.md is re-injected by the harness, but data/captain.md and
+# data/learnings.md reach the agent only through this digest. This digest is
+# delivered on a session-open channel that persists an oversized payload to a
+# file and hands the agent only a HEAD preview (Claude caps that inline at about
+# 10,000 characters), and a freshly cleared agent acts on the preview. So on a
+# re-emit this home's durable memory must LEAD - ahead of the bulky fleet state,
+# within that inline budget - or the very knowledge the clear destroyed lands
+# past the preview and the agent stays naive until its next full startup. It is
+# printed once: the CONTEXT section below prints only the navigation files and
+# points back here. A true startup keeps memory in CONTEXT (it reconciles the
+# whole digest rather than acting on a preview of context it never held), so the
+# live-task inventory still absorbs any tail truncation there. The full record is
+# unchanged and still emitted below / recoverable by re-running this digest.
+if [ "$REEMIT" -eq 1 ]; then
+  section "OPERATIONAL MEMORY (context re-emit priority)"
+  printf 'This home'"'"'s durable memory, led here so a context re-emit delivers it within the\n'
+  printf 'session-open inline budget instead of past the preview a cleared agent acts on.\n'
+  print_context_memory
+fi
+
 # --- 4. supervision operating instructions ----------------------------------
 stage supervision-instructions
 AFK_PRESENT=0
@@ -760,10 +824,11 @@ fi
 stage read-once
 section "READ-ONCE CONTRACT"
 cat <<'EOF'
-Everything below is printed in full for this session start: every state/*.meta,
+Everything in this session-start digest is printed in full: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
 data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
+and data/learnings.md (on a context re-emit the captain and learnings memory is
+printed above under OPERATIONAL MEMORY rather than below in CONTEXT).
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
@@ -883,11 +948,14 @@ fi
 # take (see this file's ORDERING note).
 stage context
 section "CONTEXT"
-print_file_or_absent "$DATA/projects.md" "data/projects.md"
-print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
-print_file_or_absent "$DATA/captain.md" "data/captain.md"
-print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
-print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+print_context_navigation
+if [ "$REEMIT" -eq 1 ]; then
+  printf '\ndata/captain.md, data/captain-shared.md, and data/learnings.md were printed above under\n'
+  printf 'OPERATIONAL MEMORY (context re-emit priority), ahead of the bulky fleet state, so this\n'
+  printf 're-emit delivers this home'"'"'s memory within the session-open inline budget.\n'
+else
+  print_context_memory
+fi
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step

@@ -4,7 +4,9 @@
 #
 # ONE owner of the steering-inbox contract: the record format, sequence
 # allocation, the idempotent re-enqueue dedup, the handled/ acknowledgement,
-# the self-describing doorbell line, and the watcher's re-ring ladder policy.
+# the self-describing doorbell line (including the correlated-reply directive it
+# appends for a from-firstmate marked request), and the watcher's re-ring ladder
+# policy.
 # bin/fm-send.sh writes and rings locally, the host-local remote steer leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) writes idempotently and rings
 # on the remote host, bin/fm-watch.sh polls and re-rings, and the brief
@@ -70,6 +72,11 @@ _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_TASK_INBOX_LIB_DIR/fm-wake-lib.sh"
 # shellcheck source=/dev/null
 . "$_FM_TASK_INBOX_LIB_DIR/fm-backend.sh"
+# The from-firstmate carrier constant, so the doorbell can recognise a marked
+# secondmate request without restating the marker bytes. fm-operational-input.sh
+# is dependency-free and side-effect-free on source.
+# shellcheck source=bin/fm-operational-input.sh
+. "$_FM_TASK_INBOX_LIB_DIR/fm-operational-input.sh"
 
 FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
@@ -238,14 +245,50 @@ fm_task_inbox_body() {  # <record-path>
   return 1
 }
 
+# 0 when a record is a from-firstmate MARKED request: its body begins with the
+# from-firstmate carrier and carries a corr= correlation token. Reads the record
+# body once; a missing or unreadable record, or one without the carrier, is
+# treated as not marked. This is a doorbell-only classifier: the durable record
+# body is the pinned wire contract (bin/fm-send.sh), so nothing here rewrites it.
+fm_task_inbox_record_is_marked() {  # <record-path>
+  local rec=$1 body
+  [ -f "$rec" ] || return 1
+  body=$(fm_task_inbox_body "$rec" 2>/dev/null) || return 1
+  case "$body" in
+    "$FM_FROMFIRST_MARK"*) ;;
+    *) return 1 ;;
+  esac
+  printf '%s' "$body" | grep -Eq 'corr=[A-Fa-f0-9]{16}'
+}
+
 # The constant self-describing doorbell line for the inbox containing a record.
 # Self-describing on purpose: a worker whose brief predates the inbox contract
 # still receives the complete instruction in the line itself.
+#
+# A from-firstmate MARKED request (a request routed to a secondmate, carrying a
+# corr= token) gets a correlated-reply directive appended to the SAME single
+# line. This is the backstop for a secondmate whose context was cleared: a /clear
+# discards its charter (which is where the "reply with the corr token on your
+# status channel" rule lives) and its own learnings, and only its next full
+# startup would restore them - so without this a freshly cleared mate does the
+# work and answers only in its pane, and the parent's missed-report guard reposts
+# the request it is already handling. The directive rides the doorbell because
+# the durable record body is a pinned wire contract (bin/fm-send.sh) that the
+# remote idempotent enqueue and the request summary both depend on. It is
+# GENERIC - it never inlines this record's own corr value, only names the token -
+# so every marked record in one inbox still rings an identical drain-all
+# doorbell, and it names the status file derived from the inbox path so even a
+# fully naive mate knows exactly where to reply.
 fm_task_inbox_doorbell_line() {  # <record-path>
-  local dir=${1%/*} abs
+  local dir=${1%/*} abs line status_file
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
-  printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then mv each handled file to %s/handled/.' \
-    "$abs" "$abs"
+  line=$(printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then mv each handled file to %s/handled/.' \
+    "$abs" "$abs")
+  if fm_task_inbox_record_is_marked "$1"; then
+    status_file="${abs%.inbox}.status"
+    line="$line Each is a from-firstmate request: after doing it, append one status line that includes its corr=<id> token (shown in the request) to $status_file - the main firstmate reads only that status file, not this pane, so a reply only here is lost."
+  fi
+  printf '%s' "$line"
 }
 
 # Ring the doorbell, best-effort: one advisory composer pre-check, then the

@@ -240,6 +240,82 @@ test_run_clear_and_compact_reemit() {
   pass "run wrapper: clear and compact re-emit the digest without repeating startup sweeps"
 }
 
+# A /clear (and a compaction) discards this session's charter and prior context;
+# AGENTS.md is re-injected by the harness, but data/captain.md and
+# data/learnings.md reach the agent only through this digest. The run-tier
+# channel persists an oversized payload to a file and previews it from the HEAD
+# (Claude's inline cap is ~10k characters), so a re-emit must LEAD with that
+# memory instead of ordering it last behind the bulky fleet state. This drives
+# the real fm-session-start.sh through the run wrapper and pins that the cleared
+# memory now lands ahead of FLEET STATE and within the inline budget, printed
+# once, while a true startup keeps the original memory-after-fleet-state order.
+test_run_clear_reemit_leads_with_home_memory() {
+  local root="$TMP_ROOT/run-clear-memory" out status=0
+  local mark op_line fleet_line ctx_line mark_line startup_out s_mark_line s_fleet_line
+  local prefix offset
+  mark="LEARNING-MARKER-reply-to-a-marked-request-with-its-corr-token"
+  make_run_primary "$root"
+  printf '# learnings\n\n## %s\nreply on the parent status channel including the corr= token.\n' "$mark" \
+    > "$root/data/learnings.md"
+  printf '# captain\n- terse status lines.\n' > "$root/data/captain.md"
+  # A live task so FLEET STATE has real bulk that memory must precede.
+  printf 'id=deploy\nkind=crewmate\nharness=claude\nbackend=tmux\nwindow=fm-deploy\n' \
+    > "$root/state/deploy.meta"
+  printf 'working: implementing the change\n' > "$root/state/deploy.status"
+
+  run_hook "$root" --source startup </dev/null >/dev/null
+  assert_present "$root/state/.session-start-complete" \
+    "startup did not publish the completion proof the clear re-emit needs"
+
+  out=$(run_hook "$root" --source clear </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper clear re-emit with home memory"
+
+  assert_contains "$out" "$REEMIT_BANNER$root" "clear did not re-emit the digest"
+  assert_contains "$out" "OPERATIONAL MEMORY (context re-emit priority)" \
+    "the clear re-emit did not lead with an operational-memory section"
+  assert_contains "$out" "$mark" "the clear re-emit dropped this home's learnings memory"
+
+  op_line=$(printf '%s\n' "$out" | grep -n 'OPERATIONAL MEMORY (context re-emit priority)' | head -1 | cut -d: -f1)
+  fleet_line=$(printf '%s\n' "$out" | grep -n '^FLEET STATE$' | head -1 | cut -d: -f1)
+  ctx_line=$(printf '%s\n' "$out" | grep -n '^CONTEXT$' | head -1 | cut -d: -f1)
+  mark_line=$(printf '%s\n' "$out" | grep -n "$mark" | head -1 | cut -d: -f1)
+  [ -n "$op_line" ] && [ -n "$fleet_line" ] && [ -n "$ctx_line" ] && [ -n "$mark_line" ] \
+    || fail "clear re-emit missing a required section header: $out"
+  [ "$op_line" -lt "$fleet_line" ] \
+    || fail "OPERATIONAL MEMORY did not precede FLEET STATE on the clear re-emit"
+  [ "$mark_line" -lt "$fleet_line" ] \
+    || fail "the cleared learnings memory landed behind the bulky FLEET STATE"
+  [ "$fleet_line" -lt "$ctx_line" ] \
+    || fail "FLEET STATE did not precede CONTEXT on the clear re-emit"
+
+  # Printed once: CONTEXT points back to the memory section instead of repeating it.
+  [ "$(printf '%s\n' "$out" | grep -c "$mark")" -eq 1 ] \
+    || fail "the cleared memory was printed more than once on the re-emit: $out"
+  assert_contains "$out" "were printed above under" \
+    "CONTEXT did not point back to the operational-memory section on the re-emit"
+
+  # Within the documented inline budget: the memory a cleared agent needs lands
+  # in the HEAD preview rather than the persisted-to-file tail.
+  prefix=${out%%"$mark"*}
+  offset=$(printf '%s' "$prefix" | wc -m | tr -d ' ')
+  [ "$offset" -le 10000 ] \
+    || fail "the cleared learnings memory landed at char $offset, past the ~10k inline preview budget"
+
+  # A true startup is unchanged: memory stays in CONTEXT, after the live fleet
+  # state that a tail-truncating startup delivery must keep.
+  startup_out=$(run_hook "$root" --source startup </dev/null)
+  assert_not_contains "$startup_out" "OPERATIONAL MEMORY (context re-emit priority)" \
+    "a true startup wrongly moved memory into the re-emit-only section"
+  s_mark_line=$(printf '%s\n' "$startup_out" | grep -n "$mark" | head -1 | cut -d: -f1)
+  s_fleet_line=$(printf '%s\n' "$startup_out" | grep -n '^FLEET STATE$' | head -1 | cut -d: -f1)
+  [ -n "$s_mark_line" ] && [ -n "$s_fleet_line" ] \
+    || fail "startup digest missing memory or FLEET STATE: $startup_out"
+  [ "$s_fleet_line" -lt "$s_mark_line" ] \
+    || fail "startup regressed: memory no longer sits behind the live fleet state"
+
+  pass "run wrapper: a clear re-emit leads with home memory within the inline budget; startup order is unchanged"
+}
+
 test_run_rebuild_forwards_source_to_drifted_instruction_refresh() {
   local root="$TMP_ROOT/run-instruction-refresh" baseline compact_out clear_out resume_out
   make_run_primary "$root"
@@ -543,6 +619,7 @@ test_owned_lock_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit
+test_run_clear_reemit_leads_with_home_memory
 test_run_rebuild_forwards_source_to_drifted_instruction_refresh
 test_run_compact_without_completion_refreshes_before_finishing_startup
 test_run_clear_without_completion_finishes_startup
