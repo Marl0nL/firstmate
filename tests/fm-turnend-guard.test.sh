@@ -203,11 +203,25 @@ test_predicate_network_stage_terminal_grace_bridges_wake() {
   fm_supervision_status "$state" 300
   [ "$FM_SUP_NETWORK_STAGE" = false ] || fail "an already-delivered result must end the bridge immediately"
   rm -f "$state/.startup-network.delivered"
+  # The wake row is appended: the queue condition owns the need from here on, so
+  # the bridge must switch off rather than double-count a stage that is finished.
+  printf '%s\t1\tcheck\tstartup-network\tcheck: startup-network: finished\n' "$(date +%s)" > "$state/.wake-queue"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_NETWORK_STAGE" = false ] || fail "once the wake is queued the bridge must end; the queue condition owns the need"
+  [ "$FM_SUP_QUEUE_PENDING" = true ] || fail "the appended wake row must read as pending"
+  [ "$FM_SUP_NEEDED" = true ] || fail "the queued wake must keep supervision needed with no gap"
+  rm -f "$state/.wake-queue"
   # And the bridge is bounded: an old terminal record cannot pin supervision on.
   write_network_status_terminal "$state" 'done' "$(( $(date +%s) - 600 ))"
   fm_supervision_status "$state" 300
   [ "$FM_SUP_NETWORK_STAGE" = false ] || fail "a terminal record past the grace must not read as active"
   [ "$FM_SUP_NEEDED" = false ] || fail "a long-finished stage must not hold an idle turn open"
+  # A drained-and-acknowledged cycle: empty queue again, but seconds past the
+  # grace, so a finished stage is never reported as one still in progress.
+  write_network_status_terminal "$state" 'done' "$(( $(date +%s) - 10 ))"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_NETWORK_STAGE" = false ] || fail "a stage that finished 10s ago and whose wake was already drained must not read as active"
+  [ "$FM_SUP_NEEDED" = false ] || fail "a completed and acknowledged cycle must not block the next turn end"
   pass "fm_supervision_status: the terminal-state grace bridges the publish-then-enqueue gap, bounded"
 }
 

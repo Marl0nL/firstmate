@@ -42,13 +42,16 @@ fm_sup_status_field() {
 # durable `check: startup-network` wake when it finishes, so supervision must
 # stay armed across the window between the reconcile turn ending and that wake
 # landing, or an idle home never delivers it.
-# A terminal record (done/timeout/failed) still reads true for 15s after its
-# `finished` stamp, because that script writes the terminal state
-# BEFORE appending the wake: without the bridge, a status sampled between those
-# two steps reads neither a running stage nor a pending queue, and the wake lands
-# in a home that just decided it needed no supervision. A .startup-network
-# .delivered marker ends the bridge immediately, since an inline harvest already
-# took the result and no wake is coming.
+# A terminal record (done/timeout/failed) reads true only across the pre-append
+# gap: that script writes the terminal state BEFORE appending the wake, so a
+# status sampled between those two steps would otherwise read neither a running
+# stage nor a pending queue, and the wake would land in a home that just decided
+# it needed no supervision. The bridge is therefore gated on an EMPTY wake queue
+# and on a `finished` stamp within 3 seconds - once the row is appended the queue
+# condition takes over, and a cycle already drained and acknowledged is seconds
+# past the grace, so a finished stage is never reported as still in progress. A
+# .startup-network.delivered marker ends the bridge immediately, since an inline
+# harvest already took the result and no wake is coming.
 # bin/fm-startup-network.sh owns the stage lifecycle and the .startup-network
 # .status format (see its worker_alive); this is a deliberately conservative
 # liveness gate for the supervision decision only. A dead or abandoned worker
@@ -64,10 +67,11 @@ fm_sup_network_stage_active() {
     running) ;;
     done|timeout|failed)
       [ -e "$state/.startup-network.delivered" ] && return 1
+      [ -s "$state/.wake-queue" ] && return 1
       finished=$(fm_sup_status_field "$status_file" finished)
       case "$finished" in ''|*[!0-9]*) return 1 ;; esac
       age=$(( $(date +%s) - finished ))
-      [ "$age" -ge 0 ] && [ "$age" -le 15 ]
+      [ "$age" -ge 0 ] && [ "$age" -le 3 ]
       return $?
       ;;
     *) return 1 ;;

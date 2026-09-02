@@ -38,7 +38,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 GRACE=${FM_GUARD_GRACE:-300}
-queue_pending=false
 READ_ONLY=${FM_GUARD_READ_ONLY:-0}
 case "$READ_ONLY" in 1|true|TRUE|yes|YES) READ_ONLY=1 ;; *) READ_ONLY=0 ;; esac
 CONTINUE_LINE=${FM_GUARD_CONTINUE_LINE:-This is a supervision warning only; the guarded operation WILL still run.}
@@ -183,7 +182,6 @@ if [ "$needed" = false ]; then
   exit 0
 fi
 
-[ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
 
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line. Later
@@ -201,7 +199,7 @@ if [ "$watcher_healthy" = false ]; then
     afk=0
     [ -e "$STATE/.afk" ] && afk=1
     queue_arg=0
-    "$queue_pending" && queue_arg=1
+    [ "$FM_SUP_QUEUE_PENDING" = true ] && queue_arg=1
     x_mode=0
     [ -f "$CONFIG/x-mode.env" ] && x_mode=1
     fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
@@ -252,7 +250,7 @@ fi
 # Queued wakes are an independent hazard; warn whenever they are pending, even if
 # a watcher is alive. Kept after the banner so the no-watcher alarm reads first.
 # Dedup of the watcher-down banner never suppresses this warning.
-if "$queue_pending"; then
+if [ "$FM_SUP_QUEUE_PENDING" = true ]; then
   if [ "$READ_ONLY" -eq 1 ]; then
     echo "WARNING: queued wakes pending - left untouched because this session lacks verified fleet-lock ownership." >&2
   else

@@ -288,13 +288,36 @@ test_queued_wake_warning_stays_independent() {
   out1=$(run_guard_case "$dir")
   [ "$(count_text "$out1" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "first stale call did not print the full banner before queued wake case: $out1"
-  printf 'signal: %s/state/task.status\n' "$home" > "$home/state/.wake-queue"
+  printf '%s\t1\tsignal\ttask\tsignal: %s/state/task.status\n' "$(date +%s)" "$home" > "$home/state/.wake-queue"
   out2=$(run_guard_case "$dir")
   assert_contains "$out2" "full banner already printed this episode" \
     "same-episode stale call should still print its concise reminder"
   assert_contains "$out2" "queued wakes pending" \
     "queued wake warning must not be suppressed by stale-banner deduplication"
   pass "fm-guard stale banner: queued-wake warning remains independent"
+}
+
+# bin/fm-wake-drain.sh RETAINS a row with fewer than 5 fields or a non-numeric
+# sequence on every acknowledgement, so "drain them" can never succeed for one.
+# The advice must not be given for a queue that holds only such rows.
+test_unackable_queue_row_does_not_advise_draining() {
+  local dir home out
+  dir=$(make_guard_case unackable-queue)
+  home=$(case_home "$dir")
+  # An in-flight task keeps the guard past its early exit, so the queue warning
+  # is reached and this is a real test of the warning's own condition.
+  printf '%s\t1\tcheck\tstartup\n' "$(date +%s)" > "$home/state/.wake-queue"
+  out=$(run_guard_case "$dir")
+  assert_contains "$out" "WATCHER DOWN" \
+    "the in-flight task must still alarm, or the queue warning was never reached"
+  assert_not_contains "$out" "queued wakes pending" \
+    "a queue holding only rows no drain can consume must not advise draining them"
+  # Paired control: one ackable row in the same home does warn.
+  printf '%s\t2\tsignal\ttask\tsignal: crewmate needs a decision\n' "$(date +%s)" >> "$home/state/.wake-queue"
+  out=$(run_guard_case "$dir")
+  assert_contains "$out" "queued wakes pending" \
+    "a queue holding an ackable row must still warn"
+  pass "fm-guard stale banner: an unackable-only queue does not advise draining"
 }
 
 test_read_only_before_writable_does_not_consume_full_banner() {
@@ -738,6 +761,7 @@ test_healthy_recovery_rearms_next_stale_episode
 test_concurrent_same_episode_prints_one_full_banner
 test_home_isolation
 test_queued_wake_warning_stays_independent
+test_unackable_queue_row_does_not_advise_draining
 test_read_only_before_writable_does_not_consume_full_banner
 test_read_only_during_episode_observes_without_mutating_marker
 test_healthy_read_only_does_not_clear_marker
