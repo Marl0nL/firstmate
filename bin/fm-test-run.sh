@@ -159,7 +159,7 @@ family_for_basename() {
     fm-tool-update-check.test.sh|\
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
     fm-watch-triage.test.sh|fm-task-inbox.test.sh|fm-watch-herdr-report.test.sh|\
-    fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh)
+    fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh|fm-pending-reply.test.sh)
       printf '%s\n' watcher-wake-lock
       ;;
     fm-afk-inject-herdr-e2e.test.sh|fm-afk-launch.test.sh|fm-backend-autodetect-smoke.test.sh|\
@@ -941,7 +941,16 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
-    bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
+    bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh|\
+    bin/fm-pending-reply*)
+      # The watcher poll loop owns the pending-reply tick, and
+      # tests/fm-pending-reply.test.sh is its behavior owner, so the watcher
+      # family already covers a change here. Map it explicitly: without a case
+      # this falls through to the bin/* reference scan, and this library's name
+      # is merely mentioned by secondmate, session-bootstrap, live-harness and
+      # unclassified suites, whose whole families would then be selected -
+      # roughly twenty minutes of unrelated work, which is the "silent full
+      # suite" this map exists to prevent.
       printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-afk*)
