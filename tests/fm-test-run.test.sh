@@ -25,8 +25,8 @@ test_list_all_exact_suite_coverage() {
     done | LC_ALL=C sort
   )
   [ -n "$listed" ] || fail "--list --all printed nothing"
-  missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
-  extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  missing=$(LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  extra=$(LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
   [ -z "$missing" ] || fail "--list --all missing scripts: $missing"
   [ -z "$extra" ] || fail "--list --all unexpected scripts: $extra"
   # No duplicates.
@@ -180,6 +180,55 @@ test_changed_dependency_selection_and_unmapped_failure() {
     || fail "unmapped changed source failure is not actionable: $(cat "$tmp/err")"
   rm -rf "$tmp"
   pass "changed selection covers dependents and fails closed for unmapped source"
+}
+
+# Regression: bin/fm-pending-reply-lib.sh had no entry in the changed-path map,
+# so --changed fell through to the repo-wide reference scan. That scan selects
+# the whole FAMILY of every test whose text names the changed file, and suites in
+# unrelated families merely mention this library's path, so a watcher-only change
+# dragged in the secondmate, session-bootstrap, live-harness and unclassified
+# families - 132 of 183 scripts, past thirty minutes of serial work. That is the
+# "silent full suite" this map exists to prevent, and it is what pushed the
+# repository's intent-targeted no-mistakes Test step past its budget so the step
+# skipped. A changed library must select the family that owns its behavior, not
+# every family that happens to name it.
+test_changed_selection_bounds_a_mentioned_library() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-pending-reply.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  printf '#!/usr/bin/env bash\n# tests/lib.sh\n# bin/fm-pending-reply-lib.sh\n' \
+    >"$repo/tests/fm-pending-reply.test.sh"
+  chmod +x "$repo/tests/fm-pending-reply.test.sh"
+  # Suites from other families that only NAME the library, the way the real
+  # secondmate and session-bootstrap suites do.
+  printf '# bin/fm-pending-reply-lib.sh\n' >>"$repo/tests/fm-secondmate-safety.test.sh"
+  printf '# bin/fm-pending-reply-lib.sh\n' >>"$repo/tests/fm-session-start.test.sh"
+  : >"$repo/bin/fm-pending-reply-lib.sh"
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid \
+    commit -qm pending-reply-baseline
+
+  printf '\n' >>"$repo/bin/fm-pending-reply-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-pending-reply.test.sh" \
+    "pending-reply library selects its own owner suite"
+  assert_contains "$listed" "tests/fm-daemon.test.sh" \
+    "pending-reply library selects the watcher family that runs its tick"
+  case "$listed" in
+    *tests/fm-secondmate-safety.test.sh*)
+      rm -rf "$tmp"
+      fail "changed pending-reply library selected the secondmate family, which only names it"
+      ;;
+  esac
+  case "$listed" in
+    *tests/fm-session-start.test.sh*)
+      rm -rf "$tmp"
+      fail "changed pending-reply library selected the session-bootstrap family, which only names it"
+      ;;
+  esac
+  rm -rf "$tmp"
+  pass "a changed library selects its owning family, not every family that names it"
 }
 
 test_empty_selection_emits_summary() {
@@ -359,7 +408,7 @@ test_portable_shard_union_and_coverage_guard() {
   herdr=$("$RUNNER" --list --family real-herdr-gated)
   [ -n "$s1" ] && [ -n "$s2" ] || fail "portable parallel shards must be non-empty"
   # Shards disjoint.
-  overlap=$(comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
+  overlap=$(LC_ALL=C comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
   [ -z "$overlap" ] || fail "portable parallel shards overlap: $overlap"
   # Union of shards equals proven-isolated.
   [ "$(printf '%s\n' "$s1" "$s2" | LC_ALL=C sort -u)" = \
@@ -384,6 +433,42 @@ test_portable_shard_union_and_coverage_guard() {
   [ "$first" = "tests/fm-x-mode.test.sh" ] \
     || fail "shard 1 must start with the longest proven script, got $first"
   pass "portable shard union, disjointness, and coverage guard hold"
+}
+
+# Regression: run_coverage_guard writes every lane listing through
+# `LC_ALL=C sort` but compared them with a bare `comm`, and comm validates its
+# input order in the AMBIENT collation. Under a locale that collates '-' after
+# '.' (en_US.UTF-8 and friends) comm rejected the byte-sorted lane files with
+# "file 2 is not in sorted order" and returned 1, which `set -e` turned into a
+# --check-coverage failure that printed no diagnostic at all - an environment
+# artefact presented as a lane gap, and enough to fail this suite for anyone
+# whose shell is not C/C.UTF-8. The comparison must use the collation the
+# listings were sorted in.
+test_coverage_guard_is_collation_independent() {
+  local candidate hostile='' out
+  if command -v locale >/dev/null 2>&1; then
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      # Ordering 'x.a' before 'x-b' is exactly the disagreement with byte order
+      # that comm rejected on the real lane listings.
+      if [ "$(printf 'x-b\nx.a\n' | LC_ALL="$candidate" sort 2>/dev/null | head -n 1)" = "x.a" ]; then
+        hostile=$candidate
+        break
+      fi
+    done < <(locale -a 2>/dev/null)
+  fi
+  out=$(LC_ALL=C "$RUNNER" --check-coverage 2>&1) \
+    || fail "--check-coverage failed under LC_ALL=C: $out"
+  assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard succeeds under C"
+  if [ -z "$hostile" ]; then
+    pass "coverage guard succeeds under C (no locale collating differently from byte order is installed here)"
+    return
+  fi
+  out=$(LC_ALL="$hostile" "$RUNNER" --check-coverage 2>&1) \
+    || fail "--check-coverage failed under $hostile: $out"
+  assert_contains "$out" "FM_TEST_COVERAGE ok" \
+    "coverage guard must reach the same verdict under $hostile"
+  pass "coverage guard verdict is identical under C and $hostile"
 }
 
 test_portable_serial_shards_partition_the_serial_lane() {
@@ -630,24 +715,32 @@ SH
 test_herdr_ci_family_run_has_a_step_timeout() {
   # The required Herdr lane's hang tripwire is the family-run *step* bound, not
   # the 75-minute job cap. Parse the workflow as YAML so nested `with.name`
-  # artifact keys cannot masquerade as the step contract.
-  command -v ruby >/dev/null 2>&1 \
-    || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
+  # artifact keys cannot masquerade as the step contract, through the same
+  # PyYAML reader tests/fm-no-mistakes-required-gate.test.sh already requires.
+  python3 -c 'import yaml' 2>/dev/null \
+    || fail "python3 with PyYAML is required to parse .github/workflows/ci.yml as YAML"
   local json job_timeout step_timeout
-  json=$(ruby -ryaml -rjson -e '
-doc = YAML.load_file(ARGV[0])
-job = doc.fetch("jobs").fetch("tests-herdr")
-step = job.fetch("steps").find { |s|
-  s.is_a?(Hash) && s["name"] == "Run real-Herdr family (serial, required)"
-}
-raise "missing family-run step" if step.nil?
-raise "family-run step has no timeout-minutes" unless step.key?("timeout-minutes")
-puts JSON.generate(
-  "job_timeout" => job.fetch("timeout-minutes"),
-  "step_timeout" => step.fetch("timeout-minutes")
+  json=$(python3 - "$ROOT/.github/workflows/ci.yml" <<'YAMLPY'
+import json, sys, yaml
+
+doc = yaml.safe_load(open(sys.argv[1]))
+job = doc["jobs"]["tests-herdr"]
+step = next(
+    (s for s in job["steps"]
+     if isinstance(s, dict)
+     and s.get("name") == "Run real-Herdr family (serial, required)"),
+    None,
 )
-' "$ROOT/.github/workflows/ci.yml") \
-    || fail "could not parse tests-herdr timeouts from ci.yml"
+if step is None:
+    raise SystemExit("missing family-run step")
+if "timeout-minutes" not in step:
+    raise SystemExit("family-run step has no timeout-minutes")
+json.dump(
+    {"job_timeout": job["timeout-minutes"], "step_timeout": step["timeout-minutes"]},
+    sys.stdout,
+)
+YAMLPY
+  ) || fail "could not parse tests-herdr timeouts from ci.yml"
   job_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["job_timeout"])' <<<"$json") \
     || fail "could not read job timeout from parsed workflow"
   step_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["step_timeout"])' <<<"$json") \
@@ -708,6 +801,7 @@ test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
+test_changed_selection_bounds_a_mentioned_library
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
@@ -715,6 +809,7 @@ test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
+test_coverage_guard_is_collation_independent
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
