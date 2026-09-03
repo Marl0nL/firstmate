@@ -4448,6 +4448,60 @@ test_generic_kill_runs_guard_and_close_under_one_lock() {
   pass "fm_backend_herdr_kill: the guard's reads and the permitted close all run under ONE acquired-and-released presentation lock (TOCTOU-safe)"
 }
 
+# fm_backend_herdr_last_tab_close_permitted is the ONE owner of the "is closing
+# this pane safe for its workspace?" decision, shared by the kill guard and
+# fm-spawn's abort-cleanup report so the two cannot drift onto different
+# conditions. Its three exit codes carry the REASON, which is what lets each
+# caller phrase its own refusal without re-deriving the test: 0 permitted,
+# 1 confirmed last tab, 2 unresolvable read. It also publishes the resolved
+# triple, so a permitted close needs no second `pane get`.
+test_last_tab_close_permitted_is_the_shared_three_valued_owner() {
+  local dir log state fb rc out
+  dir="$TMP_ROOT/lasttab-permitted"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+
+  # A spare tab in the workspace: PERMITTED (0), with the triple published.
+  jq -n '{next:4,workspaces:[{workspace_id:"w1",label:"firstmate"}],tabs:[{tab_id:"w1:t2",label:"fm-a",workspace_id:"w1",pane_id:"w1:p2"},{tab_id:"w1:t3",label:"fm-b",workspace_id:"w1",pane_id:"w1:p3"}],agent_status:{}}' > "$state"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_last_tab_close_permitted fmtest w1:p2
+      printf "rc=%s triple=%s/%s/%s\n" "$?" "$FM_BACKEND_HERDR_PANE_ID" "$FM_BACKEND_HERDR_TAB_ID" "$FM_BACKEND_HERDR_WORKSPACE_ID"
+    ' "$ROOT" 2>&1 )
+  [ "$out" = "rc=0 triple=w1:p2/w1:t2/w1" ] \
+    || fail "a workspace with a spare tab must be PERMITTED (0) and publish the resolved triple, got: $out"
+
+  # The workspace's only tab: REFUSED as a confirmed last tab (1), still
+  # publishing the triple so the guard can name the tab in its refusal.
+  jq -n '{next:3,workspaces:[{workspace_id:"w1",label:"firstmate"}],tabs:[{tab_id:"w1:t2",label:"fm-only",workspace_id:"w1",pane_id:"w1:p2"}],agent_status:{}}' > "$state"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_last_tab_close_permitted fmtest w1:p2
+      printf "rc=%s triple=%s/%s/%s\n" "$?" "$FM_BACKEND_HERDR_PANE_ID" "$FM_BACKEND_HERDR_TAB_ID" "$FM_BACKEND_HERDR_WORKSPACE_ID"
+    ' "$ROOT" 2>&1 )
+  [ "$out" = "rc=1 triple=w1:p2/w1:t2/w1" ] \
+    || fail "a workspace's last tab must be REFUSED as a confirmed last tab (1) and still publish the triple, got: $out"
+
+  # A pane that does not resolve at all: REFUSED as unresolvable (2), never
+  # permitted - the fail-closed direction the guard depends on.
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_last_tab_close_permitted fmtest w1:p9
+      printf "rc=%s\n" "$?"
+    ' "$ROOT" 2>&1 )
+  [ "$out" = "rc=2" ] || fail "an unresolvable pane must be REFUSED as unresolvable (2), got: $out"
+
+  # An unreadable server is the same fail-closed verdict, never permitted.
+  rc=0
+  ( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$dir/missing-state.json" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_last_tab_close_permitted fmtest w1:p2' "$ROOT" >/dev/null 2>&1 ) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unreadable server must never be PERMITTED (fail closed), got rc=$rc"
+
+  pass "fm_backend_herdr_last_tab_close_permitted: one shared owner returns permitted/last-tab/unresolvable and publishes the resolved triple"
+}
+
 # --- created-vs-adopted default-tab-prune safety (2026-07-02 self-kill fix) -
 #
 # Root cause and fix are documented at
@@ -5056,6 +5110,7 @@ test_workspace_ensure_prunes_default_tab
 test_repeated_cycles_reuse_one_workspace_no_orphans
 test_kill_last_tab_guard_refuses_single_tab_workspace
 test_generic_kill_runs_guard_and_close_under_one_lock
+test_last_tab_close_permitted_is_the_shared_three_valued_owner
 test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth

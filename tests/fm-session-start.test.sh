@@ -1347,6 +1347,42 @@ EOF
   pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
 }
 
+# A REMOTE secondmate's LOCAL meta is the exact shape fm-spawn.sh writes:
+# window=remote:<id> with remote_host= set and NO backend= key, so
+# fm_backend_of_meta defaults the record to tmux and the digest routes it into
+# the tmux endpoint probe. That endpoint lives on another host - its liveness is
+# owned by the remote transport, and the local tmux server has no session named
+# `remote` - so a local probe can only ever mislabel a healthy mate. The digest
+# must never call one dead. The fake tmux here is live for a DIFFERENT window, so
+# a probe that actually resolved `remote:<id>` locally would fail and render
+# `endpoint: dead`.
+test_endpoint_liveness_remote_secondmate_is_never_locally_dead() {
+  local rec root home fakebin out
+  rec=$(new_world liveness-remote)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live-window"
+
+  printf 'window=remote:mate-r1\nendpoint_task_id=mate-r1\nkind=secondmate\nmode=secondmate\nremote_host=build-box\nremote_backend=tmux\nremote_target=firstmate:fm-mate-r1\n' \
+    > "$home/state/mate-r1.meta"
+  # A genuinely gone LOCAL window in the same digest, so this proves the remote
+  # verdict is a real exemption and not a fake that reports everything alive.
+  printf 'window=fm-sess:gone-window\nkind=ship\n' > "$home/state/task-gone.meta"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint: alive (backend=tmux window=remote:mate-r1)" \
+    "a remote secondmate's endpoint must never be reported dead by a LOCAL probe - its liveness is owned by the remote transport"
+  assert_not_contains "$out" "endpoint: dead (backend=tmux window=remote:mate-r1)" \
+    "the local probe must not disprove a remote endpoint"
+  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:gone-window)" \
+    "a genuinely gone local window must still read dead (the remote exemption is not a blanket alive)"
+
+  pass "session start: a remote secondmate's remote:<id> endpoint reads alive, while a gone local window still reads dead"
+}
+
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
@@ -2461,6 +2497,7 @@ test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
+test_endpoint_liveness_remote_secondmate_is_never_locally_dead
 test_composition_invokes_real_scripts
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_queued_bound_discloses_its_remainder

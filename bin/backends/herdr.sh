@@ -3231,6 +3231,35 @@ fm_backend_herdr_kill_serialized() {  # <session> <pane> [<pane_id> <tab_id> <wo
   fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane" || true
 }
 
+# fm_backend_herdr_last_tab_close_permitted: the ONE owner of the "is closing
+# this pane safe for its workspace?" decision, so the kill guard and fm-spawn's
+# abort-cleanup report can never drift onto two different conditions.
+# Exit codes, deliberately three-valued because both callers need the REASON and
+# not just the verdict:
+#   0 - permitted: the pane resolves to itself with a tab and workspace, AND
+#       fm_backend_herdr_workspace_has_spare_tab positively confirms its
+#       workspace holds another tab, so the close cannot empty (and so delete)
+#       the workspace.
+#   1 - refused, confirmed last tab: resolved, but no spare tab could be shown.
+#   2 - refused, unresolvable: the pane read failed, returned a foreign pane_id,
+#       or omitted the tab/workspace, so the tab count was never established.
+# Both nonzero codes FAIL CLOSED. An unresolvable read is NOT license to close:
+# a flaky or unparseable `pane get` (server restarting, CLI timeout, malformed
+# payload) would otherwise green-light a `pane close` that lands once the server
+# recovers, deleting exactly the persistent workspace this predicate protects.
+# Publishes the resolved triple through fm_backend_herdr_resolve_pane_location's
+# FM_BACKEND_HERDR_PANE_ID / _TAB_ID / _WORKSPACE_ID globals, so a caller can
+# name the tab in its refusal and hand the already-resolved triple to the close
+# without paying a second `pane get`.
+fm_backend_herdr_last_tab_close_permitted() {  # <session> <pane>
+  local session=$1 pane=$2
+  fm_backend_herdr_resolve_pane_location "$session" "$pane"
+  [ "$FM_BACKEND_HERDR_PANE_ID" = "$pane" ] || return 2
+  [ -n "$FM_BACKEND_HERDR_TAB_ID" ] && [ -n "$FM_BACKEND_HERDR_WORKSPACE_ID" ] || return 2
+  fm_backend_herdr_workspace_has_spare_tab "$session" "$FM_BACKEND_HERDR_WORKSPACE_ID" || return 1
+  return 0
+}
+
 # fm_backend_herdr_kill_last_tab_guarded: run the last-tab guard, then the
 # serialized close, both under the caller's already-held presentation lock so the
 # tab-count check and the close cannot race a concurrent create/close.
@@ -3250,23 +3279,24 @@ fm_backend_herdr_kill_serialized() {  # <session> <pane> [<pane_id> <tab_id> <wo
 # next spawn of this label, so the refusal message is informational and names no
 # removal command - a manual `tab close` here would delete the workspace the
 # guard just protected.
-# A permitted close is handed the triple this guard already resolved, so the
-# whole guarded kill reads the pane's location once rather than once per stage.
+# A permitted close is handed the triple fm_backend_herdr_last_tab_close_permitted
+# already resolved, so the whole guarded kill reads the pane's location once
+# rather than once per stage.
 fm_backend_herdr_kill_last_tab_guarded() {  # <session> <pane>
-  local session=$1 pane=$2 target_pane target_tab target_ws
-  fm_backend_herdr_resolve_pane_location "$session" "$pane"
-  target_pane=$FM_BACKEND_HERDR_PANE_ID
-  target_tab=$FM_BACKEND_HERDR_TAB_ID
-  target_ws=$FM_BACKEND_HERDR_WORKSPACE_ID
-  if [ "$target_pane" = "$pane" ] && [ -n "$target_ws" ] && [ -n "$target_tab" ]; then
-    if fm_backend_herdr_workspace_has_spare_tab "$session" "$target_ws"; then
-      fm_backend_herdr_kill_serialized "$session" "$pane" "$target_pane" "$target_tab" "$target_ws"
-      return 0
-    fi
-    echo "warning: leaving herdr task pane '$pane' (tab $target_tab) in workspace $target_ws (session $session) in place: it may be that workspace's last tab, and closing it would delete the whole workspace - $FM_BACKEND_HERDR_RESIDUE_NOTE" >&2
-    return 0
-  fi
-  echo "warning: leaving herdr task pane '$pane' (session $session) in place: its workspace could not be read, so the close cannot be shown safe and might delete the whole workspace - $FM_BACKEND_HERDR_RESIDUE_NOTE" >&2
+  local session=$1 pane=$2 verdict=0
+  fm_backend_herdr_last_tab_close_permitted "$session" "$pane" || verdict=$?
+  case "$verdict" in
+    0)
+      fm_backend_herdr_kill_serialized "$session" "$pane" \
+        "$FM_BACKEND_HERDR_PANE_ID" "$FM_BACKEND_HERDR_TAB_ID" "$FM_BACKEND_HERDR_WORKSPACE_ID"
+      ;;
+    1)
+      echo "warning: leaving herdr task pane '$pane' (tab $FM_BACKEND_HERDR_TAB_ID) in workspace $FM_BACKEND_HERDR_WORKSPACE_ID (session $session) in place: it may be that workspace's last tab, and closing it would delete the whole workspace - $FM_BACKEND_HERDR_RESIDUE_NOTE" >&2
+      ;;
+    *)
+      echo "warning: leaving herdr task pane '$pane' (session $session) in place: its workspace could not be read, so the close cannot be shown safe and might delete the whole workspace - $FM_BACKEND_HERDR_RESIDUE_NOTE" >&2
+      ;;
+  esac
   return 0
 }
 

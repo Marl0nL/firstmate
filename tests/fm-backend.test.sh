@@ -1215,7 +1215,22 @@ test_target_exists_tmux_detects_gone_window() {
     fm_backend_target_exists tmux "%9" \
     && fail "fm_backend_target_exists must read a gone bare pane id as absent"
 
-  pass "fm_backend_target_exists (tmux): a gone window reads absent despite display-message's CMD_FIND_CANFAIL fallback; a prefix sibling, an unreadable server, and a bare pane id are all read exactly"
+  # 7. `remote:<id>` is the reserved sentinel a remote secondmate's LOCAL meta
+  #    carries. Its endpoint is on another host, so no local read can disprove
+  #    it; the probe must exempt it BEFORE any backend arm rather than resolving
+  #    a local `remote` session that never exists. FM_FAKE_PRESENT/_PANE are
+  #    empty here, so every real probe in this fake would fail.
+  PATH="$fb:$PATH" FM_FAKE_PRESENT='' \
+    fm_backend_target_exists tmux "remote:mate-r1" \
+    || fail "a remote:<id> endpoint must never read as locally absent - its liveness is owned by the remote transport"
+  PATH="$fb:$PATH" FM_FAKE_PRESENT='' FM_FAKE_SERVER_DOWN=1 \
+    fm_backend_target_exists tmux "remote:mate-r1" \
+    || fail "the remote sentinel must be answered without touching the local server at all"
+  PATH="$fb:$PATH" FM_FAKE_PRESENT='' \
+    fm_backend_target_exists herdr "remote:mate-r1" \
+    || fail "the remote sentinel is backend-agnostic: it must be exempted before the per-backend case"
+
+  pass "fm_backend_target_exists (tmux): a gone window reads absent despite display-message's CMD_FIND_CANFAIL fallback; a prefix sibling, an unreadable server, and a bare pane id are all read exactly, while the remote:<id> sentinel is exempted before any backend arm"
 }
 
 test_backend_name_precedence

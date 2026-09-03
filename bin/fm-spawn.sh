@@ -810,20 +810,15 @@ spawn_endpoint_still_present() {
 # spawn_endpoint_herdr_close_was_permitted: for a still-present herdr endpoint,
 # did the adapter's last-tab guard actually ALLOW the close (so the close truly
 # failed and the removal remedy is the right advice), or did the guard spare this
-# pane on purpose? Mirrors fm_backend_herdr_kill_last_tab_guarded's own
-# fail-closed condition exactly - the pane must resolve to itself AND
-# fm_backend_herdr_workspace_has_spare_tab (the one owner of the safety test)
-# must confirm a spare tab - so anything the guard refuses is reported as a
-# deliberate residue, never as a leftover to delete. This matters because
-# spawn_endpoint_remedy_line's herdr arm prints `herdr pane close <pane>`, the
-# exact workspace-deleting close the guard just refused.
+# pane on purpose? Asks the guard's OWN decision owner
+# (fm_backend_herdr_last_tab_close_permitted) rather than re-deriving its
+# condition here, so this report can never drift onto a stale copy and start
+# printing spawn_endpoint_remedy_line's `herdr pane close <pane>` - the exact
+# workspace-deleting close the guard refused - for a deliberately spared residue.
 spawn_endpoint_herdr_close_was_permitted() {
   fm_backend_source herdr 2>/dev/null || return 1
   fm_backend_herdr_parse_target "$T" 2>/dev/null || return 1
-  fm_backend_herdr_resolve_pane_location "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
-  [ "$FM_BACKEND_HERDR_PANE_ID" = "$FM_BACKEND_HERDR_PANE" ] || return 1
-  [ -n "$FM_BACKEND_HERDR_TAB_ID" ] && [ -n "$FM_BACKEND_HERDR_WORKSPACE_ID" ] || return 1
-  fm_backend_herdr_workspace_has_spare_tab "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_WORKSPACE_ID"
+  fm_backend_herdr_last_tab_close_permitted "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
 }
 
 # spawn_preshield_start: before `treehouse get`, hold every worktree this home's

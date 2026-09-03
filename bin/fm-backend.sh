@@ -871,6 +871,18 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # digest) do not re-derive it inline.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session window pane
+  # `remote:<id>` is the RESERVED SENTINEL a remote secondmate's LOCAL meta
+  # records (bin/fm-spawn.sh writes window=remote:<id> alongside remote_host=
+  # and no backend= key, so fm_backend_of_meta defaults the record to tmux and
+  # routes it here). That endpoint lives on another host: its liveness is owned
+  # by the remote transport, and no local read can disprove it, so probing it
+  # locally could only ever mislabel a live mate as gone (the shape-aware tmux
+  # arm below would resolve it as a `remote` SESSION that never exists here).
+  # Checked FIRST, before the per-backend case, so no backend arm can misroute
+  # a remote record - not-locally-disprovable reads as present.
+  case "$target" in
+    remote:*) return 0 ;;
+  esac
   case "$backend" in
     tmux)
       case "$target" in
