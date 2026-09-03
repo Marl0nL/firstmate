@@ -343,8 +343,18 @@ fm_meta_get() {  # <meta-file> <key>
 
 # fm_backend_of_meta: the backend recorded in <meta-file>, defaulting to
 # `tmux` when the field is absent - the P1 compatibility contract.
+# A meta carrying `remote_host=` is a REMOTELY PLACED secondmate: its endpoint
+# lives on another host and is driven over the fm-on.sh transport, never by a
+# local backend operation, so it classifies as `remote` instead of falling into
+# that default. Keyed ONLY on `remote_host=` - never on the `window=remote:<id>`
+# string, which collides with a real tmux session literally named `remote`
+# (fm_backend_tmux_container_ensure takes the session name from
+# `display-message -p '#S'`, so `tmux new -s remote` records real local tasks as
+# `remote:fm-<id>`). This is the same signal bin/fm-send.sh already routes on
+# when it sets TARGET_BACKEND=remote.
 fm_backend_of_meta() {  # <meta-file>
   local v
+  [ -n "$(fm_meta_get "$1" remote_host)" ] && { printf 'remote'; return 0; }
   v=$(fm_meta_get "$1" backend)
   printf '%s' "${v:-tmux}"
 }
@@ -594,6 +604,17 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 # every dispatcher consumer while preserving the runtime source operations.
 fm_backend_source() {  # <name>
   local name=$1
+  # `remote` is a PLACEMENT, not a local runtime adapter: there is no local
+  # surface to capture, type into, or kill. Refusing here is what makes the
+  # classification safe - every local dispatcher below (capture, send_key,
+  # send_text_submit, kill, composer_state, agent_state, busy_state, publish)
+  # routes through this source step, so a remotely placed secondmate can never
+  # be silently mistreated as this home's tmux. fm_backend_agent_state degrades
+  # to `unverified` on this refusal, never to a false `dead`/`missing`.
+  if [ "$name" = remote ]; then
+    echo "error: 'remote' is a placement, not a local runtime backend: a remotely placed secondmate's endpoint lives on another host and is driven over the fm-on.sh transport, so no local backend operation applies to it" >&2
+    return 1
+  fi
   fm_backend_validate "$name" || return 1
   case "$name" in
     tmux)
@@ -871,19 +892,16 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # digest) do not re-derive it inline.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session window pane
-  # `remote:<id>` is the RESERVED SENTINEL a remote secondmate's LOCAL meta
-  # records (bin/fm-spawn.sh writes window=remote:<id> alongside remote_host=
-  # and no backend= key, so fm_backend_of_meta defaults the record to tmux and
-  # routes it here). That endpoint lives on another host: its liveness is owned
-  # by the remote transport, and no local read can disprove it, so probing it
-  # locally could only ever mislabel a live mate as gone (the shape-aware tmux
-  # arm below would resolve it as a `remote` SESSION that never exists here).
-  # Checked FIRST, before the per-backend case, so no backend arm can misroute
-  # a remote record - not-locally-disprovable reads as present.
-  case "$target" in
-    remote:*) return 0 ;;
-  esac
   case "$backend" in
+    remote)
+      # A remotely placed secondmate (fm_backend_of_meta classifies a meta with
+      # remote_host= as `remote`). Its endpoint lives on another host, so its
+      # liveness is owned by the remote transport and no LOCAL read can disprove
+      # it - probing here could only ever mislabel a live mate as gone.
+      # Not-locally-disprovable reads as present; the remote host's own verdict
+      # is what fm-crew-state and the secondmate recovery path consult instead.
+      return 0
+      ;;
     tmux)
       case "$target" in
         *:*:*|'':*|*:'') return 1 ;;

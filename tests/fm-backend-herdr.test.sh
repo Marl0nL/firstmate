@@ -829,10 +829,13 @@ test_create_task_leaves_residue_tab_when_it_is_the_workspaces_last() {
   assert_not_contains "$RESIDUE_LOG" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t3' \
     "the residue teardown must NOT close its replacement tab when that is the workspace's last tab - closing it deletes the whole workspace"
   assert_contains "$RESIDUE_OUT" "fm-lasttab" "the operator hint must name the tab left in place"
-  assert_contains "$RESIDUE_OUT" "close it manually" "the operator hint must say the leftover tab has to be removed by hand"
-  assert_contains "$RESIDUE_OUT" "herdr tab close w1:t3 --session fmtest" \
-    "the one path that deliberately leaves residue must hand over the exact removal command, like every other remedy"
-  pass "fm_backend_herdr_create_task: a failure-path residue teardown never empties the workspace, it hands the operator the leftover instead"
+  assert_contains "$RESIDUE_OUT" "reclaimable residue" \
+    "the spared tab must be reported as a reclaimable residue the next spawn of this label reuses"
+  assert_contains "$RESIDUE_OUT" "no manual removal is needed" \
+    "the hint must say no manual removal is needed"
+  assert_not_contains "$RESIDUE_OUT" "herdr tab close" \
+    "the hint must NOT name a tab-close command: this tab is the workspace's last, so running it would delete the workspace the refusal just protected"
+  pass "fm_backend_herdr_create_task: a failure-path residue teardown never empties the workspace, and reports the spared tab as reclaimable rather than as something to delete"
 }
 
 # The guard counts tabs from the SAME server that just returned a malformed
@@ -846,7 +849,10 @@ test_create_task_leaves_residue_tab_when_tab_list_is_not_an_array() {
   assert_not_contains "$RESIDUE_LOG" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t3' \
     "a non-array tab list is not a tab COUNT - the residue teardown must not close its replacement tab on an unreadable workspace"
   assert_contains "$RESIDUE_OUT" "fm-badlist" "the operator hint must name the tab left in place"
-  assert_contains "$RESIDUE_OUT" "close it manually" "the operator hint must say the leftover tab has to be removed by hand"
+  assert_contains "$RESIDUE_OUT" "reclaimable residue" \
+    "an unreadable workspace's spared tab must also be reported as a reclaimable residue"
+  assert_not_contains "$RESIDUE_OUT" "herdr tab close" \
+    "an unreadable workspace must not be handed a tab-close command either - the tab count was never established"
   pass "fm_backend_herdr_create_task: a non-array tab list never counts as enough tabs to close the residue tab safely"
 }
 

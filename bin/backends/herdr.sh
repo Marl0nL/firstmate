@@ -2229,12 +2229,16 @@ FM_BACKEND_HERDR_RESIDUE_NOTE="the tab stays as a reclaimable residue that the n
 # workspace itself. These paths run AFTER the husks this tab replaced were
 # already closed, so the replacement can legitimately be the only tab left; when
 # fm_backend_herdr_workspace_has_spare_tab (the one owner of that safety test)
-# cannot confirm another tab, leave the tab in place and hand the operator the
-# exact removal command instead.
+# cannot confirm another tab, leave the tab in place and report it with the
+# shared FM_BACKEND_HERDR_RESIDUE_NOTE wording the kill guard uses. That refusal
+# names NO removal command on purpose: the tab it spared is this workspace's
+# last, so `herdr tab close` on it would delete the very workspace the refusal
+# protected, and the tab keeps the same fm-<label> the next spawn reclaims as a
+# husk anyway.
 fm_backend_herdr_close_residue_tab() {  # <session> <workspace_id> <tab_id> <label>
   local session=$1 wsid=$2 tab_id=$3 label=$4
   if ! fm_backend_herdr_workspace_has_spare_tab "$session" "$wsid"; then
-    echo "warning: leaving herdr tab '$label' ($tab_id) in workspace $wsid (session $session) in place: it may be that workspace's last tab, and closing that would delete the whole workspace - close it manually before retrying: herdr tab close $tab_id --session $session" >&2
+    echo "warning: leaving herdr tab '$label' ($tab_id) in workspace $wsid (session $session) in place: it may be that workspace's last tab, and closing that would delete the whole workspace - $FM_BACKEND_HERDR_RESIDUE_NOTE" >&2
     return 0
   fi
   fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || true
