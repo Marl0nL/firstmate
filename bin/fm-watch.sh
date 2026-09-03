@@ -98,18 +98,23 @@
 # beacon to SETTLE ownership, then RE-CHECKS the lock before entering the poll
 # loop. That acquire/settle-recheck pair brackets the brief mid-renewal window a
 # fresh arm can land in, so two watchers can never both proceed past admission. The
-# same ownership predicate (watcher_owns_lock) then holds one invariant for the
-# whole poll iteration: A SUPERSEDED WATCHER PERFORMS NO SIDE EFFECT. It is
-# re-checked immediately before every side-effect COMMIT - every surfaced wake and
-# durable enqueue, every seen/hash/count/stale/stale-since marker write, every crew
-# keystroke or doorbell send, and every herdr agent-state publish - and the watcher
-# stands down (exit 0) the moment it no longer holds the singleton lock. Capture
-# and classify probes MAY run on a lost lock; what may never follow one is a
-# commit. So a bounded probe (a pane capture, a crew-state read, the signal grace,
-# a check's network poll) is always followed by a fresh ownership check before the
-# work it feeds is committed, and a watcher that loses the lock leaves every signal,
-# check result, and stale pane unmarked for the rightful holder to classify rather
-# than enqueuing a duplicate wake or absorbing what it no longer owns. A direct
+# same ownership predicate (watcher_owns_lock) then holds ONE invariant for the
+# whole poll iteration, and this is its only statement - the guards below just
+# point back here:
+#
+#   NO SIDE-EFFECT COMMIT FOLLOWS A MULTI-SECOND OBSERVATION SPAN WITHOUT AN
+#   OWNERSHIP RE-CHECK. watcher_owns_lock is re-checked immediately before every
+#   commit - a surfaced wake or durable enqueue, a seen/hash/count/stale/stale-since
+#   marker write, a crew keystroke or doorbell send, a herdr agent-state publish -
+#   that is reached after a pane capture, a crew-state classify probe, an
+#   SSH/backend observe, or the terminal event wait; a superseded watcher stands
+#   down (exit 0) and the pending work stays durable for the rightful holder.
+#
+# Observation itself is unrestricted: a probe MAY run on a lost lock, because it
+# writes nothing. What may never follow one is a commit. So a superseded watcher
+# leaves every signal, check result, stale pane, queued process-event, stalled
+# mate row, and push transition UNMARKED - never handled, seen or surfaced, never
+# sent - for the rightful holder to classify and deliver exactly once. A direct
 # duplicate invocation likewise no-ops: it fails admission and exits "already
 # running" before any work.
 set -u
@@ -551,6 +556,8 @@ secondmate_wake_stall_tick() {
     [ "$(cat "$home/.fm-secondmate-home" 2>/dev/null || true)" = "$task" ] || continue
     queue="$home/state/.wake-queue"
     row=$(secondmate_oldest_queue_row "$queue")
+    # Ownership re-check before commit - see the header contract.
+    watcher_owns_lock || exit 0
     marker="$STATE/.secondmate-wake-stall-$task"
     receipt_dir="$STATE/.secondmate-wake-stall-receipts/$task"
     if [ -z "$row" ]; then
@@ -610,6 +617,10 @@ EOF
       continue
     fi
     busy=$(fm_busy_classify_meta "$meta" "$task" "$STATE" 2>/dev/null || true)
+    # Ownership re-check before commit - see the header contract. The stall marker
+    # below suppresses this row for whoever ticks next, so a superseded watcher must
+    # not claim the alarm the holder would otherwise raise.
+    watcher_owns_lock || exit 0
     if [ "${busy%% *}" = busy ]; then
       fm_wake_secondmate_progress_write "$task" "$row_key" "$now" || return 1
       continue
@@ -988,6 +999,13 @@ procevent_surface_queued() {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 0
   fi
+  # Ownership re-check before commit - see the header contract. The surfaced
+  # markers are written only after the wake, so standing down here leaves the
+  # queued result unmarked for the holder to surface.
+  if ! watcher_owns_lock; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    exit 0
+  fi
   reason="check: process-event result captured:$PROCEVENT_SURFACED"
   # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
   FM_WAKE_POST_OUTPUT_ACTION=procevent_surface_after_output
@@ -1166,6 +1184,10 @@ event_wait_or_sleep() {
   case "$rc" in
     0)
       _event_cap_fails=0
+      # Ownership re-check before commit - see the header contract. The wait above
+      # blocks up to POLL; standing down leaves the backend's escalation marker
+      # unwritten, so the holder's own reader re-delivers this edge.
+      watcher_owns_lock || exit 0
       handle_push_transition "$first_backend" "$first_session" "$rec"
       ;;
     2)
@@ -1389,12 +1411,9 @@ while :; do
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
-      # A check poll is a multi-second network span. Stand down before spending it
-      # if the singleton moved, and again below before committing its result, so a
-      # takeover landing mid-poll discards the result instead of enqueuing a wake
-      # the holder will also produce. Exiting before `touch .last-check` leaves the
-      # cadence unadvanced, so the holder re-polls immediately rather than waiting
-      # out a full CHECK_INTERVAL.
+      # Ownership re-check before commit - see the header contract. Standing down
+      # before `touch .last-check` leaves the cadence unadvanced, so the holder
+      # re-polls at once instead of waiting out a full CHECK_INTERVAL.
       watcher_owns_lock || exit 0
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
@@ -1463,11 +1482,7 @@ while :; do
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
-    # A takeover can land WHILE this watcher lingered the grace period above - the
-    # one bounded mid-iteration wait that precedes a side effect. If the singleton
-    # is no longer ours, do not enqueue or suppress this batch: the current holder
-    # owns it and will scan the still-unmarked signal itself. Abandon the iteration
-    # and stand down at the next loop top rather than doubling the wake.
+    # Ownership re-check before commit - see the header contract.
     watcher_owns_lock || continue
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     files=""
@@ -1497,12 +1512,7 @@ EOF
     else
       signal_actionable=1
     fi
-    # Triage itself is a bounded multi-second probe (signal_crew_provably_working
-    # spawns a crew-state read per referenced task), so a takeover can land DURING
-    # it just as it can during the grace above. Re-check ownership at the LAST point
-    # before any side effect: the enqueue, the .seen-* signature advance, and the
-    # benign absorb all follow. Standing down here leaves the signature unwritten, so
-    # the rightful holder rescans the signal and delivers it exactly once.
+    # Ownership re-check before commit - see the header contract.
     watcher_owns_lock || continue
     if [ "$signal_actionable" = 0 ]; then
       while IFS=$(printf '\t') read -r sf sig f; do
@@ -1535,11 +1545,7 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified).
   while IFS= read -r w; do
-    # A superseded watcher must not capture, classify, wedge-escalate, absorb, or
-    # suppress any window's stale state: the absorb branches below write .stale-*
-    # markers that would hide this window's stale from the rightful holder, which
-    # is the repeatedly-absorbed parked pane seen in the field. Stand down before
-    # touching a window at all, and again after its capture returns.
+    # Ownership re-check before commit - see the header contract.
     watcher_owns_lock || exit 0
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
@@ -1572,10 +1578,7 @@ EOF
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-    # The capture is the longest span in the iteration, so re-check before the
-    # first write it feeds: every .hash-/.count-/.stale-/.stale-since- marker and
-    # the herdr publish below. Standing down leaves them unwritten, so the holder
-    # re-derives the same hash on its own poll.
+    # Ownership re-check before commit - see the header contract.
     watcher_owns_lock || exit 0
     # Busy match: a backend's native semantic state when available (herdr), else
     # the last 6 non-blank lines only (the TUI footer area, where every verified
@@ -1794,29 +1797,40 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
-    watcher_owns_lock || exit 0
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
+    heartbeat_class=absorb
     if afk_present; then
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
-      touch "$STATE/.last-heartbeat"
-      wake "heartbeat"
+      heartbeat_class=afk
     elif heartbeat_scan_finds_actionable; then
-      # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
-      # Enqueue first, then mark every captain-relevant status surfaced so the next
-      # heartbeat does not re-fire them (enqueue-before-suppress preserved).
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
-      touch "$STATE/.last-heartbeat"
-      mark_all_captain_relevant_surfaced
-      wake "heartbeat"
-    else
-      touch "$STATE/.last-heartbeat"
-      echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
-      triage_log "absorbed heartbeat (no captain-relevant change)"
+      heartbeat_class=actionable
     fi
+    # Ownership re-check before commit - see the header contract.
+    watcher_owns_lock || exit 0
+    case "$heartbeat_class" in
+      afk)
+        fm_wake_append heartbeat heartbeat heartbeat || exit 1
+        touch "$STATE/.last-heartbeat"
+        wake "heartbeat"
+        ;;
+      actionable)
+        # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
+        # Enqueue first, then mark every captain-relevant status surfaced so the next
+        # heartbeat does not re-fire them (enqueue-before-suppress preserved).
+        fm_wake_append heartbeat heartbeat heartbeat || exit 1
+        touch "$STATE/.last-heartbeat"
+        mark_all_captain_relevant_surfaced
+        wake "heartbeat"
+        ;;
+      *)
+        touch "$STATE/.last-heartbeat"
+        echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
+        triage_log "absorbed heartbeat (no captain-relevant change)"
+        ;;
+    esac
   fi
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
