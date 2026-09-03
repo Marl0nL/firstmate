@@ -1234,9 +1234,24 @@ SH
   done
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
     || fail "watcher did not take the lock before the takeover"
-  # Drop a no-verb signal and give the watcher time to enter its 8s grace linger.
+  # Hand-shake onto a poll-iteration boundary instead of guessing at a sleep. The
+  # beacon is touched at the TOP of each iteration, ahead of scan_signals, so a beat
+  # newer than a reference stamped just before it proves an iteration has only just
+  # begun. Dropping the signal there pins the scan - and therefore the 8s grace
+  # linger - to a known instant, whether it is caught by this iteration or the next
+  # (one FM_POLL=1 second later). Without the handshake a loaded machine can land the
+  # takeover before the scan, and the watcher would stand down at the loop-top gate
+  # while every assertion below still passed - green without exercising the grace gate.
+  : > "$dir/beat-ref"
+  i=0
+  while [ "$i" -lt 200 ] && [ ! "$state/.last-watcher-beat" -nt "$dir/beat-ref" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$state/.last-watcher-beat" -nt "$dir/beat-ref" ] \
+    || fail "watcher never began a fresh poll iteration to drop the signal into"
   printf 'working: crew turn ended\n' > "$state/task.status"
-  sleep 3
+  sleep 2
   # A live successor takes over the singleton while the incumbent still lingers.
   # $$ (the runner) is a live pid that is not the watcher - the same takeover shape
   # test_watcher_self_evicts_on_lock_takeover uses.
@@ -1406,6 +1421,81 @@ SH
   pass "a watcher superseded during a pane capture stands down leaving the stale for the holder"
 }
 
+# The pane capture is not the last multi-second span before the stale commit: the
+# classify probes (crew_is_parked_awaiting_merge, crew_is_provably_working,
+# pause_state_class) each spawn a crew-state read. A takeover landing in one of those
+# left the superseded watcher committing the verdict anyway - writing .stale-$key,
+# which SUPPRESSES the stale for the rightful holder (its own poll re-derives the
+# same hash and skips classification), or surfacing a duplicate stale wake under a
+# pid that no longer owns the singleton. Ownership is re-checked once the verdict is
+# computed and before the commit, so the holder classifies the hash itself.
+test_evicted_watcher_does_no_stale_work_after_classify_takeover() {
+  local dir state fakebin out capture_file probe window key pane_hash pid i
+  dir=$(make_case evicted-no-work-classify)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  capture_file="$dir/pane.txt"
+  probe="$dir/classify-started"
+  window="test:fm-classify"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  mark_pr_check_migration_complete "$state"
+  printf 'no-mistakes axi run: validating...' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/classify.meta"
+  # A non-captain-relevant last line routes the stale through the non-terminal
+  # branch, whose pause_state_class verdict is the crew-state probe below.
+  printf 'working: crunching\n' > "$state/classify.status"
+  pane_hash=$(hash_text "no-mistakes axi run: validating...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  prime_status_seen "$state" "$state/classify.status"
+  # A slow FIRST crew-state read stands in for the real bounded probe (run-step read
+  # plus pane re-capture) and announces its entry, so the takeover lands inside it -
+  # after the post-capture gate has already passed.
+  cat > "$fakebin/fm-crew-state.sh" <<SH
+#!/usr/bin/env bash
+set -u
+if [ ! -e "$probe" ]; then
+  : > "$probe"
+  sleep 6
+fi
+printf '%s\n' 'state: unknown · source: none · slow fake'
+exit 0
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && [ -s "$state/.watch.lock/pid-identity" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    || fail "watcher did not take the lock before the takeover"
+  i=0
+  while [ "$i" -lt 300 ] && [ ! -e "$probe" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$probe" ] || fail "the classify probe never ran, so the takeover could not land inside it"
+  # A live successor takes the singleton while the incumbent is still classifying.
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  wait_for_exit "$pid" 300 || fail "watcher superseded during a classify probe did not stand down"
+  [ ! -e "$state/.stale-$key" ] \
+    || fail "watcher superseded during a classify probe suppressed the stale for the rightful holder"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "watcher superseded during a classify probe enqueued a stale wake it no longer owned: $(cat "$state/.wake-queue")"
+  ! grep -q 'absorbed' "$state/.watch-triage.log" 2>/dev/null \
+    || fail "watcher superseded during a classify probe absorbed a stale it no longer owned"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$$" ] \
+    || fail "watcher superseded during a classify probe clobbered the successor's lock"
+  pass "a watcher superseded during a classify probe stands down leaving the stale for the holder"
+}
+
 # The renewal marker's in-progress predicate: a marker naming a LIVE arm means a
 # renewal hand-off is genuinely under way; a marker naming a dead arm (the hook
 # removes it only after reaping the arm), an absent marker, and a malformed marker
@@ -1512,5 +1602,6 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified
 test_evicted_watcher_does_no_work_after_takeover
 test_evicted_watcher_does_no_work_after_takeover_during_triage
 test_evicted_watcher_does_no_stale_work_after_takeover
+test_evicted_watcher_does_no_stale_work_after_classify_takeover
 test_fm_autoarm_renewal_in_progress_predicate
 test_arm_refuses_fresh_watcher_during_live_renewal
