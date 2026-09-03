@@ -1,0 +1,20 @@
+=== fm-spawn.sh acquisition-timeout refusal (real end-to-end spawn whose `treehouse get` never enters a worktree) ===
+
+--- BEFORE (base commit 6f28d64) ---
+error: treehouse get did not enter a worktree within 60s; the spawn's endpoint was cleaned up - 
+re-run the spawn, or run 'treehouse get' manually to diagnose the worktree pool
+
+--- AFTER (this change) ---
+$ fm-spawn.sh stalled-v5 <project> --mode no-mistakes   (treehouse get never enters a worktree)
+
+warning: /tmp/fm-spawn-preshield.Wi7RPI/get-timeout/home/data/stalled-v5/brief.md records no 
+delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit 
+--mode no-mistakes - confirm its definition of done matches
+error: treehouse get did not enter a worktree within 60 polling attempts (over a minute of 
+waiting, and longer on zellij/cmux where each attempt adds several marker-probe round trips on 
+top of its 1s sleep); the spawn's endpoint was cleaned up - re-run the spawn, or run 'treehouse 
+get' manually to diagnose the worktree pool
+warning: could not tear down the tmux endpoint 'firstmate:fm-stalled-v5' left by the failed 
+spawn of stalled-v5; remove it before retrying: tmux kill-window -t '=firstmate:=fm-stalled-v5'
+
+exit status: 1

@@ -1,0 +1,26 @@
+herdr 0.8.2   isolated throwaway lab session fm-lab-spawn-abort-1561489
+
+=== BEFORE (base commit 6f28d64) ===
+$ fm-spawn.sh abrt0 <project> --backend herdr   (treehouse get never enters a worktree)
+
+  error: treehouse get did not enter a worktree within 60s; the spawn's endpoint was cleaned up - 
+  re-run the spawn, or run 'treehouse get' manually to diagnose the worktree pool
+  --- what the operator is left with ---
+  (no workspaces left - this home has no persistent firstmate workspace any more)
+  task record written: no (the spawn aborted)
+
+=== AFTER (this change) ===
+$ fm-spawn.sh abrt1 <project> --backend herdr   (treehouse get never enters a worktree)
+
+  error: treehouse get did not enter a worktree within 60 polling attempts (over a minute of 
+  waiting, and longer on zellij/cmux where each attempt adds several marker-probe round trips on 
+  top of its 1s sleep); the spawn's endpoint was cleaned up - re-run the spawn, or run 'treehouse 
+  get' manually to diagnose the worktree pool
+  note: the herdr endpoint 'fm-lab-spawn-abort-1561489:w2:p2' left by the failed spawn of abrt1 
+  was spared on purpose: closing it could delete this home's persistent workspace - the tab stays 
+  as a reclaimable residue that the next spawn of this task reuses, so this home's persistent 
+  workspace is preserved and no manual removal is needed
+  --- what the operator is left with ---
+  workspace w2 [firstmate]
+    tab w2:t2 [fm-abrt1]
+  task record written: no (the spawn aborted)

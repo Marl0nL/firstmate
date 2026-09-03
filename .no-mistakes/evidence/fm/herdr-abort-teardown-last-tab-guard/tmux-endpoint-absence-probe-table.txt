@@ -1,0 +1,17 @@
+tmux 3.5a   session `firstmate` windows: fm-abcdef fm-abc-auth 
+
+TARGET (as callers pass it)                    fm_backend_target_exists
+---------------------------                    -----------------------
+live pane id (%0)                              exists rc=0
+gone pane id (%99)                             absent rc=1
+present window (firstmate:fm-abcdef)           exists rc=0
+gone window, live prefix sibling (firstmate:fm-abc) absent rc=1
+present window index (firstmate:0)             exists rc=0
+gone window index (firstmate:99)               absent rc=1
+gone session (nosuch:0)                        absent rc=1
+bare non-selector name (fm-abcdef)             absent rc=1
+
+cross-check - the OLD display-message probe on the same gone targets:
+  display-message -p -t firstmate:fm-abc       -> %0     rc=0
+  display-message -p -t firstmate:99           -> %1     rc=0
+  display-message -p -t %99                    ->        rc=0

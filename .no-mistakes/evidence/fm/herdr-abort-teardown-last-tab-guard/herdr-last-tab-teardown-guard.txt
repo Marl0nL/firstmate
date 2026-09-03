@@ -1,0 +1,36 @@
+herdr: herdr 0.8.2   session: fm-lab-lasttab-demo-1280775 (isolated throwaway lab)
+
+=== SETUP: one firstmate workspace holding exactly ONE task tab (the flat-tab abort shape) ===
+  workspace w1 [firstmate]
+  tab w1:t2 [fm-demo1]
+
+=== BEFORE (base commit 6f28d64): fm_backend_kill herdr <task> on that last tab ===
+  workspaces now:
+  -> workspace w1 IS GONE: the persistent workspace was deleted by the teardown
+
+=== SETUP again: a fresh single-tab workspace ===
+  workspace w2 [firstmate]
+  tab w2:t2 [fm-demo1]
+
+=== AFTER (this change): the same fm_backend_kill herdr <task> call ===
+  stderr: warning: leaving herdr task pane 'w2:p2' (tab w2:t2) in workspace w2 (session 
+  stderr: fm-lab-lasttab-demo-1280775) in place: it may be that workspace's last tab, and closing it 
+  stderr: would delete the whole workspace - the tab stays as a reclaimable residue that the next spawn 
+  stderr: of this task reuses, so this home's persistent workspace is preserved and no manual removal is 
+  stderr: needed
+  workspaces now:
+  workspace w2 [firstmate]
+  tabs now:
+  tab w2:t2 [fm-demo1]
+  -> pane w2:p2 spared, workspace w2 preserved
+
+=== AFTER: the guard is not a blanket refusal - with a SPARE tab the kill closes normally ===
+  tabs before kill:
+  tab w2:t2 [fm-demo1]
+  tab w2:t3 [fm-demo2]
+  -> pane w2:p3 closed as normal; workspace w2 still present:
+  tab w2:t2 [fm-demo1]
+
+=== next spawn of the spared label reclaims the residue tab as a husk (no operator cleanup) ===
+  respawn of fm-demo1 -> tab w2:t4 pane w2:p4
+  tab w2:t4 [fm-demo1]

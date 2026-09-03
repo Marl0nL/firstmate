@@ -1,0 +1,21 @@
+
+=== real tmux session 'fmdemo' (crew window fm-demo + prefix sibling fm-demo-auth) ===
+  fm-demo-auth
+  fm-demo
+tmux -V: tmux 3.5a
+
+=== crew window LIVE -> fm-crew-state.sh demo ===
+  state: working · source: status-log · mid-review
+
+=== operator kills the crew window; the SESSION survives with the sibling ===
+  surviving window: fm-demo-auth
+
+=== the tmux trap: display-message -t is CMD_FIND_CANFAIL, so the gone window still 'resolves' ===
+  $ tmux display-message -p -t fmdemo:fm-demo "#{pane_id}"  -> %0 (rc 0)
+  $ tmux list-windows -t "=fmdemo:=fm-demo"                 -> rc 1 (genuinely absent)
+
+=== BEFORE (base commit 6f28d64) -> fm-crew-state.sh demo ===
+  state: working · source: status-log · mid-review
+
+=== AFTER (this change) -> fm-crew-state.sh demo ===
+  state: unknown · source: none · backend target gone: fmdemo:fm-demo
