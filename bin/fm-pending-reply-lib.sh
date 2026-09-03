@@ -1223,25 +1223,26 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
   return 0
 }
 
-# One reconciliation tick for a single record: resolve, observe, recover, escalate.
-# busy_state is busy|idle|unknown for the secondmate endpoint.
-# secondmate_home may be empty when unknown.
-# When a watcher drives this tick, the caller has just spent a multi-second
-# observation (an SSH round trip for a remote mate, or a local backend read) before
-# reaching here, and everything below COMMITS: it reposts into the mate's pane
-# (fm_pending_reply_send_recovery), escalates, and stamps recovery_attempted_epoch -
-# a single-use budget, so a superseded watcher acting here would both type into a
-# pane it no longer owns and spend the retry the rightful holder needs. Ownership
-# is therefore re-confirmed once, before any of it, per the singleton contract in
-# bin/fm-watch.sh. Skipping leaves the record durable and unmarked, so the holder
-# reposts on its own tick. Non-watcher callers never define the predicate and are
-# unaffected.
+# 0 only when a WATCHER drives this library and has lost its singleton lock.
+#
+# A watcher reaches the tick below only after a multi-second observation (an SSH
+# round trip for a remote mate, or a local backend read), and everything the tick
+# does COMMITS: it reposts into the mate's pane (fm_pending_reply_send_recovery),
+# escalates, and stamps recovery_attempted_epoch - a single-use budget. A superseded
+# watcher acting on that would both type into a pane it no longer owns and spend the
+# retry the rightful holder needs, so ownership is re-confirmed once before any of
+# it, per the singleton contract in bin/fm-watch.sh. Skipping leaves the record
+# durable and unmarked, so the holder reposts on its own tick. Non-watcher callers
+# never define the predicate and are unaffected.
 fm_pending_reply_watcher_superseded() {
   declare -F watcher_owns_lock >/dev/null 2>&1 || return 1
   watcher_owns_lock && return 1
   return 0
 }
 
+# One reconciliation tick for a single record: resolve, observe, recover, escalate.
+# busy_state is busy|idle|unknown for the secondmate endpoint.
+# secondmate_home may be empty when unknown.
 fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-home]
   local state=$1 corr=$2 busy_state=$3 sm_home=${4-}
   local rec phase delivered

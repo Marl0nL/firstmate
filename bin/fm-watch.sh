@@ -98,23 +98,27 @@
 # beacon to SETTLE ownership, then RE-CHECKS the lock before entering the poll
 # loop. That acquire/settle-recheck pair brackets the brief mid-renewal window a
 # fresh arm can land in, so two watchers can never both proceed past admission. The
-# same ownership predicate (watcher_owns_lock) then holds ONE invariant for the
-# whole poll iteration, and this is its only statement - the guards below just
-# point back here:
+# same ownership predicate (watcher_owns_lock) then carries ONE statement for the
+# whole poll iteration, stated here and nowhere else - the guards below just point
+# back at it:
 #
-#   NO SIDE-EFFECT COMMIT FOLLOWS A MULTI-SECOND OBSERVATION SPAN WITHOUT AN
-#   OWNERSHIP RE-CHECK. watcher_owns_lock is re-checked immediately before every
-#   commit - a surfaced wake or durable enqueue, a seen/hash/count/stale/stale-since
-#   marker write, a crew keystroke or doorbell send, a herdr agent-state publish -
-#   that is reached after a pane capture, a crew-state classify probe, an
-#   SSH/backend observe, or the terminal event wait; a superseded watcher stands
-#   down (exit 0) and the pending work stays durable for the rightful holder.
+#   A SUPERSEDED WATCHER PERFORMS NO SIDE EFFECT. watcher_owns_lock is re-checked
+#   at the poll-loop top and again before each commit that follows a multi-second
+#   observation span - a pane capture, a crew-state classify probe, an SSH/backend
+#   observe, a herdr agent-state publish, or the terminal event wait - across the
+#   signal, check, stale, heartbeat, event-wait/push-transition, secondmate-stall,
+#   pending-reply, procevent, inactive-reconcile and resurface paths. A superseded
+#   watcher stands down (exit 0) and its pending work stays durable for the
+#   rightful holder.
 #
 # Observation itself is unrestricted: a probe MAY run on a lost lock, because it
-# writes nothing. What may never follow one is a commit. So a superseded watcher
-# leaves every signal, check result, stale pane, queued process-event, stalled
-# mate row, and push transition UNMARKED - never handled, seen or surfaced, never
-# sent - for the rightful holder to classify and deliver exactly once. A direct
+# writes nothing. What the guards keep from following one is a commit, so a
+# superseded watcher leaves its signal, check result, stale pane, queued
+# process-event, stalled mate row or push transition UNMARKED - never handled,
+# seen or surfaced, never sent - for the rightful holder to deliver exactly once.
+# These mid-iteration re-checks are defense in depth: atomic singleton admission
+# is the primary guarantee that no second watcher exists at all, and the loop-top
+# self-eviction already bounds any path to at most one iteration. A direct
 # duplicate invocation likewise no-ops: it fails admission and exits "already
 # running" before any work.
 set -u
@@ -1610,6 +1614,9 @@ EOF
     # Ownership re-check before commit - see the header contract.
     watcher_owns_lock || exit 0
     maybe_report_herdr_agent_state "$w" "$last" "$busy_now"
+    # The publish is itself a herdr round trip, so re-check before the stale
+    # bookkeeping it precedes - see the header contract.
+    watcher_owns_lock || exit 0
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
