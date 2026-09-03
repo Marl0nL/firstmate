@@ -153,4 +153,25 @@ WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
 pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
 
+# --- event_wait_or_sleep: the rc=0 arm delivers, and its gate is sourced-safe ---
+# The rc=0 arm re-checks singleton ownership before handle_push_transition commits
+# (the category invariant in bin/fm-watch.sh's header). Sourced mode has no watcher
+# runtime, so that gate must be INERT here: this case proves the actionable edge is
+# still delivered end-to-end, and that the guard cannot terminate a sourcing test
+# shell - if it could, every assertion below and the suite's final marker line would
+# be silently skipped while the run still exited 0.
+reset_state
+fm_write_meta "$STATE_DIR/tk6.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
+fm_backend_events_capable() { return 0; }
+# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
+fm_backend_wait_transition() { mkrec wG:pQ blocked; return 0; }
+event_wait_or_sleep
+[ -s "$WAKE_LOG" ] || fail "an actionable edge must wake the supervisor through the rc=0 arm"
+grep -q 'default:wG:pQ' "$STATE_DIR/.wake-queue" 2>/dev/null \
+  || fail "the rc=0 arm must enqueue a stale record naming the crew's window: $(cat "$STATE_DIR/.wake-queue" 2>/dev/null || true)"
+[ -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] \
+  || fail "the rc=0 arm must commit the backend dedupe marker after enqueue"
+pass "event_wait_or_sleep: an actionable edge is delivered, and its ownership gate is inert with no watcher runtime"
+
 echo "# fm-supervision-events.test.sh: all assertions passed"

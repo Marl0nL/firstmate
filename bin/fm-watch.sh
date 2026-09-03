@@ -1206,6 +1206,24 @@ event_wait_or_sleep() {
   esac
 }
 
+# True only while this process is still the recorded singleton-lock holder. The
+# watcher performs supervision side effects - enqueuing wakes, refreshing the
+# beacon, advancing seen-markers - ONLY while this holds, so a process that lost
+# the singleton (to a mid-renewal successor or any takeover) stands down before
+# doing duplicate work rather than continuing a full stale poll iteration. Read the
+# pid directly, never via a command substitution comparison against a subshell pid.
+#
+# Defined ABOVE the sourced-mode guard because the functions it gates are exposed
+# to unit tests by that same contract. An empty WATCHER_PID means no watcher
+# runtime claimed this shell (the sourced case: the assignment below the guard
+# never ran), so there is no singleton to be superseded from and the predicate
+# holds - every `watcher_owns_lock || exit 0` gate is then an inert no-op instead
+# of terminating the sourcing shell on an undefined command.
+watcher_owns_lock() {
+  [ -n "${WATCHER_PID:-}" ] || return 0
+  [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$WATCHER_PID" ]
+}
+
 # --- Main entry: the runtime below runs only when this file is executed as a
 # script. When sourced (unit tests loading the functions above), return here
 # before acquiring the singleton lock or entering the blocking loop.
@@ -1284,15 +1302,6 @@ trap 'exit 1' HUP INT TERM
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
 WATCHER_PID=${BASHPID:-$$}
-# True only while this process is still the recorded singleton-lock holder. The
-# watcher performs supervision side effects - enqueuing wakes, refreshing the
-# beacon, advancing seen-markers - ONLY while this holds, so a process that lost
-# the singleton (to a mid-renewal successor or any takeover) stands down before
-# doing duplicate work rather than continuing a full stale poll iteration. Read the
-# pid directly, never via a command substitution comparison against a subshell pid.
-watcher_owns_lock() {
-  [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$WATCHER_PID" ]
-}
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
@@ -1471,6 +1480,10 @@ while :; do
       touch "$STATE/.last-check"
       wake "$reason"
     fi
+    # Ownership re-check before commit - see the header contract. This advances the
+    # check cadence, so a superseded watcher writing it would silence the holder's
+    # checks for a full CHECK_INTERVAL.
+    watcher_owns_lock || exit 0
     touch "$STATE/.last-check"
   fi
 
@@ -1594,8 +1607,9 @@ EOF
     # on a change, re-establishes after a herdr server restart) and reality-gated
     # (a pane with no live claude process is released, never registered), so it is
     # a cheap no-op on an unchanged window.
-    maybe_report_herdr_agent_state "$w" "$last" "$busy_now"
+    # Ownership re-check before commit - see the header contract.
     watcher_owns_lock || exit 0
+    maybe_report_herdr_agent_state "$w" "$last" "$busy_now"
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
