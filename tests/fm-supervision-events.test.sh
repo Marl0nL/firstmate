@@ -153,4 +153,58 @@ WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
 pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
 
+# --- event_wait_or_sleep: the rc=0 arm delivers, and its gate is sourced-safe ---
+# The rc=0 arm re-checks singleton ownership before handle_push_transition commits
+# (the category invariant in bin/fm-watch.sh's header). Sourced mode has no watcher
+# runtime, so that gate must be INERT here. A gate that is NOT inert runs `exit 0`
+# in whatever shell called the gated function, so calling it directly here would
+# terminate this script with status 0 - skipping every later assertion and the
+# final marker while bin/fm-test-run.sh still records a pass, because it decides
+# pass/fail from the script exit code alone. Both arms below therefore run the
+# gated call in a SUBSHELL that writes a sentinel only AFTER the call returns:
+# the gate's reach is then observable in the parent instead of erasing it.
+RC0_RETURNED="$TMP/rc0-arm-returned"
+
+reset_state
+rm -f "$RC0_RETURNED"
+fm_write_meta "$STATE_DIR/tk6.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
+fm_backend_events_capable() { return 0; }
+# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
+fm_backend_wait_transition() { mkrec wG:pQ blocked; return 0; }
+( event_wait_or_sleep; : > "$RC0_RETURNED" )
+[ -e "$RC0_RETURNED" ] \
+  || fail "the sourced-mode ownership gate exited its shell at 'watcher_owns_lock || exit 0' instead of falling through"
+[ -s "$WAKE_LOG" ] || fail "an actionable edge must wake the supervisor through the rc=0 arm"
+grep -q 'default:wG:pQ' "$STATE_DIR/.wake-queue" 2>/dev/null \
+  || fail "the rc=0 arm must enqueue a stale record naming the crew's window: $(cat "$STATE_DIR/.wake-queue" 2>/dev/null || true)"
+[ -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] \
+  || fail "the rc=0 arm must commit the backend dedupe marker after enqueue"
+pass "event_wait_or_sleep: an actionable edge is delivered, and its ownership gate is inert with no watcher runtime"
+
+# Negative control for the case above: with a superseded owner the gate MUST stop
+# the arm, and the sentinel MUST be absent. This proves the assertion distinguishes
+# an inert gate from a live one - without it, the positive case would hold even if
+# the gate never ran at all - and it pins the silent-pass shape itself: the subshell
+# still exits 0, so only the sentinel separates "delivered" from "stood down".
+reset_state
+rm -f "$RC0_RETURNED"
+fm_write_meta "$STATE_DIR/tk6.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+(
+  # shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
+  watcher_owns_lock() { return 1; }
+  event_wait_or_sleep
+  : > "$RC0_RETURNED"
+)
+NC_RC=$?
+[ "$NC_RC" -eq 0 ] \
+  || fail "a superseded watcher must stand down with status 0, got $NC_RC"
+[ ! -e "$RC0_RETURNED" ] \
+  || fail "a superseded watcher must not run past 'watcher_owns_lock || exit 0' in the rc=0 arm"
+[ ! -s "$WAKE_LOG" ] \
+  || fail "a superseded watcher must not wake the supervisor: $(cat "$WAKE_LOG" 2>/dev/null || true)"
+[ ! -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] \
+  || fail "a superseded watcher must leave the backend dedupe marker unwritten so the holder's reader re-delivers the edge"
+pass "event_wait_or_sleep: a superseded watcher stands down at the rc=0 gate, committing nothing"
+
 echo "# fm-supervision-events.test.sh: all assertions passed"

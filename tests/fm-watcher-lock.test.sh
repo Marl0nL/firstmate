@@ -1188,6 +1188,387 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+# The singleton lock is atomic at admission, but a watcher only re-checked
+# ownership at the top of its poll loop, so a takeover landing WHILE it lingered
+# the mid-iteration signal grace let the superseded watcher finish that iteration -
+# enqueuing a duplicate wake it no longer owned. That is the field ping-pong where
+# two watchers both "proceeded" and the same parked pane was re-absorbed within
+# seconds. The atomic-admission contract now gates every side effect on still
+# owning the lock, so a superseded watcher stands down without doing any work and
+# exactly one watcher ever proceeds.
+test_evicted_watcher_does_no_work_after_takeover() {
+  local dir state fakebin out probe pid i
+  dir=$(make_case evicted-no-work)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  probe="$dir/triage-probe-started"
+  mark_pr_check_migration_complete "$state"
+  # FM_CREW_STATE_BIN must be set explicitly: bin/fm-classify-lib.sh defaults it to
+  # an ABSOLUTE path, so PATH alone would not redirect triage to this case's fake
+  # and the assertions would depend on the real environment's verdict. The fake also
+  # records that it ran, so the stand-down is proven to precede triage entirely; its
+  # unknown verdict keeps the no-verb signal ACTIONABLE, so pre-fix - once triage did
+  # run - the incumbent would enqueue it.
+  cat > "$fakebin/fm-crew-state.sh" <<SH
+#!/usr/bin/env bash
+set -u
+: > "$probe"
+printf '%s\n' 'state: unknown · source: none · fake default'
+exit 0
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  # A large signal grace makes the takeover land deterministically while the
+  # incumbent lingers mid-iteration.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=8 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && [ -s "$state/.watch.lock/pid-identity" ] \
+      && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    || fail "watcher did not take the lock before the takeover"
+  # Hand-shake onto a poll-iteration boundary instead of guessing at a sleep. The
+  # beacon is touched at the TOP of each iteration, ahead of scan_signals, so a beat
+  # newer than a reference stamped just before it proves an iteration has only just
+  # begun. Dropping the signal there pins the scan - and therefore the 8s grace
+  # linger - to a known instant, whether it is caught by this iteration or the next
+  # (one FM_POLL=1 second later). Without the handshake a loaded machine can land the
+  # takeover before the scan, and the watcher would stand down at the loop-top gate
+  # while every assertion below still passed - green without exercising the grace gate.
+  : > "$dir/beat-ref"
+  i=0
+  while [ "$i" -lt 200 ] && [ ! "$state/.last-watcher-beat" -nt "$dir/beat-ref" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$state/.last-watcher-beat" -nt "$dir/beat-ref" ] \
+    || fail "watcher never began a fresh poll iteration to drop the signal into"
+  printf 'working: crew turn ended\n' > "$state/task.status"
+  sleep 2
+  # A live successor takes over the singleton while the incumbent still lingers.
+  # $$ (the runner) is a live pid that is not the watcher - the same takeover shape
+  # test_watcher_self_evicts_on_lock_takeover uses.
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  wait_for_exit "$pid" 200 || fail "superseded watcher did not stand down after takeover"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "superseded watcher enqueued a wake it no longer owned: $(cat "$state/.wake-queue")"
+  ! grep -q 'absorbed' "$state/.watch-triage.log" 2>/dev/null \
+    || fail "superseded watcher absorbed a signal it no longer owned"
+  [ ! -e "$probe" ] \
+    || fail "superseded watcher ran the triage probe instead of standing down at the grace gate"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$$" ] \
+    || fail "superseded watcher clobbered the successor's lock"
+  pass "a watcher superseded mid-iteration stands down without enqueuing or absorbing"
+}
+
+# The grace is not the only bounded mid-iteration span before a side effect: the
+# triage that follows it spawns a crew-state read per referenced task, so a takeover
+# landing INSIDE that probe left the superseded watcher enqueuing the wake and
+# advancing the .seen-* marker once the probe returned - the same duplicate the
+# grace gate was added to stop, one span later. Ownership is re-checked after triage
+# too, so the stood-down watcher leaves the signal unmarked for the rightful holder.
+test_evicted_watcher_does_no_work_after_takeover_during_triage() {
+  local dir state fakebin out probe seen pid i
+  dir=$(make_case evicted-no-work-triage)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  probe="$dir/triage-probe-started"
+  mark_pr_check_migration_complete "$state"
+  # A slow crew-state fake stands in for the real bounded read (a pane capture plus
+  # a no-mistakes run-step lookup) and announces its entry, so the takeover lands
+  # deterministically inside triage - AFTER the post-grace gate has already passed.
+  # Its unknown verdict keeps the no-verb signal ACTIONABLE, so pre-fix the
+  # superseded watcher would enqueue it.
+  cat > "$fakebin/fm-crew-state.sh" <<SH
+#!/usr/bin/env bash
+set -u
+: > "$probe"
+sleep 6
+printf '%s\n' 'state: unknown · source: none · slow fake'
+exit 0
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  seen=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_signal_seen_path "$2" "$3"' \
+    _ "$LIB" "$state" "$state/task.status") || fail "could not resolve the seen-marker path"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && [ -s "$state/.watch.lock/pid-identity" ] \
+      && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    || fail "watcher did not take the lock before the takeover"
+  printf 'working: crew turn ended\n' > "$state/task.status"
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$probe" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$probe" ] || fail "triage probe never ran, so the takeover could not land inside it"
+  # A live successor takes the singleton while the incumbent is still inside triage.
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  wait_for_exit "$pid" 300 || fail "watcher superseded during triage did not stand down"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "watcher superseded during triage enqueued a wake it no longer owned: $(cat "$state/.wake-queue")"
+  ! grep -q 'absorbed' "$state/.watch-triage.log" 2>/dev/null \
+    || fail "watcher superseded during triage absorbed a signal it no longer owned"
+  [ ! -e "$seen" ] \
+    || fail "watcher superseded during triage advanced the seen-marker, hiding the signal from the holder"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$$" ] \
+    || fail "watcher superseded during triage clobbered the successor's lock"
+  pass "a watcher superseded during triage stands down leaving the signal for the holder"
+}
+
+# The pane-stale loop is the third multi-second side-effecting span, and the one
+# behind the field symptom: a takeover landing during a window's pane capture left
+# the superseded watcher classifying that window anyway, then writing .stale-$key -
+# which SUPPRESSES the stale for the rightful holder - or surfacing a duplicate
+# stale wake. Ownership is re-checked once the capture returns, before any
+# .hash-/.count-/.stale- write, so the holder re-derives the same hash itself.
+test_evicted_watcher_does_no_stale_work_after_takeover() {
+  local dir state fakebin out capture_file probe window key pane_hash pid i
+  dir=$(make_case evicted-no-work-stale)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  capture_file="$dir/pane.txt"
+  probe="$dir/capture-started"
+  window="test:fm-parked"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  mark_pr_check_migration_complete "$state"
+  printf 'no-mistakes axi run: validating...' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/parked.meta"
+  printf 'working: crunching\n' > "$state/parked.status"
+  # Pre-seed the stale bookkeeping so the very first poll is already the second
+  # identical hash: the classification (and its .stale-$key suppress write) is then
+  # one capture away, with no extra polls to race.
+  pane_hash=$(hash_text "no-mistakes axi run: validating...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The status file must already be seen, or the signal block would wake first and
+  # the watcher would exit before ever reaching the pane-stale loop.
+  prime_status_seen "$state" "$state/parked.status"
+  # A slow FIRST pane capture stands in for the real backend round-trip and
+  # announces its entry, so the takeover lands deterministically inside it.
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = "list-windows" ]; then
+  printf '%s\n' "\${FM_FAKE_TMUX_WINDOW#*:}"
+  exit 0
+fi
+if [ "\${1:-}" = "capture-pane" ]; then
+  if [ ! -e "$probe" ]; then
+    : > "$probe"
+    sleep 6
+  fi
+  cat "\$FM_FAKE_TMUX_CAPTURE"
+  exit 0
+fi
+if [ "\${1:-}" = "display-message" ]; then
+  case "\$*" in
+    *pane_current_command*) printf '%s\n' "\${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
+  esac
+fi
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && [ -s "$state/.watch.lock/pid-identity" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    || fail "watcher did not take the lock before the takeover"
+  i=0
+  while [ "$i" -lt 300 ] && [ ! -e "$probe" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$probe" ] || fail "pane capture never ran, so the takeover could not land inside it"
+  # A live successor takes the singleton while the incumbent is still capturing.
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  wait_for_exit "$pid" 300 || fail "watcher superseded during a pane capture did not stand down"
+  [ "$(cat "$state/.count-$key" 2>/dev/null || true)" = "1" ] \
+    || fail "watcher superseded during a pane capture advanced the stale counter: $(cat "$state/.count-$key" 2>/dev/null || true)"
+  [ ! -e "$state/.stale-$key" ] \
+    || fail "watcher superseded during a pane capture suppressed the stale for the rightful holder"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "watcher superseded during a pane capture enqueued a stale wake it no longer owned: $(cat "$state/.wake-queue")"
+  ! grep -q 'absorbed' "$state/.watch-triage.log" 2>/dev/null \
+    || fail "watcher superseded during a pane capture absorbed a stale it no longer owned"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$$" ] \
+    || fail "watcher superseded during a pane capture clobbered the successor's lock"
+  pass "a watcher superseded during a pane capture stands down leaving the stale for the holder"
+}
+
+# The pane capture is not the last multi-second span before the stale commit: the
+# classify probes (crew_is_parked_awaiting_merge, crew_is_provably_working,
+# pause_state_class) each spawn a crew-state read. A takeover landing in one of those
+# left the superseded watcher committing the verdict anyway - writing .stale-$key,
+# which SUPPRESSES the stale for the rightful holder (its own poll re-derives the
+# same hash and skips classification), or surfacing a duplicate stale wake under a
+# pid that no longer owns the singleton. Ownership is re-checked once the verdict is
+# computed and before the commit, so the holder classifies the hash itself.
+test_evicted_watcher_does_no_stale_work_after_classify_takeover() {
+  local dir state fakebin out capture_file probe window key pane_hash pid i
+  dir=$(make_case evicted-no-work-classify)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  capture_file="$dir/pane.txt"
+  probe="$dir/classify-started"
+  window="test:fm-classify"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  mark_pr_check_migration_complete "$state"
+  printf 'no-mistakes axi run: validating...' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/classify.meta"
+  # A non-captain-relevant last line routes the stale through the non-terminal
+  # branch, whose pause_state_class verdict is the crew-state probe below.
+  printf 'working: crunching\n' > "$state/classify.status"
+  pane_hash=$(hash_text "no-mistakes axi run: validating...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  prime_status_seen "$state" "$state/classify.status"
+  # A slow FIRST crew-state read stands in for the real bounded probe (run-step read
+  # plus pane re-capture) and announces its entry, so the takeover lands inside it -
+  # after the post-capture gate has already passed.
+  cat > "$fakebin/fm-crew-state.sh" <<SH
+#!/usr/bin/env bash
+set -u
+if [ ! -e "$probe" ]; then
+  : > "$probe"
+  sleep 6
+fi
+printf '%s\n' 'state: unknown · source: none · slow fake'
+exit 0
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && [ -s "$state/.watch.lock/pid-identity" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    || fail "watcher did not take the lock before the takeover"
+  i=0
+  while [ "$i" -lt 300 ] && [ ! -e "$probe" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$probe" ] || fail "the classify probe never ran, so the takeover could not land inside it"
+  # A live successor takes the singleton while the incumbent is still classifying.
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  wait_for_exit "$pid" 300 || fail "watcher superseded during a classify probe did not stand down"
+  [ ! -e "$state/.stale-$key" ] \
+    || fail "watcher superseded during a classify probe suppressed the stale for the rightful holder"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "watcher superseded during a classify probe enqueued a stale wake it no longer owned: $(cat "$state/.wake-queue")"
+  ! grep -q 'absorbed' "$state/.watch-triage.log" 2>/dev/null \
+    || fail "watcher superseded during a classify probe absorbed a stale it no longer owned"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$$" ] \
+    || fail "watcher superseded during a classify probe clobbered the successor's lock"
+  pass "a watcher superseded during a classify probe stands down leaving the stale for the holder"
+}
+
+# The renewal marker's in-progress predicate: a marker naming a LIVE arm means a
+# renewal hand-off is genuinely under way; a marker naming a dead arm (the hook
+# removes it only after reaping the arm), an absent marker, and a malformed marker
+# are all NOT in progress, so a fresh Stop-owned successor arm is never blocked.
+test_fm_autoarm_renewal_in_progress_predicate() {
+  local dir state live
+  dir=$(make_case renewal-in-progress-predicate)
+  state="$dir/state"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_autoarm_renewal_in_progress "$2"' _ "$LIB" "$state" \
+    && fail "absent renewal marker reported in progress"
+  sleep 300 &
+  live=$!
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_autoarm_renewal_request "$2" "$3" stop-renewal' _ "$LIB" "$state" "$live" \
+    || fail "could not write the live renewal marker"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_autoarm_renewal_in_progress "$2"' _ "$LIB" "$state" \
+    || fail "live-arm renewal marker not reported in progress"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_autoarm_renewal_in_progress "$2"' _ "$LIB" "$state" \
+    && fail "renewal marker naming a dead arm reported in progress"
+  printf 'garbage\n' > "$state/.claude-autoarm-renewal"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_autoarm_renewal_in_progress "$2"' _ "$LIB" "$state" \
+    && fail "malformed renewal marker reported in progress"
+  pass "fm_autoarm_renewal_in_progress tracks only a live-arm renewal marker"
+}
+
+# A fresh arm must not fork a competing watcher while a Claude Stop auto-arm
+# continuity renewal is genuinely in flight (marker names a LIVE arm), or it would
+# land in the renewal's brief unheld window and race the successor into a duplicate
+# cycle. It waits (bounded), then starts normally once the renewal clears.
+test_arm_refuses_fresh_watcher_during_live_renewal() {
+  local dir state fakebin armout renewer armpid lock_pid i
+  dir=$(make_case arm-renewal-refuse)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  sleep 300 &
+  renewer=$!
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_autoarm_renewal_request "$2" "$3" stop-renewal' _ "$LIB" "$state" "$renewer" \
+    || fail "could not publish the live renewal marker"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_ARM_CONFIRM_TIMEOUT=20 \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  # While the renewal names a live arm, the fresh arm must NOT start a watcher.
+  i=0
+  while [ "$i" -lt 15 ]; do
+    ! grep -qF 'watcher: started' "$armout" 2>/dev/null \
+      || fail "arm started a competing watcher during a live renewal"
+    [ ! -e "$state/.watch.lock/pid" ] \
+      || fail "arm created a watcher lock during a live renewal"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$armpid" || fail "arm exited during the renewal wait"
+  # The renamed arm dies: the marker no longer names a live arm, so the fresh arm
+  # falls through to a normal start well before its bounded wait deadline.
+  kill "$renewer" 2>/dev/null || true
+  wait "$renewer" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 120 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" \
+    || fail "arm did not start a watcher after the renewal cleared: $(cat "$armout")"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  kill "$armpid" "$lock_pid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "arm refuses a competing watcher during a live renewal and starts once it clears"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
@@ -1218,3 +1599,9 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_evicted_watcher_does_no_work_after_takeover
+test_evicted_watcher_does_no_work_after_takeover_during_triage
+test_evicted_watcher_does_no_stale_work_after_takeover
+test_evicted_watcher_does_no_stale_work_after_classify_takeover
+test_fm_autoarm_renewal_in_progress_predicate
+test_arm_refuses_fresh_watcher_during_live_renewal

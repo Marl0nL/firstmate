@@ -177,6 +177,62 @@ test_completed_turn_no_report_triggers_one_recovery() {
   pass "completed turn with no report triggers exactly one recovery"
 }
 
+# A watcher-driven tick reaches this library only after a multi-second observation
+# (an SSH round trip for a remote mate, or a local backend read). If the singleton
+# lock moved during that observation, the superseded watcher must NOT repost into
+# the mate's pane, and must not spend the record's single recovery budget - the
+# record stays durable and unmarked so the rightful holder reposts on its own tick.
+# A non-watcher caller never defines the predicate and is unaffected (every other
+# case in this file exercises that path).
+test_superseded_watcher_tick_reposts_nothing() {
+  local home state corr hook_log rec phase_before
+  home=$(setup_parent superseded-tick)
+  state="$home/state"
+  hook_log="$TMP_ROOT/superseded-hook.log"
+  : > "$hook_log"
+  export FM_PENDING_REPLY_NOW=2000
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
+  recovery_hook() {
+    printf '%s\t%s\n' "$1" "$2" >> "$hook_log"
+  }
+  export -f recovery_hook
+  export FM_PENDING_REPLY_SEND_HOOK='recovery_hook'
+
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "status of phase 7")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  # Turn completes with no parent report: the record is now due for its one repost.
+  fm_pending_reply_observe_busy "$state" "$corr" busy
+  fm_pending_reply_observe_busy "$state" "$corr" idle
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  phase_before=$(phase_of "$state" "$corr")
+
+  # A watcher context whose singleton lock moved during the observation above.
+  # shellcheck disable=SC2329
+  watcher_owns_lock() { return 1; }
+  fm_pending_reply_tick_one "$state" "$corr" idle \
+    || fail "a superseded watcher's tick must return cleanly"
+  [ ! -s "$hook_log" ] \
+    || fail "a superseded watcher reposted into the mate pane: $(cat "$hook_log")"
+  [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] \
+    || fail "a superseded watcher spent the record's single recovery budget"
+  [ "$(phase_of "$state" "$corr")" = "$phase_before" ] \
+    || fail "a superseded watcher advanced the record from $phase_before to $(phase_of "$state" "$corr")"
+
+  # The rightful holder finds the record durable and unmarked, and reposts once.
+  # shellcheck disable=SC2329
+  watcher_owns_lock() { return 0; }
+  fm_pending_reply_tick_one "$state" "$corr" idle \
+    || fail "the lock-owning watcher's tick failed"
+  [ -s "$hook_log" ] \
+    || fail "the rightful holder never reposted the missed request"
+  [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+    || fail "the holder's repost did not record its send, got $(phase_of "$state" "$corr")"
+  unset -f watcher_owns_lock
+  unset FM_PENDING_REPLY_SEND_HOOK FM_PENDING_REPLY_NOW
+  pass "a superseded watcher's pending-reply tick reposts nothing and leaves the record for the holder"
+}
+
 test_recovery_attempt_is_never_reinjected() {
   local home state corr rec hook_log lines live_corr live_rec live_pid live_identity
   home=$(setup_parent recovery-at-most-once)
@@ -1291,6 +1347,7 @@ test_failed_send_discards_undelivered_expectation() {
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_attempt_is_never_reinjected
+test_superseded_watcher_tick_reposts_nothing
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
 test_escalation_wakes_and_its_close_stays_quiet
