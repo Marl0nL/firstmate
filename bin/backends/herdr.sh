@@ -3138,7 +3138,26 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   done
 }
 
-# fm_backend_herdr_kill: remove the task's pane, best-effort (mirrors
+# fm_backend_herdr_resolve_pane_location: one read-only `pane get`, publishing
+# the pane's own ids in FM_BACKEND_HERDR_PANE_ID / FM_BACKEND_HERDR_TAB_ID /
+# FM_BACKEND_HERDR_WORKSPACE_ID - the same publish-into-globals shape
+# fm_backend_herdr_parse_target uses, so an absent field stays exactly empty
+# instead of being lost to word splitting. Each is empty when the server is
+# unreadable, the pane is gone, or the payload omits that field; callers apply
+# their own resolution test (the guard demands all three AND an exact pane_id
+# match, the serialized close only needs the tab), so this deliberately does not
+# impose one. Sole owner of that extraction, so the last-tab guard and the
+# serialized close read one identical triple and a guarded kill pays a single
+# round trip under the held presentation lock instead of two.
+fm_backend_herdr_resolve_pane_location() {  # <session> <pane>
+  local info
+  info=$(fm_backend_herdr_cli "$1" pane get "$2" 2>/dev/null) || info=
+  FM_BACKEND_HERDR_PANE_ID=$(printf '%s' "$info" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
+  FM_BACKEND_HERDR_TAB_ID=$(printf '%s' "$info" | jq -r '.result.pane.tab_id // empty' 2>/dev/null)
+  FM_BACKEND_HERDR_WORKSPACE_ID=$(printf '%s' "$info" | jq -r '.result.pane.workspace_id // empty' 2>/dev/null)
+}
+
+# fm_backend_herdr_kill_serialized: remove the task's pane, best-effort (mirrors
 # tmux-kill-window's `|| true` contract). Verified: closing a tab's only pane
 # closes the tab too, so a separate tab close is unnecessary.
 # When the close would empty a non-focused workspace, Herdr 0.7.5's explicit
@@ -3149,16 +3168,22 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
 # restore as the backstop. A close that empties the FOCUSED workspace moves
 # focus legitimately, and every in-lock planning ambiguity or failure falls
 # back to the plain close, matching the pre-hardening contract.
-fm_backend_herdr_kill_serialized() {  # <session> <pane>
-  local session=$1 pane=$2
-  local before active_tab info target_pane target_tab target_ws plan shell_pid plan_move_record close_failed workspace_presence
+# The optional pre-resolved triple is the caller's already-read pane location
+# (fm_backend_herdr_kill_last_tab_guarded has one in hand from its guard check
+# under the same held lock); omitted, this resolves it itself, which is the
+# direct-caller shape fm-teardown uses.
+fm_backend_herdr_kill_serialized() {  # <session> <pane> [<pane_id> <tab_id> <workspace_id>]
+  local session=$1 pane=$2 target_pane=${3:-} target_tab=${4:-} target_ws=${5:-}
+  local before active_tab plan shell_pid plan_move_record close_failed workspace_presence
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || before=
   if [ -n "$before" ]; then
     active_tab=${before#*$'\t'}
-    info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || info=
-    target_pane=$(printf '%s' "$info" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
-    target_tab=$(printf '%s' "$info" | jq -r '.result.pane.tab_id // empty' 2>/dev/null)
-    target_ws=$(printf '%s' "$info" | jq -r '.result.pane.workspace_id // empty' 2>/dev/null)
+    if [ -z "$target_pane" ]; then
+      fm_backend_herdr_resolve_pane_location "$session" "$pane"
+      target_pane=$FM_BACKEND_HERDR_PANE_ID
+      target_tab=$FM_BACKEND_HERDR_TAB_ID
+      target_ws=$FM_BACKEND_HERDR_WORKSPACE_ID
+    fi
     if [ "$target_pane" = "$pane" ] && [ -n "$target_tab" ] && [ "$target_tab" != "$active_tab" ]; then
       plan=$(fm_backend_herdr_emptying_close_plan "$session" "$pane" "$target_ws" "$target_tab" "${before%%$'\t'*}")
       plan_move_record=
@@ -3210,15 +3235,20 @@ fm_backend_herdr_kill_serialized() {  # <session> <pane>
 # failed-spawn residue cleanup follows. If the pane cannot be resolved (already
 # gone, or an unreadable server), fall through to the best-effort serialized close
 # rather than printing a remedy with no tab to name.
+# A permitted close is handed the triple this guard already resolved, so the
+# whole guarded kill reads the pane's location once rather than once per stage.
 fm_backend_herdr_kill_last_tab_guarded() {  # <session> <pane>
-  local session=$1 pane=$2 info target_pane target_tab target_ws
-  info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || info=
-  target_pane=$(printf '%s' "$info" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
-  target_tab=$(printf '%s' "$info" | jq -r '.result.pane.tab_id // empty' 2>/dev/null)
-  target_ws=$(printf '%s' "$info" | jq -r '.result.pane.workspace_id // empty' 2>/dev/null)
-  if [ "$target_pane" = "$pane" ] && [ -n "$target_ws" ] && [ -n "$target_tab" ] \
-     && ! fm_backend_herdr_workspace_has_spare_tab "$session" "$target_ws"; then
-    echo "warning: leaving herdr task pane '$pane' (tab $target_tab) in workspace $target_ws (session $session) in place: it may be that workspace's last tab, and closing it would delete the whole workspace - close it manually before retrying: herdr tab close $target_tab --session $session" >&2
+  local session=$1 pane=$2 target_pane target_tab target_ws
+  fm_backend_herdr_resolve_pane_location "$session" "$pane"
+  target_pane=$FM_BACKEND_HERDR_PANE_ID
+  target_tab=$FM_BACKEND_HERDR_TAB_ID
+  target_ws=$FM_BACKEND_HERDR_WORKSPACE_ID
+  if [ "$target_pane" = "$pane" ] && [ -n "$target_ws" ] && [ -n "$target_tab" ]; then
+    if ! fm_backend_herdr_workspace_has_spare_tab "$session" "$target_ws"; then
+      echo "warning: leaving herdr task pane '$pane' (tab $target_tab) in workspace $target_ws (session $session) in place: it may be that workspace's last tab, and closing it would delete the whole workspace - close it manually before retrying: herdr tab close $target_tab --session $session" >&2
+      return 0
+    fi
+    fm_backend_herdr_kill_serialized "$session" "$pane" "$target_pane" "$target_tab" "$target_ws"
     return 0
   fi
   fm_backend_herdr_kill_serialized "$session" "$pane"

@@ -864,9 +864,11 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # Both fail for an unreadable server/session, which IS "does not exist" here, so
 # this helper needs no has-session split (unlike spawn_endpoint_still_present,
 # which uses one to hold an unreadable server as "still present").
-# Mirrors fm-crew-state.sh's pane_readable check; exists here as one shared
-# primitive so callers that only need a fast alive/dead read (recovery
-# digests, the session-start fleet digest) do not re-derive it inline.
+# fm-crew-state.sh's pane_readable routes its tmux arm through this helper
+# rather than carrying its own probe, so the two cannot diverge back onto a
+# CANFAIL read; this exists as the one shared primitive so callers that only
+# need a fast alive/dead read (recovery digests, the session-start fleet
+# digest) do not re-derive it inline.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session window pane
   case "$backend" in
