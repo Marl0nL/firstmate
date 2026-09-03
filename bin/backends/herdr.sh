@@ -3304,12 +3304,14 @@ fm_backend_herdr_kill_last_tab_guarded() {  # <session> <pane>
   return 0
 }
 
-# fm_backend_herdr_kill: the generic fm_backend_kill herdr close path (failed-
-# spawn abort residue, dead-endpoint reclamation, child teardown). It refuses the
-# unlocked close, then hands off to the last-tab-guarded serialized close under
-# the held presentation lock. fm-teardown's completed-task path calls
-# fm_backend_herdr_kill_serialized directly, behind its own confirmed-gone gate,
-# and is deliberately not routed through this guard.
+# fm_backend_herdr_kill: the generic fm_backend_kill herdr close path, reached by
+# fm-spawn's failed-spawn abort residue and by the dead-endpoint reclamation that
+# precedes a relaunch (fm-bootstrap secondmate liveness,
+# fm-remote-secondmate-control). It refuses the unlocked close, then hands off to
+# the last-tab-guarded serialized close under the held presentation lock.
+# fm-teardown's own herdr closes - the completed-task path and forced-child
+# cleanup - call fm_backend_herdr_kill_serialized directly, behind their own
+# confirmed-gone gates, and are deliberately not routed through this guard.
 fm_backend_herdr_kill() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
   local session=$FM_BACKEND_HERDR_SESSION pane=$FM_BACKEND_HERDR_PANE
