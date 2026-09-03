@@ -1,0 +1,101 @@
+firstmate watcher singleton - end-to-end walkthrough
+branch : fm/watcher-duplicate-cycles-lock-pingpong (head 49d351e)
+setup  : hermetic demo homes, fake tmux backend, no real notifications
+
+══════════════════════════════════════════════════════════════════════
+SCENARIO 1 - three watchers race admission; exactly one is admitted
+══════════════════════════════════════════════════════════════════════
+  Field symptom: three concurrent watcher processes racing the singleton lock.
+
+$ bin/fm-watch.sh  x3, launched simultaneously against the same home
+  launch #1  running   <no output - it is supervising>
+  launch #2  exited    watcher: already running pid 969549
+  launch #3  exited    watcher: already running pid 969549
+
+$ cat state/.watch.lock/pid
+  969549
+  ✔ exactly one watcher process survived admission
+  ✔ the other two were REFUSED at admission, naming the holder (969549) back
+  ✔ the lock names a live watcher - no split cycle, no ping-pong
+
+══════════════════════════════════════════════════════════════════════
+SCENARIO 2 - a takeover mid-iteration: the superseded watcher commits nothing
+══════════════════════════════════════════════════════════════════════
+  Field symptom: a superseded watcher finished its iteration and enqueued /
+  absorbed work it no longer owned, so the same parked pane was re-absorbed.
+
+$ bin/fm-watch.sh   # the incumbent watcher for this home
+  watcher pid=972168 holds state/.watch.lock (identity published, beacon fresh)
+
+$ fm_supervision_status state/ 300   # is supervision even needed here?
+  FM_SUP_IN_FLIGHT=1 FM_SUP_NEEDED=true FM_SUP_WATCHER_FRESH=true
+  ✔ supervision IS needed (a task is in flight), so the guard below is a real check
+
+$ bin/fm-turnend-guard.sh   < {"stop_hook_active":false}
+  (no output, exit 0)
+  ✔ turn-end guard is silent: one live watcher holds this home lock, the turn may end
+
+$ echo 'working: crew turn ended' > state/task.status   # a crew signal lands
+  the incumbent is now inside its multi-second signal-grace span
+
+$ echo <successor-pid> > state/.watch.lock/pid   # a takeover lands mid-iteration
+  the singleton now names pid 972871; pid 972168 is superseded
+  ✔ the superseded watcher stood down (exit 0) instead of finishing its iteration
+
+$ cat state/.wake-queue ; cat state/.watch-triage.log ; ls state/.seen-*
+  .wake-queue        : (empty)
+  .watch-triage.log  : (empty)
+  seen-markers       : (none)
+  crew-state probe   : never ran - stood down at the grace gate, ahead of triage
+  ✔ no wake was enqueued by the watcher that lost the lock
+  ✔ nothing was absorbed by the watcher that lost the lock
+  ✔ the crew signal is still UNMARKED - durable for the rightful holder
+  ✔ the successor's lock was left untouched
+
+══════════════════════════════════════════════════════════════════════
+SCENARIO 3 - the work the superseded watcher left behind is still delivered
+══════════════════════════════════════════════════════════════════════
+  The stood-down watcher marked nothing, so the signal is still pending. This is
+  the real operator loop: the successor re-engages, the primary drains, the next
+  watcher delivers the crew signal itself.
+
+$ bin/fm-watch.sh   # the rightful holder takes the home over
+  check: rearm-resurface
+  ✔ the successor re-engages the primary after its predecessor stood down - the home is not blind
+
+$ bin/fm-wake-drain.sh   # the primary handles that turn and acknowledges
+  WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 973896.1788409397.d009LH
+  ✔ acknowledged (--ack-through 0)
+
+$ bin/fm-watch.sh   # the next watcher of the cycle
+  signal: /tmp/fm-singleton-demo.gMKhnd/home-takeover/state/task.status
+  ✔ the crew signal the superseded watcher declined to touch is delivered - nothing was lost
+
+$ ls state/.seen-*
+  /tmp/fm-singleton-demo.gMKhnd/home-takeover/state/.seen-task_status 
+  ✔ the seen-marker is advanced only now, by the watcher that owned the lock
+
+══════════════════════════════════════════════════════════════════════
+SCENARIO 4 - the arm refuses to fork a competing watcher during a live renewal
+══════════════════════════════════════════════════════════════════════
+  A Claude Stop auto-arm continuity renewal is a controlled hand-off. A fresh arm
+  forking into its brief unheld window is what compounded the duplicate cycles.
+
+$ cat state/.claude-autoarm-renewal
+  pid=975127 successor=stop-renewal
+  (arm pid 975127 is alive - the renewal is genuinely in flight)
+
+$ bin/fm-watch-arm.sh   # a fresh arm fires while that renewal is in flight
+  arm stdout after 5s of a live renewal : (nothing - it is waiting)
+  state/.watch.lock                     : (no watcher forked)
+  ✔ the arm did NOT fork a competing watcher into the renewal window
+  ✔ the arm is waiting (bounded), not dead and not blind
+
+$ kill <renewal arm pid>   # the renewal clears
+  arm stdout: watcher: started pid=980998 (beacon fresh)
+  ✔ the arm fell through to a normal start once the renewal cleared - the home is never left blind
+
+══════════════════════════════════════════════════════════════════════
+RESULT
+══════════════════════════════════════════════════════════════════════
+ALL SCENARIOS BEHAVED AS INTENDED
