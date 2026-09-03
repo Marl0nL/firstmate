@@ -1241,7 +1241,7 @@ test_target_exists_tmux_detects_gone_window() {
     fm_backend_target_exists tmux "remote:fm-gone" \
     && fail "a GONE window in a tmux session literally named 'remote' must still read absent - the remote classification is meta-keyed, not a target-string exemption"
 
-  pass "fm_backend_target_exists (tmux): a gone window reads absent despite display-message's CMD_FIND_CANFAIL fallback; a prefix sibling, an unreadable server, and a bare pane id are all read exactly; backend=remote reads present without a local probe, while a tmux session literally named `remote` is still probed exactly"
+  pass "fm_backend_target_exists (tmux): a gone window reads absent despite display-message's CMD_FIND_CANFAIL fallback; a prefix sibling, an unreadable server, and a bare pane id are all read exactly; backend=remote reads present without a local probe, while a tmux session literally named 'remote' is still probed exactly"
 }
 
 test_backend_name_precedence
