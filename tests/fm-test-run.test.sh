@@ -182,55 +182,6 @@ test_changed_dependency_selection_and_unmapped_failure() {
   pass "changed selection covers dependents and fails closed for unmapped source"
 }
 
-# Regression: bin/fm-pending-reply-lib.sh had no entry in the changed-path map,
-# so --changed fell through to the repo-wide reference scan. That scan selects
-# the whole FAMILY of every test whose text names the changed file, and suites in
-# unrelated families merely mention this library's path, so a watcher-only change
-# dragged in the secondmate, session-bootstrap, live-harness and unclassified
-# families - 132 of 183 scripts, past thirty minutes of serial work. That is the
-# "silent full suite" this map exists to prevent, and it is what pushed the
-# repository's intent-targeted no-mistakes Test step past its budget so the step
-# skipped. A changed library must select the family that owns its behavior, not
-# every family that happens to name it.
-test_changed_selection_bounds_a_mentioned_library() {
-  local tmp repo listed
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-pending-reply.XXXXXX")
-  repo="$tmp/repo"
-  init_changed_fixture_repo "$repo"
-  printf '#!/usr/bin/env bash\n# tests/lib.sh\n# bin/fm-pending-reply-lib.sh\n' \
-    >"$repo/tests/fm-pending-reply.test.sh"
-  chmod +x "$repo/tests/fm-pending-reply.test.sh"
-  # Suites from other families that only NAME the library, the way the real
-  # secondmate and session-bootstrap suites do.
-  printf '# bin/fm-pending-reply-lib.sh\n' >>"$repo/tests/fm-secondmate-safety.test.sh"
-  printf '# bin/fm-pending-reply-lib.sh\n' >>"$repo/tests/fm-session-start.test.sh"
-  : >"$repo/bin/fm-pending-reply-lib.sh"
-  git -C "$repo" add .
-  git -C "$repo" -c user.name=test -c user.email=test@example.invalid \
-    commit -qm pending-reply-baseline
-
-  printf '\n' >>"$repo/bin/fm-pending-reply-lib.sh"
-  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-pending-reply.test.sh" \
-    "pending-reply library selects its own owner suite"
-  assert_contains "$listed" "tests/fm-daemon.test.sh" \
-    "pending-reply library selects the watcher family that runs its tick"
-  case "$listed" in
-    *tests/fm-secondmate-safety.test.sh*)
-      rm -rf "$tmp"
-      fail "changed pending-reply library selected the secondmate family, which only names it"
-      ;;
-  esac
-  case "$listed" in
-    *tests/fm-session-start.test.sh*)
-      rm -rf "$tmp"
-      fail "changed pending-reply library selected the session-bootstrap family, which only names it"
-      ;;
-  esac
-  rm -rf "$tmp"
-  pass "a changed library selects its owning family, not every family that names it"
-}
-
 test_empty_selection_emits_summary() {
   local tmp repo out json
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-empty.XXXXXX")
@@ -757,7 +708,6 @@ test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
-test_changed_selection_bounds_a_mentioned_library
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior

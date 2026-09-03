@@ -1224,8 +1224,10 @@ event_wait_or_sleep() {
 # holds - every `watcher_owns_lock || exit 0` gate is then an inert no-op instead
 # of terminating the sourcing shell on an undefined command.
 watcher_owns_lock() {
+  local lock_pid=''
   [ -n "${WATCHER_PID:-}" ] || return 0
-  [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$WATCHER_PID" ]
+  IFS= read -r lock_pid 2>/dev/null < "$WATCH_LOCK/pid" || true
+  [ "$lock_pid" = "$WATCHER_PID" ]
 }
 
 # --- Main entry: the runtime below runs only when this file is executed as a
