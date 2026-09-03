@@ -320,8 +320,8 @@ fi
 
 # fm_backend_herdr_kill (the generic fm_backend_kill herdr path) refuses to close
 # a workspace's LAST tab, because closing a workspace's last tab deletes the whole
-# persistent workspace on real herdr; it leaves a residue tab and hands over the
-# exact removal command instead (docs/verification/runtime-backends.md "Endpoint
+# persistent workspace on real herdr; it leaves a residue tab that the next spawn
+# of the same label reclaims as a husk, and reports it informationally instead (docs/verification/runtime-backends.md "Endpoint
 # absence probe" / this session). A sibling tab is created first so fm-smoke1's
 # kill is NOT the last tab and removes its pane normally.
 SIB_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-smoke-sib" /tmp "") || fail "sibling create_task failed"
@@ -344,10 +344,19 @@ if ! herdr pane get "$SIB_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
   fail "kill of the workspace's LAST tab must be refused, but its pane was removed (the persistent workspace was deleted)"
 fi
 case "$kill_err" in
-  *"herdr tab close $SIB_TAB_ID --session $SESSION"*) : ;;
-  *) fail "the last-tab kill refusal must print the exact residue-removal command, got: $kill_err" ;;
+  *"reclaimable residue"*) : ;;
+  *) fail "the last-tab kill refusal must report the spared tab as a reclaimable residue the retry reuses, got: $kill_err" ;;
 esac
-pass "real herdr: kill removes a non-last-tab pane (idempotent/best-effort) and refuses the workspace's last tab with the exact residue-removal command"
+case "$kill_err" in
+  *"herdr tab close"*)
+    fail "the refusal must NOT print a tab-close command - running it on this last tab would delete the very workspace the guard protected: $kill_err" ;;
+esac
+# The point of the refusal: the spared TAB (and with it the persistent workspace)
+# is still there for the next spawn of this label to reclaim as a husk.
+herdr tab list --workspace "${CONTAINER#*:}" --session "$SESSION" 2>/dev/null \
+  | jq -e --arg t "$SIB_TAB_ID" '[.result.tabs[]?.tab_id] | index($t)' >/dev/null \
+  || fail "the spared residue tab $SIB_TAB_ID must survive in workspace ${CONTAINER#*:} - that is what the refusal preserved"
+pass "real herdr: kill removes a non-last-tab pane (idempotent/best-effort) and refuses the workspace's last tab, reporting it as a reclaimable residue rather than something to remove"
 
 # --- list_live (label-based recovery discovery) ------------------------------
 

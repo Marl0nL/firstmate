@@ -807,6 +807,25 @@ spawn_endpoint_still_present() {
   esac
 }
 
+# spawn_endpoint_herdr_close_was_permitted: for a still-present herdr endpoint,
+# did the adapter's last-tab guard actually ALLOW the close (so the close truly
+# failed and the removal remedy is the right advice), or did the guard spare this
+# pane on purpose? Mirrors fm_backend_herdr_kill_last_tab_guarded's own
+# fail-closed condition exactly - the pane must resolve to itself AND
+# fm_backend_herdr_workspace_has_spare_tab (the one owner of the safety test)
+# must confirm a spare tab - so anything the guard refuses is reported as a
+# deliberate residue, never as a leftover to delete. This matters because
+# spawn_endpoint_remedy_line's herdr arm prints `herdr pane close <pane>`, the
+# exact workspace-deleting close the guard just refused.
+spawn_endpoint_herdr_close_was_permitted() {
+  fm_backend_source herdr 2>/dev/null || return 1
+  fm_backend_herdr_parse_target "$T" 2>/dev/null || return 1
+  fm_backend_herdr_resolve_pane_location "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
+  [ "$FM_BACKEND_HERDR_PANE_ID" = "$FM_BACKEND_HERDR_PANE" ] || return 1
+  [ -n "$FM_BACKEND_HERDR_TAB_ID" ] && [ -n "$FM_BACKEND_HERDR_WORKSPACE_ID" ] || return 1
+  fm_backend_herdr_workspace_has_spare_tab "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_WORKSPACE_ID"
+}
+
 # spawn_preshield_start: before `treehouse get`, hold every worktree this home's
 # own state/*.meta already records so the pool cannot judge an owned slot free.
 # Treehouse v2 decides a slot is available from live-process cwd, and a parked
@@ -950,7 +969,11 @@ spawn_abort_cleanup() {
     if [ -n "${BACKEND:-}" ] && [ -n "${T:-}" ]; then
       fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null || true
       if spawn_endpoint_still_present; then
-        echo "warning: could not tear down the $BACKEND endpoint '$T' left by the failed spawn of $ID; remove it before retrying: $(spawn_endpoint_remedy_line)" >&2
+        if [ "$BACKEND" = herdr ] && ! spawn_endpoint_herdr_close_was_permitted; then
+          echo "note: the herdr endpoint '$T' left by the failed spawn of $ID was spared on purpose: closing it could delete this home's persistent workspace - ${FM_BACKEND_HERDR_RESIDUE_NOTE:-the tab stays as a reclaimable residue that the next spawn of this task reuses}" >&2
+        else
+          echo "warning: could not tear down the $BACKEND endpoint '$T' left by the failed spawn of $ID; remove it before retrying: $(spawn_endpoint_remedy_line)" >&2
+        fi
       fi
     fi
   fi

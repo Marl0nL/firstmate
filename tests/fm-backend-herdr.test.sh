@@ -3205,12 +3205,19 @@ test_send_key_normalizes_and_targets_pane() {
   pass "fm_backend_herdr_send_key: normalizes the key and targets the right pane"
 }
 
-test_kill_is_best_effort() {
-  local dir log resp fb
+# An UNREADABLE pane read must FAIL CLOSED. The first CLI call the guard makes is
+# its `pane get`; forcing it to rc 1 models the transient real-world failures
+# (server restarting, CLI timeout, malformed payload) that leave the pane's
+# workspace unknown. The close must then be refused, because a `pane close` that
+# succeeds once the server recovers empties - and so deletes - a workspace whose
+# tab count was never established. The kill still returns 0: refusing is a
+# best-effort no-op, not an error, and the spared tab is reclaimed by the retry.
+test_kill_unreadable_pane_read_fails_closed() {
+  local dir log resp fb out
   dir="$TMP_ROOT/kill"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '1\n' > "$resp/1.exit"
   fb=$(make_herdr_fakebin "$dir")
-  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '
       . "$0/bin/backends/herdr.sh"
       fm_backend_herdr_target_ready() { fm_backend_herdr_parse_target "$1"; }
@@ -3218,10 +3225,17 @@ test_kill_is_best_effort() {
       fm_lock_try_acquire() { return 0; }
       fm_lock_release() { return 0; }
       fm_backend_herdr_kill default:w1:p2
-    ' "$ROOT"
-  expect_code 0 $? "kill must be best-effort (never fail even when the pane close call itself fails)"
-  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close'$'\x1f''w1:p2' "kill did not call pane close on the right pane"
-  pass "fm_backend_herdr_kill: calls pane close and stays best-effort on failure"
+    ' "$ROOT" 2>&1)
+  expect_code 0 $? "a refused kill must stay best-effort (never fail)"
+  case "$(cat "$log")" in
+    *$'\x1f'pane$'\x1f'close*|*$'\x1f'tab$'\x1f'close*)
+      fail "an unreadable pane read must close NOTHING - a later-succeeding close would delete the workspace; it ran: $(cat "$log")" ;;
+  esac
+  assert_contains "$out" "could not be read" "the refusal must say why the close was not shown safe"
+  assert_contains "$out" "reclaimable residue" "the refusal must report the spared tab as a reclaimable residue"
+  assert_not_contains "$out" "herdr tab close" \
+    "the refusal must NOT hand over a tab-close command - running it would delete the unread workspace"
+  pass "fm_backend_herdr_kill: an unreadable pane read fails CLOSED (no close attempted) and stays best-effort"
 }
 
 test_current_path_reads_cwd() {
@@ -4301,8 +4315,10 @@ EOF
 # fm_backend_herdr_kill therefore gates its close on
 # fm_backend_herdr_workspace_has_spare_tab (the one owner of that safety test,
 # shared with the create_task residue cleanup): it refuses to close a workspace's
-# last tab and hands over the exact residue-removal command, while a workspace
-# with a spare tab still closes normally. fm-teardown's completed-task path calls
+# last tab and reports the spared tab as a reclaimable residue the next spawn
+# reuses (never a removal command - running one would delete the very workspace
+# the refusal protected), while a workspace with a spare tab still closes
+# normally. fm-teardown's completed-task path calls
 # fm_backend_herdr_kill_serialized directly, behind its own confirmed-gone gate,
 # and is deliberately not routed through this guard (asserted end-to-end against
 # real herdr in tests/fm-backend-herdr-smoke.test.sh).
@@ -4339,9 +4355,12 @@ test_kill_last_tab_guard_refuses_single_tab_workspace() {
       fm_lock_release() { return 0; }
       fm_backend_herdr_kill fmtest:w1:p2
     ' "$ROOT" 2>&1 )
-  assert_contains "$out" "herdr tab close w1:t2 --session fmtest" \
-    "the last-tab kill refusal must hand over the exact residue-removal command"
-  assert_contains "$out" "close it manually" "the last-tab kill refusal must tell the operator to remove the tab by hand"
+  assert_contains "$out" "reclaimable residue" \
+    "the last-tab kill refusal must tell the operator the tab is kept on purpose for the retry to reuse"
+  assert_contains "$out" "no manual removal is needed" \
+    "the last-tab kill refusal must say no manual removal is needed"
+  assert_not_contains "$out" "herdr tab close" \
+    "the refusal must NOT hand over a tab-close command - running it would delete the workspace the guard just protected"
   case "$(cat "$log")" in
     *$'\x1f'pane$'\x1f'close*|*$'\x1f'tab$'\x1f'close*)
       fail "the last-tab kill must close nothing; it ran: $(cat "$log")" ;;
@@ -4362,13 +4381,71 @@ test_kill_last_tab_guard_refuses_single_tab_workspace() {
       fm_lock_release() { return 0; }
       fm_backend_herdr_kill fmtest:w1:p2
     ' "$ROOT" 2>&1 )
-  assert_not_contains "$out" "close it manually" \
+  assert_not_contains "$out" "reclaimable residue" \
     "a multi-tab workspace's tab kill must NOT trigger the last-tab refusal (a spare tab remains)"
   jq -e '.tabs[] | select(.pane_id == "w1:p2")' "$state" >/dev/null \
     && fail "a non-last-tab kill must remove the targeted pane (the guard let the close through)"
   jq -e '.tabs[] | select(.pane_id == "w1:p3")' "$state" >/dev/null \
     || fail "a non-last-tab kill must leave the other tab (w1:p3) untouched"
-  pass "fm_backend_herdr_kill: refuses to close a workspace's last tab (residue + exact remedy) but closes normally when a spare tab remains"
+  pass "fm_backend_herdr_kill: refuses to close a workspace's last tab (informational residue note, no destructive remedy) but closes normally when a spare tab remains"
+}
+
+# The guard ADDED two CLI reads to the generic kill path (its `pane get` and
+# has_spare_tab's `tab list`), and the intent requires the check AND the close to
+# run under the SAME already-held presentation lock, so the tab count cannot go
+# stale between the two (a concurrent close of the sibling tab would otherwise
+# turn a permitted close into a workspace-deleting one). This wraps
+# fm_backend_herdr_cli so ANY call issued while the lock is not held returns rc
+# 97, then drives the real fm_backend_herdr_kill on a MULTI-tab workspace so the
+# guard passes and the close actually runs: a completed close proves every read
+# and the mutation happened inside one acquired-and-released lock.
+test_generic_kill_runs_guard_and_close_under_one_lock() {
+  local dir log state fb out status lock_log lock_held
+  dir="$TMP_ROOT/kill-guard-inlock"; mkdir -p "$dir"
+  log="$dir/log"; state="$dir/state.json"; lock_log="$dir/lock.log"; lock_held="$dir/lock-held"
+  : > "$log"; : > "$lock_log"
+  fb=$(make_herdr_statefake "$dir")
+  jq -n '{next:4,workspaces:[{workspace_id:"w1",label:"firstmate"}],tabs:[{tab_id:"w1:t2",label:"fm-a",workspace_id:"w1",pane_id:"w1:p2"},{tab_id:"w1:t3",label:"fm-b",workspace_id:"w1",pane_id:"w1:p3"}],agent_status:{}}' > "$state"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    FM_FAKE_LOCK_LOG="$lock_log" FM_FAKE_LOCK_HELD="$lock_held" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_target_ready() { fm_backend_herdr_parse_target "$1"; }
+      fm_backend_herdr_presentation_session_lock_path() { printf "%s" "$FM_FAKE_LOCK_HELD.lock"; }
+      fm_lock_try_acquire() {
+        printf "acquire\n" >> "$FM_FAKE_LOCK_LOG"
+        : > "$FM_FAKE_LOCK_HELD"
+      }
+      fm_lock_release() {
+        [ -e "$FM_FAKE_LOCK_HELD" ] || return 1
+        rm -f "$FM_FAKE_LOCK_HELD"
+        printf "release\n" >> "$FM_FAKE_LOCK_LOG"
+      }
+      eval "$(declare -f fm_backend_herdr_cli | sed "1s/fm_backend_herdr_cli/fm_backend_herdr_cli_locked/")"
+      fm_backend_herdr_cli() {
+        [ -e "$FM_FAKE_LOCK_HELD" ] || return 97
+        fm_backend_herdr_cli_locked "$@"
+      }
+      fm_backend_herdr_kill fmtest:w1:p2
+    ' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -eq 0 ] || fail "the guarded kill should stay best-effort: $out"
+  [ "$(cat "$lock_log")" = "$(printf 'acquire\nrelease')" ] \
+    || fail "the guarded kill did not run under exactly one acquired-and-released presentation lock: $(cat "$lock_log")"
+  [ ! -e "$lock_held" ] || fail "the guarded kill retained its presentation lock"
+  # Every read the guard makes and the close itself completed, so none of them
+  # hit the rc-97 unlocked arm.
+  assert_contains "$(cat "$log")" $'\x1f'pane$'\x1f'get$'\x1f'w1:p2 \
+    "the guard's pane get must run inside the held lock"
+  assert_contains "$(cat "$log")" $'\x1f'tab$'\x1f'list \
+    "the guard's has_spare_tab tab list must run inside the held lock"
+  assert_contains "$(cat "$log")" $'\x1f'pane$'\x1f'close$'\x1f'w1:p2 \
+    "the close must run inside the same held lock as the guard check"
+  jq -e '.tabs[] | select(.pane_id == "w1:p2")' "$state" >/dev/null \
+    && fail "the permitted close must actually have removed the pane (an rc-97 unlocked call would have blocked it)"
+  jq -e '.tabs[] | select(.pane_id == "w1:p3")' "$state" >/dev/null \
+    || fail "the sibling tab must survive the guarded kill"
+  pass "fm_backend_herdr_kill: the guard's reads and the permitted close all run under ONE acquired-and-released presentation lock (TOCTOU-safe)"
 }
 
 # --- created-vs-adopted default-tab-prune safety (2026-07-02 self-kill fix) -
@@ -4978,6 +5055,7 @@ test_container_ensure_uses_secondmate_home_label
 test_workspace_ensure_prunes_default_tab
 test_repeated_cycles_reuse_one_workspace_no_orphans
 test_kill_last_tab_guard_refuses_single_tab_workspace
+test_generic_kill_runs_guard_and_close_under_one_lock
 test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth
@@ -5069,7 +5147,7 @@ test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
-test_kill_is_best_effort
+test_kill_unreadable_pane_read_fails_closed
 test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
