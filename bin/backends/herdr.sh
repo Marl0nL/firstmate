@@ -2188,32 +2188,59 @@ fm_backend_herdr_agent_alive() {  # <target>
   esac
 }
 
-# fm_backend_herdr_close_residue_tab: remove the replacement tab
-# fm_backend_herdr_create_task just created, on the failure paths where it has
-# to give the label back so a retry starts clean - but NEVER at the cost of the
-# workspace itself. Closing a workspace's LAST remaining tab deletes the whole
-# workspace on real herdr (docs/herdr-backend.md "Watching and task containers"),
-# and these paths run AFTER the husks this tab replaced were already closed, so
-# the replacement can legitimately be the only tab left. Re-list and close only
-# when the workspace demonstrably still has another tab; when the tab list is
-# missing, unparseable, not an ARRAY, or holds <= 1 tab, leave the tab in place
-# and tell the operator what to remove by hand - a residue tab a retry can name
-# is strictly better than deleting this home's persistent workspace. The array
-# type check is load-bearing: jq's `length` on a NON-array returns a nonzero
-# number (a string's character count, an object's key count), so counting
-# without it would read a malformed payload as "plenty of tabs" and close on
-# exactly the branch that exists because the payload was malformed. Mirrors the
-# tab-count re-check in fm_backend_herdr_workspace_prune_seeded_default_tab.
-fm_backend_herdr_close_residue_tab() {  # <session> <workspace_id> <tab_id> <label>
-  local session=$1 wsid=$2 tab_id=$3 label=$4 tabs tab_count
+# fm_backend_herdr_workspace_has_spare_tab: 0 when workspace <workspace_id>
+# demonstrably holds MORE THAN ONE tab, so closing one of its tabs (or the lone
+# pane of one of its single-pane task tabs) cannot empty - and so delete - the
+# workspace itself. Nonzero for the conservative "might be the last tab" verdict:
+# the tab list is missing, unparseable, not an ARRAY, or holds <= 1 tab. The
+# array type check is load-bearing: jq's `length` on a NON-array returns a
+# nonzero number (a string's character count, an object's key count), so counting
+# without it would read a malformed payload as "plenty of tabs" and green-light a
+# close on exactly the branch that exists because the payload was malformed.
+# This is the single owner of the workspace-last-tab safety test. Closing a
+# workspace's last remaining tab deletes the whole workspace on real herdr
+# (docs/herdr-backend.md "Watching and task containers"), and a residue tab a
+# retry can name is strictly better than deleting this home's persistent
+# workspace - so both the failed-spawn residue cleanup
+# (fm_backend_herdr_close_residue_tab) and the generic task-kill teardown
+# (fm_backend_herdr_kill) gate their close on this test. Mirrors the tab-count
+# re-check in fm_backend_herdr_workspace_prune_seeded_default_tab.
+fm_backend_herdr_workspace_has_spare_tab() {  # <session> <workspace_id>
+  local session=$1 wsid=$2 tabs tab_count
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || tabs=
   tab_count=$(printf '%s' "$tabs" | jq -r 'if (.result.tabs | type) == "array" then (.result.tabs | length) else 0 end' 2>/dev/null)
   case "$tab_count" in
-    ''|*[!0-9]*|0|1)
-      echo "warning: leaving herdr tab '$label' ($tab_id) in workspace $wsid (session $session) in place: it may be that workspace's last tab, and closing that would delete the whole workspace - close it manually before retrying: herdr tab close $tab_id --session $session" >&2
-      return 0
-      ;;
+    ''|*[!0-9]*|0|1) return 1 ;;
   esac
+  return 0
+}
+
+# FM_BACKEND_HERDR_RESIDUE_NOTE: the one wording every last-tab refusal ends
+# with, so the guard and fm-spawn's abort-cleanup report agree. Deliberately
+# informational and NOT a removal command: the spared tab is reclaimed
+# automatically (fm_backend_herdr_create_task classifies a same-labeled leftover
+# as a husk and reuses it), and a manual `herdr tab close` on it would delete the
+# very workspace the refusal protected.
+FM_BACKEND_HERDR_RESIDUE_NOTE="the tab stays as a reclaimable residue that the next spawn of this task reuses, so this home's persistent workspace is preserved and no manual removal is needed"
+
+# fm_backend_herdr_close_residue_tab: remove the replacement tab
+# fm_backend_herdr_create_task just created, on the failure paths where it has
+# to give the label back so a retry starts clean - but NEVER at the cost of the
+# workspace itself. These paths run AFTER the husks this tab replaced were
+# already closed, so the replacement can legitimately be the only tab left; when
+# fm_backend_herdr_workspace_has_spare_tab (the one owner of that safety test)
+# cannot confirm another tab, leave the tab in place and report it with the
+# shared FM_BACKEND_HERDR_RESIDUE_NOTE wording the kill guard uses. That refusal
+# names NO removal command on purpose: the tab it spared is this workspace's
+# last, so `herdr tab close` on it would delete the very workspace the refusal
+# protected, and the tab keeps the same fm-<label> the next spawn reclaims as a
+# husk anyway.
+fm_backend_herdr_close_residue_tab() {  # <session> <workspace_id> <tab_id> <label>
+  local session=$1 wsid=$2 tab_id=$3 label=$4
+  if ! fm_backend_herdr_workspace_has_spare_tab "$session" "$wsid"; then
+    echo "warning: leaving herdr tab '$label' ($tab_id) in workspace $wsid (session $session) in place: it may be that workspace's last tab, and closing that would delete the whole workspace - $FM_BACKEND_HERDR_RESIDUE_NOTE" >&2
+    return 0
+  fi
   fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || true
 }
 
@@ -3123,7 +3150,26 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   done
 }
 
-# fm_backend_herdr_kill: remove the task's pane, best-effort (mirrors
+# fm_backend_herdr_resolve_pane_location: one read-only `pane get`, publishing
+# the pane's own ids in FM_BACKEND_HERDR_PANE_ID / FM_BACKEND_HERDR_TAB_ID /
+# FM_BACKEND_HERDR_WORKSPACE_ID - the same publish-into-globals shape
+# fm_backend_herdr_parse_target uses, so an absent field stays exactly empty
+# instead of being lost to word splitting. Each is empty when the server is
+# unreadable, the pane is gone, or the payload omits that field; callers apply
+# their own resolution test (the guard demands all three AND an exact pane_id
+# match, the serialized close only needs the tab), so this deliberately does not
+# impose one. Sole owner of that extraction, so the last-tab guard and the
+# serialized close read one identical triple and a guarded kill pays a single
+# round trip under the held presentation lock instead of two.
+fm_backend_herdr_resolve_pane_location() {  # <session> <pane>
+  local info
+  info=$(fm_backend_herdr_cli "$1" pane get "$2" 2>/dev/null) || info=
+  FM_BACKEND_HERDR_PANE_ID=$(printf '%s' "$info" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
+  FM_BACKEND_HERDR_TAB_ID=$(printf '%s' "$info" | jq -r '.result.pane.tab_id // empty' 2>/dev/null)
+  FM_BACKEND_HERDR_WORKSPACE_ID=$(printf '%s' "$info" | jq -r '.result.pane.workspace_id // empty' 2>/dev/null)
+}
+
+# fm_backend_herdr_kill_serialized: remove the task's pane, best-effort (mirrors
 # tmux-kill-window's `|| true` contract). Verified: closing a tab's only pane
 # closes the tab too, so a separate tab close is unnecessary.
 # When the close would empty a non-focused workspace, Herdr 0.7.5's explicit
@@ -3134,16 +3180,22 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
 # restore as the backstop. A close that empties the FOCUSED workspace moves
 # focus legitimately, and every in-lock planning ambiguity or failure falls
 # back to the plain close, matching the pre-hardening contract.
-fm_backend_herdr_kill_serialized() {  # <session> <pane>
-  local session=$1 pane=$2
-  local before active_tab info target_pane target_tab target_ws plan shell_pid plan_move_record close_failed workspace_presence
+# The optional pre-resolved triple is the caller's already-read pane location
+# (fm_backend_herdr_kill_last_tab_guarded has one in hand from its guard check
+# under the same held lock); omitted, this resolves it itself, which is the
+# direct-caller shape fm-teardown uses.
+fm_backend_herdr_kill_serialized() {  # <session> <pane> [<pane_id> <tab_id> <workspace_id>]
+  local session=$1 pane=$2 target_pane=${3:-} target_tab=${4:-} target_ws=${5:-}
+  local before active_tab plan shell_pid plan_move_record close_failed workspace_presence
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || before=
   if [ -n "$before" ]; then
     active_tab=${before#*$'\t'}
-    info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || info=
-    target_pane=$(printf '%s' "$info" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
-    target_tab=$(printf '%s' "$info" | jq -r '.result.pane.tab_id // empty' 2>/dev/null)
-    target_ws=$(printf '%s' "$info" | jq -r '.result.pane.workspace_id // empty' 2>/dev/null)
+    if [ -z "$target_pane" ]; then
+      fm_backend_herdr_resolve_pane_location "$session" "$pane"
+      target_pane=$FM_BACKEND_HERDR_PANE_ID
+      target_tab=$FM_BACKEND_HERDR_TAB_ID
+      target_ws=$FM_BACKEND_HERDR_WORKSPACE_ID
+    fi
     if [ "$target_pane" = "$pane" ] && [ -n "$target_tab" ] && [ "$target_tab" != "$active_tab" ]; then
       plan=$(fm_backend_herdr_emptying_close_plan "$session" "$pane" "$target_ws" "$target_tab" "${before%%$'\t'*}")
       plan_move_record=
@@ -3183,6 +3235,83 @@ fm_backend_herdr_kill_serialized() {  # <session> <pane>
   fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane" || true
 }
 
+# fm_backend_herdr_last_tab_close_permitted: the ONE owner of the "is closing
+# this pane safe for its workspace?" decision, so the kill guard and fm-spawn's
+# abort-cleanup report can never drift onto two different conditions.
+# Exit codes, deliberately three-valued because both callers need the REASON and
+# not just the verdict:
+#   0 - permitted: the pane resolves to itself with a tab and workspace, AND
+#       fm_backend_herdr_workspace_has_spare_tab positively confirms its
+#       workspace holds another tab, so the close cannot empty (and so delete)
+#       the workspace.
+#   1 - refused, confirmed last tab: resolved, but no spare tab could be shown.
+#   2 - refused, unresolvable: the pane read failed, returned a foreign pane_id,
+#       or omitted the tab/workspace, so the tab count was never established.
+# Both nonzero codes FAIL CLOSED. An unresolvable read is NOT license to close:
+# a flaky or unparseable `pane get` (server restarting, CLI timeout, malformed
+# payload) would otherwise green-light a `pane close` that lands once the server
+# recovers, deleting exactly the persistent workspace this predicate protects.
+# Publishes the resolved triple through fm_backend_herdr_resolve_pane_location's
+# FM_BACKEND_HERDR_PANE_ID / _TAB_ID / _WORKSPACE_ID globals, so a caller can
+# name the tab in its refusal and hand the already-resolved triple to the close
+# without paying a second `pane get`.
+fm_backend_herdr_last_tab_close_permitted() {  # <session> <pane>
+  local session=$1 pane=$2
+  fm_backend_herdr_resolve_pane_location "$session" "$pane"
+  [ "$FM_BACKEND_HERDR_PANE_ID" = "$pane" ] || return 2
+  [ -n "$FM_BACKEND_HERDR_TAB_ID" ] && [ -n "$FM_BACKEND_HERDR_WORKSPACE_ID" ] || return 2
+  fm_backend_herdr_workspace_has_spare_tab "$session" "$FM_BACKEND_HERDR_WORKSPACE_ID" || return 1
+  return 0
+}
+
+# fm_backend_herdr_kill_last_tab_guarded: run the last-tab guard, then the
+# serialized close, both under the caller's already-held presentation lock so the
+# tab-count check and the close cannot race a concurrent create/close.
+# Closing this pane closes its lone-pane task tab, and closing a workspace's only
+# tab deletes the whole persistent workspace on real herdr.
+# The guard FAILS CLOSED, matching the rest of this adapter
+# (fm_backend_herdr_workspace_has_spare_tab refuses on a missing/unparseable/
+# non-array tab list; fm_backend_herdr_endpoint_confirmed_gone refuses on
+# ambiguity): the close runs ONLY when the pane's workspace is POSITIVELY shown
+# to hold another tab. An unresolvable pane read is NOT license to close - a
+# single flaky or unparseable `pane get` (server restarting, CLI timeout,
+# malformed payload) would otherwise fall through to the unguarded close, whose
+# `pane close` then succeeds against the recovered server and deletes exactly the
+# persistent workspace this guard exists to save.
+# Refusing costs nothing the retry cannot recover: the task tab is left as a
+# reclaimable residue that fm_backend_herdr_create_task reclaims as a husk on the
+# next spawn of this label, so the refusal message is informational and names no
+# removal command - a manual `tab close` here would delete the workspace the
+# guard just protected.
+# A permitted close is handed the triple fm_backend_herdr_last_tab_close_permitted
+# already resolved, so the whole guarded kill reads the pane's location once
+# rather than once per stage.
+fm_backend_herdr_kill_last_tab_guarded() {  # <session> <pane>
+  local session=$1 pane=$2 verdict=0
+  fm_backend_herdr_last_tab_close_permitted "$session" "$pane" || verdict=$?
+  case "$verdict" in
+    0)
+      fm_backend_herdr_kill_serialized "$session" "$pane" \
+        "$FM_BACKEND_HERDR_PANE_ID" "$FM_BACKEND_HERDR_TAB_ID" "$FM_BACKEND_HERDR_WORKSPACE_ID"
+      ;;
+    1)
+      echo "warning: leaving herdr task pane '$pane' (tab $FM_BACKEND_HERDR_TAB_ID) in workspace $FM_BACKEND_HERDR_WORKSPACE_ID (session $session) in place: it may be that workspace's last tab, and closing it would delete the whole workspace - $FM_BACKEND_HERDR_RESIDUE_NOTE" >&2
+      ;;
+    *)
+      echo "warning: leaving herdr task pane '$pane' (session $session) in place: its workspace could not be read, so the close cannot be shown safe and might delete the whole workspace - $FM_BACKEND_HERDR_RESIDUE_NOTE" >&2
+      ;;
+  esac
+  return 0
+}
+
+# fm_backend_herdr_kill: the generic fm_backend_kill herdr close path, reached by
+# fm-spawn's failed-spawn abort residue and by the dead-endpoint reclamation that
+# precedes a relaunch (fm-bootstrap secondmate liveness,
+# fm-remote-secondmate-control). It refuses the unlocked close, then hands off to
+# the last-tab-guarded serialized close under the held presentation lock.
+# fm-teardown's own herdr closes - the completed-task path and forced-child
+# cleanup - call fm_backend_herdr_kill_serialized directly, behind their own
+# confirmed-gone gates, and are deliberately not routed through this guard.
 fm_backend_herdr_kill() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
   local session=$FM_BACKEND_HERDR_SESSION pane=$FM_BACKEND_HERDR_PANE
@@ -3202,7 +3331,7 @@ fm_backend_herdr_kill() {  # <target>
     done
   fi
   if [ "$lock_held" = 1 ]; then
-    fm_backend_herdr_kill_serialized "$session" "$pane"
+    fm_backend_herdr_kill_last_tab_guarded "$session" "$pane"
     fm_lock_release "$lock_path" || true
   else
     echo "warning: herdr task kill could not acquire its session presentation lock; refusing an unlocked pane close" >&2

@@ -147,7 +147,12 @@ printf '%s' "$LIVE_TABS_AFTER" | jq -e --arg t "$LIVE_TAB_ID" '.result.tabs[] | 
 pass "fixed: the startup workspace's original live tab is still present in tab list after the spawn"
 
 fm_backend_herdr_kill "$SESSION:$NEW_PANE_ID"
-fm_backend_herdr_kill "$SESSION:$LIVE_PANE_ID"
+# fm_backend_herdr_kill now REFUSES to close a workspace's last tab (that would
+# delete this home's persistent workspace). The adopted startup workspace is down
+# to its single LIVE tab, so reset for the happy-path phase by closing that tab
+# directly - the last-tab close is what genuinely deletes the workspace so the
+# next container_ensure creates a fresh one.
+herdr tab close "$LIVE_TAB_ID" --session "$SESSION" >/dev/null 2>&1 || true
 
 # --- 4. happy path still works: a genuinely fresh workspace gets its seeded -
 # default tab pruned, leaving exactly one clean fm-<id> task tab -------------

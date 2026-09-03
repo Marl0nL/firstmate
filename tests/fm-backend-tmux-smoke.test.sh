@@ -156,18 +156,36 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
+# --- existence probe (fm_backend_target_exists) ------------------------------
+# The session keeps its original window after the task window is killed, so a
+# `display-message -p -t <gone>` probe would find its CMD_FIND_CANFAIL fallback
+# pane and report present. This exercises the real trap: fm_backend_target_exists
+# must read the live window as present and the killed window as absent.
+fm_backend_target_exists tmux "$TARGET" \
+  || fail "fm_backend_target_exists must read the live task window as present"
+
+# A bare pane id (the away-mode supervisor target's $TMUX_PANE shape) must read
+# present when live and absent when gone - the list-panes branch of the probe.
+LIVE_PANE_ID=$(tmux display-message -p -t "$TARGET" '#{pane_id}')
+fm_backend_target_exists tmux "$LIVE_PANE_ID" \
+  || fail "fm_backend_target_exists must read a live bare pane id as present"
+fm_backend_target_exists tmux '%99999' \
+  && fail "fm_backend_target_exists must read a gone bare pane id as absent (list-panes, not display-message CANFAIL)"
+
 # --- kill and recovery-grade missing-window classification ------------------
 
 fm_backend_tmux_kill "$TARGET"
 if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$WINDOW"; then
   fail "fm_backend_tmux_kill did not remove the window"
 fi
+fm_backend_target_exists tmux "$TARGET" \
+  && fail "fm_backend_target_exists must read the killed window as absent (display-message's CMD_FIND_CANFAIL fallback to the surviving session window must not fool the exact-form list-windows probe)"
 state=$(fm_backend_agent_state tmux "$TARGET")
 [ "$state" = missing ] \
   || fail "a real missing window in a readable session should classify as missing, got '$state'"
 # Best-effort contract: killing an already-gone window must not error.
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
-pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
+pass "real tmux: kill removes the window; fm_backend_target_exists reads it absent (CANFAIL-proof) and the session inventory classifies it missing"
 
 cleanup_all
 trap - EXIT

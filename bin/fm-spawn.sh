@@ -807,6 +807,20 @@ spawn_endpoint_still_present() {
   esac
 }
 
+# spawn_endpoint_herdr_close_was_permitted: for a still-present herdr endpoint,
+# did the adapter's last-tab guard actually ALLOW the close (so the close truly
+# failed and the removal remedy is the right advice), or did the guard spare this
+# pane on purpose? Asks the guard's OWN decision owner
+# (fm_backend_herdr_last_tab_close_permitted) rather than re-deriving its
+# condition here, so this report can never drift onto a stale copy and start
+# printing spawn_endpoint_remedy_line's `herdr pane close <pane>` - the exact
+# workspace-deleting close the guard refused - for a deliberately spared residue.
+spawn_endpoint_herdr_close_was_permitted() {
+  fm_backend_source herdr 2>/dev/null || return 1
+  fm_backend_herdr_parse_target "$T" 2>/dev/null || return 1
+  fm_backend_herdr_last_tab_close_permitted "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
+}
+
 # spawn_preshield_start: before `treehouse get`, hold every worktree this home's
 # own state/*.meta already records so the pool cannot judge an owned slot free.
 # Treehouse v2 decides a slot is available from live-process cwd, and a parked
@@ -950,7 +964,11 @@ spawn_abort_cleanup() {
     if [ -n "${BACKEND:-}" ] && [ -n "${T:-}" ]; then
       fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null || true
       if spawn_endpoint_still_present; then
-        echo "warning: could not tear down the $BACKEND endpoint '$T' left by the failed spawn of $ID; remove it before retrying: $(spawn_endpoint_remedy_line)" >&2
+        if [ "$BACKEND" = herdr ] && ! spawn_endpoint_herdr_close_was_permitted; then
+          echo "note: the herdr endpoint '$T' left by the failed spawn of $ID was spared on purpose: closing it could delete this home's persistent workspace - ${FM_BACKEND_HERDR_RESIDUE_NOTE:-the tab stays as a reclaimable residue that the next spawn of this task reuses}" >&2
+        else
+          echo "warning: could not tear down the $BACKEND endpoint '$T' left by the failed spawn of $ID; remove it before retrying: $(spawn_endpoint_remedy_line)" >&2
+        fi
       fi
     fi
   fi
@@ -2572,7 +2590,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; the spawn's endpoint was cleaned up - re-run the spawn, or run 'treehouse get' manually to diagnose the worktree pool" >&2
+    echo "error: treehouse get did not enter a worktree within 60 polling attempts (over a minute of waiting, and longer on zellij/cmux where each attempt adds several marker-probe round trips on top of its 1s sleep); the spawn's endpoint was cleaned up - re-run the spawn, or run 'treehouse get' manually to diagnose the worktree pool" >&2
     exit 1
   fi
   # Past the timeout refusal, so acquisition IS resolved (the pool has leased and,

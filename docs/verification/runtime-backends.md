@@ -210,6 +210,24 @@ rc 1
 `list-windows` fails identically once the server is unreachable, so `has-session` separates an absent window (confirmed gone, no remedy) from an unreachable server (not confirmed, remedy printed).
 `tests/fm-spawn-endpoint-residue.test.sh` pins that logic portably against a fake tmux modelling these same semantics; re-run the commands above after a tmux upgrade before trusting the fake.
 
+The shared existence helper `fm_backend_target_exists` (`bin/fm-backend.sh`), used by the session-start fleet digest, fm-crew-state's pane-readable check, fm-send target validation, fm-control, wake-resident, busy classification, the fleet snapshot, and the away-mode supervisor-pane check, avoids `display-message` for the same CANFAIL reason and probes by the target shape callers pass: a bare pane id (`$TMUX_PANE`) or window id via `list-panes -t "$target"`, and a `session:window` endpoint via the exact `=ses:=win` form (window indices resolve under it too).
+Its contract treats an unreadable server as "does not exist", so it needs no `has-session` split; the single listing read carries every verdict.
+Verified 2026-09-03 with tmux 3.5a on Fedora/Bazzite Linux x86_64, on a private socket, driving the real `fm_backend_target_exists` while the session kept a surviving window so `display-message`'s CANFAIL fallback pane was present:
+
+```text
+live pane id (%1):                          exists rc=0
+gone pane id (%99):                          absent rc=1
+present window (firstmate:fm-abcdef):        exists rc=0
+gone window, live prefix sibling fm-abcdef:  absent rc=1   (probe target firstmate:fm-abc)
+present window index (firstmate:0):          exists rc=0
+gone window index (firstmate:99):            absent rc=1
+gone session (nosuch:0):                     absent rc=1
+bare non-selector name:                      absent rc=1
+```
+
+The live guard is `tests/fm-backend-tmux-smoke.test.sh` (real tmux, self-skips when tmux is absent), which asserts `fm_backend_target_exists` reads the live task window present and the killed window absent while the session keeps a surviving window; `tests/fm-backend.test.sh` pins the same verdicts portably against a fake tmux that models CMD_FIND_CANFAIL.
+Re-run both after a tmux upgrade.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
@@ -827,6 +845,32 @@ evidence: herdr=0.8.0 protocol=19 steal_live=0 floor_verdict=0 default-session-t
 Part C is the case the suite could not reach before: a doomed pane whose shell holds a persistent background child fails the lone-idle-shell proof on every sample, so the plan takes the plain explicit close, in the geometry where the closing workspace's right neighbour is a spacer rather than the focused anchor.
 On 0.7.5 that fallback exposed a bounded four-sample wrong-focus window and restored the anchor exactly; on 0.8.0 the same fallback exposed none, which is why default-on projection is floored at 0.8.0 rather than mitigated further below it.
 The suite also cross-checks its own Part A measurement against the floor classifier on whatever release it runs, so a drifted protocol-to-release mapping fails there rather than silently gating on the wrong thing.
+
+### Last-tab teardown guard
+
+Closing a workspace's last remaining tab deletes the whole workspace on real herdr, so the generic `fm_backend_kill herdr` path (`fm_backend_herdr_kill`, reached by the failed-spawn abort residue in `bin/fm-spawn.sh` and by dead-endpoint reclamation before a relaunch in `bin/fm-bootstrap.sh` and `bin/fm-remote-secondmate-control.sh`) closes a pane ONLY when its workspace is positively shown to hold another tab.
+The one owner of that decision is `fm_backend_herdr_workspace_has_spare_tab`, shared with the failed-spawn residue cleanup (`fm_backend_herdr_close_residue_tab`).
+
+The guard fails CLOSED, matching the rest of the adapter: an unresolvable `pane get` (server restarting, CLI timeout, malformed payload) refuses too, because it leaves the tab count unknown and the `pane close` would still land once the server recovered - deleting the workspace the guard exists to save.
+Both refusals are informational and print NO removal command: the spared tab is reclaimed automatically by the next spawn of the same label (`fm_backend_herdr_create_task` classifies it as a husk and reuses it), and a manual `herdr tab close` on it would delete the very workspace that was just protected.
+fm-spawn's abort-cleanup report mirrors the same predicate, so a guard-spared residue is reported as deliberate instead of getting `spawn_endpoint_remedy_line`'s `herdr pane close <pane>` - the exact close the guard refused.
+fm-teardown's completed-task and forced-child paths call `fm_backend_herdr_kill_serialized` directly, behind their own confirmed-gone gates, and deliberately keep deleting the emptied workspace focus-safely.
+
+Verified 2026-09-03 against the installed herdr on Fedora/Bazzite Linux x86_64, in an isolated throwaway lab session, driving the real `fm_backend_herdr_kill`:
+
+```text
+multi-tab workspace:  has_spare_tab true;  kill closed the targeted pane, other tab untouched
+single-tab workspace: has_spare_tab false; kill refused, pane survives, stderr =
+  warning: leaving herdr task pane 'w2:p2' (tab w2:t2) in workspace w2 (session <lab>) in place:
+  it may be that workspace's last tab, and closing it would delete the whole workspace - the tab
+  stays as a reclaimable residue that the next spawn of this task reuses, so this home's
+  persistent workspace is preserved and no manual removal is needed
+pane already gone (pane get -> pane_not_found): unresolvable, so the close is refused too; rc 0,
+  no pane close issued, stderr = "... its workspace could not be read ..." + the same residue note
+```
+
+The live guard is `tests/fm-backend-herdr-smoke.test.sh` (real herdr, self-skips when herdr is absent), which asserts the non-last-tab kill removes its pane while the workspace's last-tab kill is refused and reported as a reclaimable residue rather than something to delete; `tests/fm-backend-herdr.test.sh` pins the same boundary portably against the stateful fake herdr, including the fail-closed unreadable-read case and the proof that the guard's reads and the permitted close all run under one held presentation lock.
+Re-run both after a herdr upgrade.
 
 ### Presentation version floor
 

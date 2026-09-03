@@ -1113,8 +1113,140 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
+# --- fm_backend_target_exists: tmux existence probe (CMD_FIND_CANFAIL) --------
+# The tmux branch must detect a GONE window. It cannot use `display-message -p -t
+# <target>`: tmux marks that -t as CMD_FIND_CANFAIL, so a gone target does not
+# fail - it silently falls back to the current pane and exits 0, so absence can
+# never be read. It uses the exact-form `list-windows -t '=ses:=win'` probe
+# instead. This fake models both tmux 3.5a facts (verified live, dated in
+# docs/verification/runtime-backends.md "Endpoint absence probe"): display-message
+# always exits 0 with a fallback pane, while list-windows genuinely fails for an
+# absent or prefix-only window and for an unreadable server.
+make_target_exists_fakebin() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb
+  fb=$(fm_fakebin "$dir")
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+present=${FM_FAKE_PRESENT:-}   # window name this session holds, empty if none
+sibling=${FM_FAKE_SIBLING:-}   # an always-live extra window (e.g. a prefix sibling)
+if [ -n "${FM_FAKE_SERVER_DOWN:-}" ]; then echo 'no server running on /tmp/fake' >&2; exit 1; fi
+windows() { [ -z "$present" ] || printf '%s\n' "$present"; [ -z "$sibling" ] || printf '%s\n' "$sibling"; }
+target_of() { local prev= a; for a in "$@"; do [ "$prev" = -t ] && { printf '%s\n' "$a"; return; }; prev=$a; done; }
+resolves() {  # <window-part>: '=name' matches only exactly; a bare name matches exact then PREFIX
+  local want=$1 w
+  while read -r w; do [ -n "$w" ] || continue
+    case "$want" in
+      =*) [ "$w" = "${want#=}" ] && return 0 ;;
+      *) case "$w" in "$want"*) return 0 ;; esac ;;
+    esac
+  done < <(windows)
+  return 1
+}
+case "$*" in
+  *'#{pane_id}'*)  # CMD_FIND_CANFAIL: never fails; %1 when resolved, %0 fallback pane
+    tgt=$(target_of "$@")
+    if [ -n "$tgt" ] && resolves "${tgt#*:}"; then printf '%%1\n'; else printf '%%0\n'; fi
+    exit 0 ;;
+esac
+case "${1:-}" in
+  list-windows)
+    tgt=$(target_of "$@"); want=
+    case "$tgt" in *:*) want=${tgt#*:} ;; esac
+    if [ -n "$want" ] && ! resolves "$want"; then printf "can't find window\n" >&2; exit 1; fi
+    windows; exit 0 ;;
+  list-panes)
+    # bare pane/window id targets: FM_FAKE_PANE names the one live id, others gone
+    tgt=$(target_of "$@")
+    [ -n "$tgt" ] && [ "$tgt" = "${FM_FAKE_PANE:-}" ] && exit 0
+    exit 1 ;;
+  has-session) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  printf '%s\n' "$fb"
+}
+
+test_target_exists_tmux_detects_gone_window() {
+  local dir fb
+  dir="$TMP_ROOT/target-exists"; mkdir -p "$dir"
+  fb=$(make_target_exists_fakebin "$dir")
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+
+  # 1. a present window reads present.
+  PATH="$fb:$PATH" FM_FAKE_PRESENT=fm-live \
+    fm_backend_target_exists tmux "sess:fm-live" \
+    || fail "fm_backend_target_exists must read a present tmux window as present"
+
+  # 2. a gone window reads ABSENT (the fix). Prove the fake models CANFAIL so the
+  #    case is not vacuous: the OLD display-message probe still exits 0 here, so
+  #    only the list-windows probe can carry the absent verdict.
+  PATH="$fb:$PATH" FM_FAKE_PRESENT=fm-live \
+    tmux display-message -p -t "sess:fm-gone" '#{pane_id}' >/dev/null \
+    || fail "the fake must model CMD_FIND_CANFAIL: display-message stays rc=0 for a gone window"
+  PATH="$fb:$PATH" FM_FAKE_PRESENT=fm-live \
+    fm_backend_target_exists tmux "sess:fm-gone" \
+    && fail "fm_backend_target_exists must read a GONE tmux window as absent despite display-message's CANFAIL fallback"
+
+  # 3. a live PREFIX-sibling window must not satisfy the exact-form probe.
+  PATH="$fb:$PATH" FM_FAKE_PRESENT='' FM_FAKE_SIBLING=fm-gone-auth \
+    fm_backend_target_exists tmux "sess:fm-gone" \
+    && fail "a live prefix-sibling window (fm-gone-auth) must not make a gone fm-gone read as present"
+
+  # 4. an unreadable server reads absent - this helper's own contract.
+  PATH="$fb:$PATH" FM_FAKE_PRESENT=fm-live FM_FAKE_SERVER_DOWN=1 \
+    fm_backend_target_exists tmux "sess:fm-live" \
+    && fail "an unreadable tmux server must read as absent for this existence probe"
+
+  # 5. a malformed (no-colon) target reads absent without resolving anything.
+  PATH="$fb:$PATH" FM_FAKE_PRESENT=fm-live \
+    fm_backend_target_exists tmux "nocolon" \
+    && fail "a malformed (no-colon) tmux target must read as absent"
+
+  # 6. a bare pane id (the away-mode supervisor target, $TMUX_PANE) reads present
+  #    when live and absent when gone - it uses list-panes, not the session:window
+  #    list-windows form.
+  PATH="$fb:$PATH" FM_FAKE_PANE=%3 \
+    fm_backend_target_exists tmux "%3" \
+    || fail "fm_backend_target_exists must read a live bare pane id (\$TMUX_PANE) as present"
+  PATH="$fb:$PATH" FM_FAKE_PANE=%3 \
+    fm_backend_target_exists tmux "%9" \
+    && fail "fm_backend_target_exists must read a gone bare pane id as absent"
+
+  # 7. A REMOTELY PLACED secondmate is classified backend=remote (keyed on the
+  #    meta's remote_host=, never on the target string). Its endpoint is on
+  #    another host, so no local read can disprove it and the probe must answer
+  #    present without touching the local server. FM_FAKE_PRESENT/_PANE are empty
+  #    here, so every real probe in this fake would fail.
+  PATH="$fb:$PATH" FM_FAKE_PRESENT='' \
+    fm_backend_target_exists remote "remote:mate-r1" \
+    || fail "a backend=remote endpoint must never read as locally absent - its liveness is owned by the remote transport"
+  PATH="$fb:$PATH" FM_FAKE_PRESENT='' FM_FAKE_SERVER_DOWN=1 \
+    fm_backend_target_exists remote "remote:mate-r1" \
+    || fail "backend=remote must be answered without touching the local server at all"
+
+  # 8. The classification is keyed on the META, not on the `remote:` target
+  #    string, so a real tmux session literally NAMED `remote` is still probed
+  #    exactly. `tmux new -s remote` is reachable: fm_backend_tmux_container_ensure
+  #    takes the session name from `display-message -p '#S'`, so a captain working
+  #    there records real local tasks as window=remote:fm-<id>. A gone window in
+  #    that session must still read absent - otherwise absence detection is
+  #    silently disabled for every task that captain spawns.
+  PATH="$fb:$PATH" FM_FAKE_PRESENT=fm-live \
+    fm_backend_target_exists tmux "remote:fm-live" \
+    || fail "a LIVE window in a tmux session named 'remote' must read present"
+  PATH="$fb:$PATH" FM_FAKE_PRESENT=fm-live \
+    fm_backend_target_exists tmux "remote:fm-gone" \
+    && fail "a GONE window in a tmux session literally named 'remote' must still read absent - the remote classification is meta-keyed, not a target-string exemption"
+
+  pass "fm_backend_target_exists (tmux): a gone window reads absent despite display-message's CMD_FIND_CANFAIL fallback; a prefix sibling, an unreadable server, and a bare pane id are all read exactly; backend=remote reads present without a local probe, while a tmux session literally named 'remote' is still probed exactly"
+}
+
 test_backend_name_precedence
 test_backend_detect_precedence
+test_target_exists_tmux_detects_gone_window
 test_backend_detect_cmux_fallback_bundle_id
 test_backend_detect_cmux_fallback_requires_darwin
 test_backend_detect_cmux_fallback_tmux_nested_false_positive

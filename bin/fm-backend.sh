@@ -343,8 +343,18 @@ fm_meta_get() {  # <meta-file> <key>
 
 # fm_backend_of_meta: the backend recorded in <meta-file>, defaulting to
 # `tmux` when the field is absent - the P1 compatibility contract.
+# A meta carrying `remote_host=` is a REMOTELY PLACED secondmate: its endpoint
+# lives on another host and is driven over the fm-on.sh transport, never by a
+# local backend operation, so it classifies as `remote` instead of falling into
+# that default. Keyed ONLY on `remote_host=` - never on the `window=remote:<id>`
+# string, which collides with a real tmux session literally named `remote`
+# (fm_backend_tmux_container_ensure takes the session name from
+# `display-message -p '#S'`, so `tmux new -s remote` records real local tasks as
+# `remote:fm-<id>`). This is the same signal bin/fm-send.sh already routes on
+# when it sets TARGET_BACKEND=remote.
 fm_backend_of_meta() {  # <meta-file>
   local v
+  [ -n "$(fm_meta_get "$1" remote_host)" ] && { printf 'remote'; return 0; }
   v=$(fm_meta_get "$1" backend)
   printf '%s' "${v:-tmux}"
 }
@@ -594,6 +604,17 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 # every dispatcher consumer while preserving the runtime source operations.
 fm_backend_source() {  # <name>
   local name=$1
+  # `remote` is a PLACEMENT, not a local runtime adapter: there is no local
+  # surface to capture, type into, or kill. Refusing here is what makes the
+  # classification safe - every local dispatcher below (capture, send_key,
+  # send_text_submit, kill, composer_state, agent_state, busy_state, publish)
+  # routes through this source step, so a remotely placed secondmate can never
+  # be silently mistreated as this home's tmux. fm_backend_agent_state degrades
+  # to `unverified` on this refusal, never to a false `dead`/`missing`.
+  if [ "$name" = remote ]; then
+    echo "error: 'remote' is a placement, not a local runtime backend: a remotely placed secondmate's endpoint lives on another host and is driven over the fm-on.sh transport, so no local backend operation applies to it" >&2
+    return 1
+  fi
   fm_backend_validate "$name" || return 1
   case "$name" in
     tmux)
@@ -846,17 +867,57 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # going through fm_backend_herdr_target_ready (which auto-starts the herdr
 # server as a side effect via fm_backend_herdr_server_ensure - fine for an
 # operation that is about to use the pane, wrong for a passive liveness
-# probe). A gone tmux window or an unqueryable herdr pane (server down, pane
-# closed), missing zellij pane, or unreadable Orca terminal simply fails, which
-# IS "does not exist" for this purpose.
-# Mirrors fm-crew-state.sh's pane_readable check; exists here as one shared
-# primitive so callers that only need a fast alive/dead read (recovery
-# digests, the session-start fleet digest) do not re-derive it inline.
+# probe). An unqueryable herdr pane (server down, pane closed), missing zellij
+# pane, or unreadable Orca terminal reads as "does not exist" here.
+# The tmux branch does NOT use `display-message -p -t <target>`: tmux marks
+# display-message's -t as CMD_FIND_CANFAIL, so an unresolvable target does NOT
+# fail - it silently falls back to the current pane and exits 0, so a gone
+# target could never read as absent (docs/verification/runtime-backends.md
+# "Endpoint absence probe" owns the dated tmux 3.5a transcript). It instead
+# probes with a listing command that genuinely fails for a gone target, matched
+# to the target shape callers pass:
+#   - a bare pane id ($TMUX_PANE) or window id (`%N`/`@N`, no colon) is already
+#     an exact selector, so `list-panes -t "$target"` reads it directly;
+#   - a "session:window" endpoint uses the exact `=ses:=win` form so a live
+#     prefix-sibling window cannot satisfy a gone target (window indices resolve
+#     under this form too), the same shape spawn_endpoint_still_present
+#     (bin/fm-spawn.sh) uses.
+# Both fail for an unreadable server/session, which IS "does not exist" here, so
+# this helper needs no has-session split (unlike spawn_endpoint_still_present,
+# which uses one to hold an unreadable server as "still present").
+# fm-crew-state.sh's pane_readable routes its tmux arm through this helper
+# rather than carrying its own probe, so the two cannot diverge back onto a
+# CANFAIL read; this exists as the one shared primitive so callers that only
+# need a fast alive/dead read (recovery digests, the session-start fleet
+# digest) do not re-derive it inline.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
-  local backend=$1 target=$2 expected_label=${3:-} session pane
+  local backend=$1 target=$2 expected_label=${3:-} session window pane
   case "$backend" in
+    remote)
+      # A remotely placed secondmate (fm_backend_of_meta classifies a meta with
+      # remote_host= as `remote`). Its endpoint lives on another host, so its
+      # liveness is owned by the remote transport and no LOCAL read can disprove
+      # it - probing here could only ever mislabel a live mate as gone.
+      # Not-locally-disprovable reads as present; the remote host's own verdict
+      # is what fm-crew-state and the secondmate recovery path consult instead.
+      return 0
+      ;;
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      case "$target" in
+        *:*:*|'':*|*:'') return 1 ;;
+        *:*)
+          # session:window (a pinned fm-<id> name, or a window index)
+          session=${target%%:*}
+          window=${target#*:}
+          tmux list-windows -t "=$session:=$window" >/dev/null 2>&1
+          ;;
+        %*|@*)
+          # a bare pane id ($TMUX_PANE, the supervisor target) or window id
+          tmux list-panes -t "$target" >/dev/null 2>&1
+          ;;
+        # a bare window name or other shape resolves nothing exact here
+        *) return 1 ;;
+      esac
       ;;
     herdr)
       fm_backend_source herdr || return 1

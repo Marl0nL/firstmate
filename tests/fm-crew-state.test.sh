@@ -82,9 +82,36 @@ SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# FM_FAKE_TMUX_MISSING=1 is the coarse switch: the whole server/window is gone,
+# so every read fails. FM_FAKE_TMUX_WINDOWS instead names the space-separated
+# windows a LIVE session still holds, which is the only way to model a gone crew
+# window inside a session that survives. Under it the fake serves real tmux 3.5a
+# absence semantics (the same two facts tests/fm-backend.test.sh pins):
+# `display-message -t` is CMD_FIND_CANFAIL, so it NEVER fails for a gone
+# window - it falls back to the current pane and exits 0 - while the exact form
+# `list-windows -t '=ses:=win'` genuinely fails unless the session holds that
+# window under that EXACT name, so a prefix or unrelated sibling cannot satisfy
+# a gone target.
+target_arg() { local prev= a; for a in "$@"; do [ "$prev" = -t ] && { printf '%s' "$a"; return; }; prev=$a; done; }
+window_held() {  # <-t value>: '=ses:=win' or 'ses:win'
+  local want=$1 w
+  want=${want#*:}; want=${want#=}
+  for w in ${FM_FAKE_TMUX_WINDOWS:-}; do [ "$w" = "$want" ] && return 0; done
+  return 1
+}
 case "${1:-}" in
   display-message)
+    if [ -z "${FM_FAKE_TMUX_WINDOWS:-}" ] && [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ]; then exit 1; fi
+    printf '%%1\n' ;;
+  list-windows)
+    if [ -n "${FM_FAKE_TMUX_WINDOWS:-}" ]; then
+      window_held "$(target_arg "$@")" || { printf "can't find window\n" >&2; exit 1; }
+      exit 0
+    fi
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    exit 0 ;;
+  list-panes)
+    if [ -z "${FM_FAKE_TMUX_WINDOWS:-}" ] && [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ]; then exit 1; fi
     printf '%%1\n' ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
@@ -166,11 +193,13 @@ reset_fakes() {
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
+  FM_FAKE_TMUX_WINDOWS=""
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT
+  export FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_WINDOWS
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
@@ -1084,6 +1113,52 @@ test_dead_window_ignores_stale_status_log() {
   pass "dead window ignores stale status log"
 }
 
+# The test above kills the whole tmux server, which even a CMD_FIND_CANFAIL probe
+# notices. This one pins the case that probe could NEVER read: the crew's own
+# fm-<id> window is gone while its session stays alive holding a sibling window.
+# `tmux display-message -p -t <gone>` silently falls back to the current pane and
+# exits 0 there, so the old pane_readable read the dead crew as readable and fell
+# through to the stale status log, reporting a gone crew as `done`/`working`.
+# pane_readable now routes its tmux arm through fm_backend_target_exists, whose
+# exact-form `list-windows -t '=ses:=win'` probe genuinely fails for the gone
+# window and is not satisfied by the surviving prefix sibling.
+test_gone_window_in_live_session_beats_stale_status_log() {
+  reset_fakes
+  local d out; d=$(new_case gone-window-live-session)
+  make_repo_on_branch "$d/wt" fm/feat-sib
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-sib.meta" "window=fm:fm-feat-sib" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: mid-review\n' > "$d/state/feat-sib.status"
+  # An idle busy-record, so the ONLY thing standing between this crew and a
+  # stale `working: mid-review` status-log verdict is the gone-target check.
+  arm_idle_record "$d/state" feat-sib
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  # The session survives holding ONLY a prefix sibling; fm-feat-sib itself is gone.
+  FM_FAKE_TMUX_WINDOWS="fm-feat-sib-auth"
+
+  # Non-vacuity: the fake really does model CMD_FIND_CANFAIL (display-message
+  # still succeeds for the gone window) and the session really is alive (the
+  # sibling resolves), so only an exact-form absence probe can fail this target.
+  PATH="$d/fakebin:$PATH" tmux display-message -p -t "fm:fm-feat-sib" '#{pane_id}' >/dev/null \
+    || fail "the fake must model CMD_FIND_CANFAIL: display-message stays rc=0 for a gone window"
+  PATH="$d/fakebin:$PATH" tmux list-windows -t "=fm:=fm-feat-sib-auth" >/dev/null 2>&1 \
+    || fail "the surviving sibling window must resolve - the session is alive, only the crew's window is gone"
+
+  out=$(run_crew_state "$d" feat-sib)
+  assert_contains "$out" "state: unknown" "a gone crew window in a live session -> unknown"
+  assert_contains "$out" "backend target gone" "the gone-target detail must name why the crew is unknown"
+  assert_not_contains "$out" "source: status-log" "a gone crew must not fall through to its stale status log"
+  assert_not_contains "$out" "state: working" "a stale working: line must not stand in for a gone crew"
+
+  # Same session, crew window PRESENT: the probe must not over-report absence.
+  FM_FAKE_TMUX_WINDOWS="fm-feat-sib fm-feat-sib-auth"
+  out=$(run_crew_state "$d" feat-sib)
+  assert_not_contains "$out" "backend target gone" "a present crew window must not read as gone"
+  assert_contains "$out" "source: status-log" "a present-but-idle crew still falls back to its status log"
+  pass "a gone fm-<id> window in a still-live tmux session reads unknown, not the stale status log"
+}
+
 # A closed/unreadable pane must NOT mask an authoritative run-step: judge by the
 # run-step, not the shell. The common case is a finished crew whose agent has
 # exited and closed its window (the normal gap between completion and teardown) -
@@ -1482,6 +1557,7 @@ test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
+test_gone_window_in_live_session_beats_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
