@@ -56,8 +56,8 @@ herdr pane run PANE_ID \
 6. Confirms a live firstmate actually appears **with a real agent process behind its pane** before reporting success.
    A created pane is not a started agent, a replayed record is not a process, and the bare shell Herdr restores into a persisted pane is neither.
    If nothing recognisable comes up, the script exits non-zero rather than reporting a success it did not achieve, and a pane that already holds a live agent is never closed on any release.
-   What it does with the workspace it created depends on the Herdr release: at or above the floor where an explicit close preserves focus it removes that workspace, and below the floor, or when the release cannot be classified, it deliberately leaves the workspace in place and names it in the journal for the operator to close by hand.
-   Expect that stray workspace on the 0.7.x line, and expect the message that says which one it is.
+   What it does with the workspace it created depends on the Herdr release: at or above the floor where an explicit close preserves focus it removes that workspace once it has proved nothing is running in it, and below the floor, when the release cannot be classified, or when any pane in it cannot be proved agent-free, it deliberately leaves the workspace in place and names it in the journal for the operator to close by hand.
+   Expect that stray workspace on the 0.7.x line, and on any release expect the message that says which one it is.
    Closing it automatically there would move the captain off whatever space was being watched, which is the worse outcome; the script's own header and [`herdr-backend.md`](herdr-backend.md) own why that floor is the right one.
 
 ### The network gate: no agent on a dead network
