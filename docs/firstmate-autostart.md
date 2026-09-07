@@ -28,9 +28,11 @@ The script's own header owns that reasoning, and [`verification/runtime-backends
 On start, the script:
 
 1. Resolves the firstmate home and refuses to continue unless it structurally looks like one (`AGENTS.md` plus an executable `bin/fm-spawn.sh`).
-2. **Polls** `herdr status --json` until the session's own server reports running and protocol-compatible, bounded by `--timeout` (120s in the shipped unit).
+2. **Polls** `herdr status --json` until the session's own server is running and has not declared itself incompatible, bounded by `--timeout` (120s in the shipped unit).
    `After=herdr-server.service` orders the unit after the server *process* starts, which is not the same as the socket being answerable; a fixed `sleep` would be a guess in both directions.
-   On timeout it exits non-zero and prints the last status it saw, so the journal records *why*.
+   Compatibility can only *block* the boot, never grant it: a server that says nothing about it still counts as ready, because requiring positive proof would turn a signal a release merely omits into a boot that fails forever, 120s at a time.
+   The script's own header owns that polarity and the reasoning behind it.
+   On timeout it exits non-zero and prints the last response it saw, so the journal records *why*.
 3. Asks whether a firstmate is already **running** - a listed entry that is confirmed live, not merely a record - and **exits 0 as a no-op if one is**.
    The question is asked of both `herdr agent list` and `herdr pane list`, because on Herdr 0.8.2 a live Claude registers no agent record at all and only the pane inventory still sees it.
    The no-op deliberately needs no network: a downed network must not turn "nothing to do" into a failed unit.
