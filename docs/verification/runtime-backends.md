@@ -712,7 +712,10 @@ rc=1
 
 The live guard drives `bin/fm-autostart.sh` itself end to end against both releases - a real create, a real launch, a real confirmation, a second run that must stay a no-op, a real bare shell in the home that must not block the boot, and a launch that never becomes an agent, which must exit 4.
 What that last case then does with the workspace is release-dependent, and the guard asserts both halves: at or above the `FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION` floor the workspace is removed, and below it the close is refused and the workspace is deliberately left behind, because an explicit close that empties a workspace steals the captain's focus on those releases.
-It reported 10 checks passing on `herdr 0.8.2` and 10 on `herdr 0.7.4`.
+**That end-to-end guard run is not confirmed against the code on this branch, and no check count is recorded for it here.**
+The counts this section carried before were produced ahead of two later fix rounds that changed the behaviour under test and rewrote the failed-launch case into the release-aware one described just above, so they measured different code and are deliberately not carried forward or adjusted.
+Everything else recorded in this section measures the Herdr binary rather than this branch's code and stands unchanged: the 0.7.4 and 0.8.2 `agent start` help shapes, the 0.8.2 `agent start --kind claude --pane` timeout with its empty `agent list`, the `workspace create` and `pane run` response shapes, the bare-shell `process-info` body, the zero-delay `pane run` trials above, and the `claude --continue` exit status.
+Re-run `FM_AUTOSTART_HERDR_LIVE=1 tests/fm-autostart-herdr-live-e2e.test.sh` against the installed Herdr and against the 0.7.4 release `bin/fm-install-herdr.sh` pins, then record the dated per-version result here; until that is done the end-to-end result for this change is unverified.
 It launches a stand-in agent (a copy of `sleep` named `claude`, a real process carrying a verified-harness name) rather than a real Claude: the subject under test is Herdr, and no real firstmate is ever created.
 
 ### Restored-manual-mode detection (2026-08-28, herdr 0.8.2 / protocol 20)

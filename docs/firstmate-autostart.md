@@ -49,7 +49,10 @@ herdr pane run <the pane that creates> \
 
 6. Confirms a live firstmate actually appears **with a real agent process behind its pane** before reporting success.
    A created pane is not a started agent, a replayed record is not a process, and the bare shell Herdr restores into a persisted pane is neither.
-   If nothing recognisable comes up, the script removes the pane it created - unless that pane already holds a live agent, which it will never close - and exits non-zero rather than leaving a half-built workspace for the next boot.
+   If nothing recognisable comes up, the script exits non-zero rather than reporting a success it did not achieve, and a pane that already holds a live agent is never closed on any release.
+   What it does with the workspace it created depends on the Herdr release: at or above the floor where an explicit close preserves focus it removes that workspace, and below the floor, or when the release cannot be classified, it deliberately leaves the workspace in place and names it in the journal for the operator to close by hand.
+   Expect that stray workspace on the 0.7.x line, and expect the message that says which one it is.
+   Closing it automatically there would move the captain off whatever space was being watched, which is the worse outcome; the script's own header and [`herdr-backend.md`](herdr-backend.md) own why that floor is the right one.
 
 ### The network gate: no agent on a dead network
 
@@ -93,7 +96,7 @@ So a match is now confirmed against the pane it claims, through the **reality-to
 | Question | Owner | Must answer |
 | --- | --- | --- |
 | Is there a real process behind the pane? | `fm_backend_herdr_pane_process_state` | `live` |
-| Is one of those processes one of our agents (cwd-matched entries only)? | `fm_backend_herdr_pane_foreground_harness` | yes |
+| Is one of those processes the kind of agent this run launches (cwd-matched entries only)? | `fm_backend_herdr_pane_foreground_harness`, or `fm_backend_herdr_pane_foreground_beyond_shell` for a non-harness `-- <argv>` | yes |
 | Where does that process really run (cwd-matched entries only)? | `fm_backend_herdr_pane_process_cwds` | some process cwd resolves to the firstmate home |
 
 Only `pane process-info` reaches an actual process.
@@ -106,10 +109,12 @@ A unit that cannot tell a working boot from a broken one is worse than cosmetica
 
 The name-matched and cwd-matched halves need different identity evidence.
 A **name** match is strong on its own - only `agent start firstmate` produces it, and herdr's server-global name registry refuses to register the name twice - so a live process behind a name-matched pane is the firstmate.
-A **cwd** match came from replayable metadata, so the processes themselves must corroborate it twice: the pane must really hold one of our agents, and some foreground process must really work in the firstmate home per the kernel's `cwd` in `pane process-info`.
+A **cwd** match came from replayable metadata, so the processes themselves must corroborate it twice: the pane must really hold what this run launches, and some foreground process must really work in the firstmate home per the kernel's `cwd` in `pane process-info`.
 The agent half is what keeps a restored bare shell from passing.
 Herdr restores its persisted panes as plain shells after a server restart, and such a pane reports the firstmate home as its cwd and a real live process - its own `/bin/bash` - so a pane holding nothing at all would otherwise read as a running firstmate and no-op every boot.
 [`herdr-backend.md`](herdr-backend.md) "Restart and liveness behavior" owns that husk rule for the whole fleet.
+Which probe answers that first half is chosen from the argv the run was asked to launch, because the `-- <argv>` escape hatch can name a command that is deliberately not one of our harnesses and would otherwise be impossible to confirm.
+The default `claude` launch, and any `-- <argv>` naming a harness, must show a verified-harness foreground process; a custom non-harness command must instead show a foreground process that is not merely the pane's own shell, which is the strictest question such a command can answer and still leaves a bare shell reading as a husk.
 A live agent that cannot be tied to the home is *unknown*, not a husk - it may be the firstmate mid-tool-call, with a child momentarily fronting the process group from another directory - and unknown refuses to start rather than duplicating.
 
 A confirmed husk - no process behind the pane - simply does not count, and the scan continues; another entry may still be the real firstmate.
