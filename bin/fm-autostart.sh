@@ -186,9 +186,10 @@
 # READINESS IS POLLED, NEVER SLEPT.
 # `After=herdr-server.service` orders the unit after the server PROCESS starts,
 # which is not the same as the socket being answerable. The script polls
-# `herdr status --json` until the session's own server reports running and
-# protocol-compatible, bounded by --timeout, and fails with the last response
-# it saw rather than guessing a sleep long enough to cover a slow boot.
+# `herdr status --json` until the session's own server reports running and has
+# not declared itself incompatible, bounded by --timeout, and fails with the
+# last response it saw rather than guessing a sleep long enough to cover a slow
+# boot.
 #
 # THE NETWORK GATE: NO AGENT ON A DEAD NETWORK.
 # The agent this script starts registers with Anthropic's remote-control
@@ -401,8 +402,8 @@ physical_path() {
   fi
 }
 
-# Poll `herdr status --json` until the session's own server reports both
-# running and protocol-compatible. Prints nothing on success; on timeout,
+# Poll `herdr status --json` until the session's own server is running and has
+# not declared itself incompatible. Prints nothing on success; on timeout,
 # reports the last response it saw so the journal distinguishes a server that
 # never came up from one that came up incompatible from one that answered
 # something unreadable, rather than only saying a wait elapsed.
@@ -414,8 +415,18 @@ physical_path() {
 # (fm_backend_herdr_server_ensure, which also records the verified fact that
 # such a call QUERIES and never auto-starts a server); starting one is a
 # separate call this script never makes. Its body carries both fields this poll
-# needs, .server.running and .server.compatible, so nothing here has to derive a
+# reads, .server.running and .server.compatible, so nothing here has to derive a
 # verdict the response does not state.
+#
+# The two fields are weighed differently, and deliberately so. Running must be
+# positively true: a body that cannot be parsed, or that does not say the server
+# is up, is not a ready server and keeps the poll waiting. Compatibility only
+# ever BLOCKS, and only when the server positively says so - null, absent, or
+# unreadable does not hold a running server back. That is the polarity the
+# pre-0.8 text surface had (it passed on a running server unless the output said
+# `compatible: no`), and requiring positive proof instead would turn a signal a
+# release merely omits into a permanent boot failure, 120s at a time, with the
+# journal blaming a readiness timeout.
 #
 # Routed for the same reason every other call is: left bare, this poll could
 # certify a DIFFERENT server than the one every later call addresses, so the
@@ -426,11 +437,8 @@ wait_for_server() {
   while :; do
     if out=$(fm_backend_herdr_cli "$HERDR_SESSION_NAME" status --json 2>&1); then
       last=$out
-      # One read, and it fails closed: a body that cannot be parsed, omits
-      # either field, or states either as anything but true keeps the poll
-      # waiting rather than passing the gate.
       if printf '%s' "$out" |
-        jq -e '.server.running == true and .server.compatible == true' >/dev/null 2>&1; then
+        jq -e '.server.running == true and .server.compatible != false' >/dev/null 2>&1; then
         return 0
       fi
     else

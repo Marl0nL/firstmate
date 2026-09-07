@@ -80,8 +80,9 @@ export PATH
 #   ready_after   number of `status --json` polls before the server reports
 #                 running (0 = ready immediately)
 #   status_fail   if present, `status --json` exits non-zero every time
-#   incompatible  if present, the server reports running but not
-#                 protocol-compatible, which must never pass the readiness gate
+#   compatible    the raw JSON value the server reports for .server.compatible
+#                 (default true); `false` must block the readiness gate, while
+#                 `null` and the literal `omit` (no such key at all) must not
 #   status_garbage  if present, `status --json` exits 0 with this body instead
 #                 of a parseable one, which must never pass the readiness gate
 #   agents.json   the exact `agent list` response body
@@ -236,14 +237,17 @@ case "$1 ${2:-}" in
       running=false
       state='"not running"'
     fi
-    compatible=true
-    [ -e "$d/incompatible" ] && compatible=false
+    # The compatibility signal, as a raw JSON value, so a case can say true,
+    # false, null, or `omit` for a release that carries no such key at all.
+    compatible=$(cat "$d/compatible" 2>/dev/null || printf 'true')
+    compat_field=",\"compatible\":$compatible"
+    [ "$compatible" = omit ] && compat_field=""
     read -r v p < "$d/release"
     # Real herdr reports protocol as a number; a fixture that names no usable
     # protocol reports null, which is what an unclassifiable release looks like.
     case "$p" in '' | *[!0-9]*) p=null ;; esac
-    printf '{"client":{"version":"%s","protocol":%s},"server":{"status":%s,"running":%s,"compatible":%s,"version":"%s","protocol":%s}}\n' \
-      "$v" "$p" "$state" "$running" "$compatible" "$v" "$p"
+    printf '{"client":{"version":"%s","protocol":%s},"server":{"status":%s,"running":%s%s,"version":"%s","protocol":%s}}\n' \
+      "$v" "$p" "$state" "$running" "$compat_field" "$v" "$p"
     exit 0
     ;;
   "agent list")
@@ -456,7 +460,7 @@ pass "readiness: an unreachable socket times out and reports the last status"
 # speaks a protocol this client cannot use must not be treated as ready, or the
 # boot would proceed to calls that cannot work.
 server=$(new_server "$TMP_ROOT/s-incompatible")
-: > "$server/incompatible"
+printf 'false\n' > "$server/compatible"
 out=$(run_autostart "$server" "$HOME_DIR")
 rc=$?
 expect_code 2 "$rc" "a running but incompatible server must exit 2"
@@ -466,6 +470,22 @@ assert_contains "$out" '"compatible":false' \
 [ "$(started_count "$server")" = 0 ] ||
   fail "READINESS: an incompatible server must never start an agent"
 pass "readiness: a running but incompatible server is not ready and starts nothing"
+
+# The other polarity, and it is the one that decides whether a release this
+# repo supports can boot at all. Compatibility only ever BLOCKS: a running
+# server that says nothing about it - no key, or a null - is ready, exactly as
+# the pre-0.8 text surface behaved, because requiring positive proof would turn
+# a signal a release merely omits into a boot that fails forever.
+for compat_value in omit null; do
+  server=$(new_server "$TMP_ROOT/s-compat-$compat_value")
+  printf '%s\n' "$compat_value" > "$server/compatible"
+  out=$(run_autostart "$server" "$HOME_DIR")
+  rc=$?
+  expect_code 0 "$rc" "a running server reporting compatible=$compat_value must be ready: $out"
+  [ "$(started_count "$server")" = 1 ] ||
+    fail "READINESS: a running server reporting compatible=$compat_value must not block the boot"
+done
+pass "readiness: a running server that does not declare incompatibility is ready"
 
 # An answer that cannot be understood is not a ready server either: the gate
 # fails closed and ends as the same bounded timeout.

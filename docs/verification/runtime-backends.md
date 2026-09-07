@@ -702,6 +702,11 @@ The zero-delay case is `herdr pane run <root_pane_id> '<command>'` issued as the
 On 0.8.2 the command executed in 10 of 10 idle trials and 10 of 10 trials under full CPU load (one busy loop per `nproc`), first observed at the 100ms poll; on 0.7.4 the same, 10 of 10 idle and 10 of 10 loaded.
 All 40 trials executed with zero losses, so the seeded pane really is at an interactive shell prompt when `workspace create` returns, and `bin/fm-autostart.sh` types the launch straight into it rather than spending a second `--confirm` budget proving what the create already guarantees.
 
+The boot's readiness gate polls `herdr status --json` for the session it targets, and the two fields it reads were measured on both supported releases in guarded isolated `fm-lab-` sessions, default-session tripwire clean, on 2026-09-07.
+On herdr 0.8.2 and on the pinned herdr 0.7.4 alike, the body carries `.server.compatible`: it is `true` for a matched running server, and `null` when no server is running, in which case `.server.running` is already `false`.
+The gate is written so that only a positively `false` compatibility blocks a running server, because a release that omitted the key entirely would otherwise never pass and would fail every boot on the full `--timeout`.
+That omitted-key case is unobserved on either supported release rather than proven impossible, which is why the gate tolerates it instead of depending on the key being present.
+
 `claude --continue` exits 1 in a directory with no usable prior conversation, which is why the typed command carries its own `|| <argv without --continue>` fallback:
 
 ```
