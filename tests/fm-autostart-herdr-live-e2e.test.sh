@@ -196,8 +196,13 @@ case "$plan" in
   *"herdr workspace create --cwd $HOME_A --label firstmate --no-focus"*) ;;
   *) fail "--dry-run's plan does not name the create the real path runs on $V: $plan" ;;
 esac
-planned_cmd=$(printf '%s' "$plan" | sed -n 's/^  herdr pane run <the pane that creates> //p')
-[ -n "$planned_cmd" ] || fail "--dry-run printed no launch command on $V: $plan"
+# The plan is shell-quoted so an operator can paste it, so it is EXPANDED the
+# way a shell would before the launch command is read back out of it.
+plan_run=$(printf '%s\n' "$plan" | grep '^  herdr pane run ')
+[ -n "$plan_run" ] || fail "--dry-run printed no launch command on $V: $plan"
+eval "set -- ${plan_run#  herdr }"
+planned_cmd=$4
+[ -n "$planned_cmd" ] || fail "--dry-run's launch line carries no command on $V: $plan_run"
 [ "$(panes_in "$HOME_A")" = 0 ] || fail "--dry-run created a pane on $V"
 CHECKED=$((CHECKED + 1))
 pass "--dry-run prints the create and the launch command without touching Herdr on $V"

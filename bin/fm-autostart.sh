@@ -365,7 +365,14 @@ FM_ROOT=$FM_AUTOSTART_ROOT
 # process-info that proves the workspace agent-free answered from another,
 # where those panes do not exist and every one of them reads `dead`. The
 # live-agent refusal would never fire and the close would land on a firstmate
-# that genuinely came up.
+# that genuinely came up. The readiness poll is routed for the same reason and
+# is no exception: a scoped status call queries the named session and starts
+# nothing (see wait_for_server), so nothing is gained by leaving it ambient and
+# a gate that certified a different server would be no gate at all.
+#
+# The --dry-run plan prints these calls the way the adapter really issues them,
+# trailing --session included, because a plan an operator cannot paste is not
+# the plan this script runs.
 HERDR_SESSION_NAME=$(fm_backend_herdr_session)
 
 # Which identity test a launched pane has to pass, decided once from the argv
@@ -397,11 +404,21 @@ physical_path() {
 # Poll `herdr status server` until it reports a running, compatible server.
 # Prints nothing on success; on timeout, reports the last status it saw so the
 # journal shows WHY rather than only that a wait elapsed.
+#
+# Routed like every other call here, and safe to route: a scoped status call
+# QUERIES the named session and starts nothing. bin/backends/herdr.sh proves it
+# both ways - fm_backend_herdr_server_ensure asks exactly this way to decide
+# whether a server is up ("a bare socket CLI call does NOT auto-start the
+# server", verified there), and starting one is a separate call
+# (`fm_backend_herdr_cli <session> server`) this script never makes. Left bare,
+# this poll could certify a DIFFERENT server than the one every later call
+# addresses, so the gate would pass while the session this run targets was
+# still down.
 wait_for_server() {
   local deadline last="(no response from 'herdr status server')" out
   deadline=$(( $(date +%s) + TIMEOUT ))
   while :; do
-    if out=$(herdr status server 2>&1); then
+    if out=$(fm_backend_herdr_cli "$HERDR_SESSION_NAME" status server 2>&1); then
       last=$out
       case "$out" in
         *'status: running'*)
@@ -704,6 +721,35 @@ launch_command() {
   fi
 }
 
+# The only value in the printed plan that a dry run cannot know yet: the pane
+# id `workspace create` will report. Deliberately free of shell metacharacters
+# so it survives quoting and stays obvious as a placeholder.
+PLAN_PANE_PLACEHOLDER=PANE_ID
+
+# One line of the --dry-run plan, built from the SAME argv the real path hands
+# to the adapter, shell-quoted so pasting the line reproduces that argv element
+# for element - including the trailing `--session` fm_backend_herdr_cli
+# appends. The flag is not decoration in a printed plan: per the session note
+# above, a bare call and a scoped call can reach different servers, so a plan
+# without it is precisely the version an operator must not run by hand.
+plan_line() {  # <herdr-arg>...
+  local a out=""
+  for a in "$@"; do
+    case "$a" in
+      # Nothing a shell would touch: print it as the operator would type it.
+      '') a="''" ;;
+      *[!A-Za-z0-9_./:=-]*)
+        case "$a" in
+          *\'*) a=$(printf '%q' "$a") ;;
+          *) a="'$a'" ;;
+        esac
+        ;;
+    esac
+    out="${out}${out:+ }$a"
+  done
+  printf '  herdr %s --session %s\n' "$out" "$(printf '%q' "$HERDR_SESSION_NAME")"
+}
+
 # Create the firstmate workspace and print "<workspace_id> <pane_id>".
 # `workspace create` seeds the workspace with exactly one tab holding one pane
 # at a shell prompt, and its response carries that pane as .result.root_pane
@@ -850,8 +896,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
       "$NET_PROBE_HOST" "$(net_diagnosis)" "$NET_TIMEOUT"
   fi
   printf 'fm-autostart.sh: no firstmate present; would run:\n'
-  printf '  herdr workspace create --cwd %s --label %s --no-focus\n' "$FM_ROOT" "$AGENT_NAME"
-  printf '  herdr pane run <the pane that creates> %s\n' "$(launch_command)"
+  plan_line workspace create --cwd "$FM_ROOT" --label "$AGENT_NAME" --no-focus
+  plan_line pane run "$PLAN_PANE_PLACEHOLDER" "$(launch_command)"
+  printf 'fm-autostart.sh: %s above is the pane workspace create seeds (.result.root_pane.pane_id), which a real run reads back from the response.\n' \
+    "$PLAN_PANE_PLACEHOLDER"
   exit 0
 fi
 

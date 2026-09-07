@@ -107,6 +107,9 @@ export PATH
 #   run_cwd       if present, the cwd `pane run` records for the agent it
 #                 leaves running, instead of the workspace's own cwd
 #   launch.log    appended with the argv of every `pane run` call
+#   invocations/  one file per herdr call, holding its complete argv one
+#                 argument per line, so a case can compare what the script
+#                 PRINTS it would run against what it really runs
 #   create.log    appended with the argv of every `workspace create` call
 #   closed.log    appended with the workspace id of every `workspace close`
 #   polls         appended with one line per `status server` call
@@ -139,6 +142,13 @@ export PATH
 cat > "$FAKEBIN/herdr" <<'SH'
 #!/usr/bin/env bash
 d=${FAKE_HERDR_DIR:?FAKE_HERDR_DIR unset}
+
+# Every invocation's COMPLETE argv, one argument per line, one file per call.
+# This is what lets a case compare the --dry-run plan against the invocation a
+# real run actually performs, argument for argument, rather than against a
+# sentence the script prints about itself.
+mkdir -p "$d/invocations"
+printf '%s\n' "$@" > "$d/invocations/$(ls "$d/invocations" | wc -l | tr -d ' ').argv"
 
 pane_state() { cat "$d/panes/$1" 2>/dev/null || printf 'live\n'; }
 pane_state_kind() { pane_state "$1" | { read -r kind _ || :; printf '%s' "${kind:-live}"; }; }
@@ -378,6 +388,30 @@ started_count() {
   local server=$1
   [ -f "$server/launch.log" ] || { printf '0\n'; return; }
   wc -l < "$server/launch.log" | tr -d ' '
+}
+
+# The complete argv, one argument per line, of the first recorded herdr call
+# whose first two arguments are <word1> <word2>.
+recorded_argv() {  # <server-dir> <word1> <word2>
+  local d=$1 w1=$2 w2=$3 f
+  for f in "$d"/invocations/*.argv; do
+    [ -f "$f" ] || continue
+    [ "$(sed -n 1p "$f")" = "$w1" ] || continue
+    [ "$(sed -n 2p "$f")" = "$w2" ] || continue
+    cat "$f"
+    return 0
+  done
+  return 1
+}
+
+# The argv, one argument per line, that a printed plan line expands to when an
+# operator pastes it into a shell. The plan is shell-quoted, so expanding it is
+# exactly the question "does pasting this run what the script runs".
+planned_argv() {  # <plan-line>
+  local line=$1
+  line=${line#  herdr }
+  eval "set -- $line"
+  printf '%s\n' "$@"
 }
 
 # One "cleanup" is one workspace this run created and then removed.
@@ -1001,12 +1035,49 @@ expect_code 0 "$rc" "--dry-run must succeed: $out"
 assert_contains "$out" "herdr workspace create --cwd $HOME_ABS --label firstmate --no-focus" \
   "--dry-run must print the exact create it would run"
 assert_contains "$out" "herdr pane run" "--dry-run must print the exact launch it would run"
-assert_contains "$out" "claude --dangerously-skip-permissions --remote-control --continue ||" \
-  "--dry-run's plan must be the command the real path would actually type"
 [ "$(started_count "$server")" = 0 ] || fail "--dry-run must never start an agent"
+recorded_argv "$server" workspace create >/dev/null &&
+  fail "--dry-run must never create a workspace"
+recorded_argv "$server" pane run >/dev/null &&
+  fail "--dry-run must never type a launch into a pane"
 assert_contains "$out" "network gate would pass" \
   "--dry-run must report the gate's current verdict"
 pass "dry run: reports the decision and the command without starting anything"
+
+# The plan is only worth printing if it is the invocation the real path
+# performs. Both halves are taken from behaviour: the plan from a --dry-run
+# run, the truth from the argv the fake herdr actually recorded for a real one,
+# and the plan is EXPANDED as a shell would expand it, so a plan an operator
+# could not paste fails here.
+plan=$(run_autostart "$(new_server "$TMP_ROOT/s-plan-dry")" "$HOME_DIR" --dry-run)
+real=$(new_server "$TMP_ROOT/s-plan-real")
+out=$(run_autostart "$real" "$HOME_DIR")
+rc=$?
+expect_code 0 "$rc" "the real run behind the plan comparison must succeed: $out"
+
+plan_create=$(printf '%s\n' "$plan" | grep '^  herdr workspace create ') ||
+  fail "--dry-run printed no workspace create line: $plan"
+[ "$(planned_argv "$plan_create")" = "$(recorded_argv "$real" workspace create)" ] ||
+  fail "the planned create is not the create the real path ran:
+plan:
+$(planned_argv "$plan_create")
+real:
+$(recorded_argv "$real" workspace create)"
+
+plan_run=$(printf '%s\n' "$plan" | grep '^  herdr pane run ') ||
+  fail "--dry-run printed no pane run line: $plan"
+real_run=$(recorded_argv "$real" pane run) || fail "the real run recorded no pane run call"
+# The pane id is the one value a dry run cannot know, so the plan carries a
+# placeholder there and everything else must match exactly.
+real_pane=$(printf '%s\n' "$real_run" | sed -n 3p)
+[ -n "$real_pane" ] || fail "the real pane run call named no pane"
+[ "$(planned_argv "$plan_run" | sed "s|^PANE_ID\$|$real_pane|")" = "$real_run" ] ||
+  fail "the planned launch is not the launch the real path ran:
+plan:
+$(planned_argv "$plan_run")
+real:
+$real_run"
+pass "dry run: the printed plan expands to exactly the invocation the real path runs"
 
 # A dry run on a dead network still succeeds - it reports what a real run
 # would do (poll, then exit 5) instead of holding the shell for --net-timeout.

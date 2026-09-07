@@ -38,14 +38,17 @@ On start, the script:
 5. Only then starts one:
 
 ```
-herdr workspace create --cwd /var/home/marlon/firstmate --label firstmate --no-focus
+herdr workspace create --cwd /var/home/marlon/firstmate --label firstmate --no-focus --session default
 herdr pane run <the pane that creates> \
-  'claude --dangerously-skip-permissions --remote-control --continue || claude --dangerously-skip-permissions --remote-control'
+  'claude --dangerously-skip-permissions --remote-control --continue || claude --dangerously-skip-permissions --remote-control' \
+  --session default
 ```
 
    The `||` half is not decoration.
    `claude --continue` exits non-zero in a directory with no conversation to resume, so a first boot on a fresh machine would otherwise leave a dead pane instead of a firstmate; the fresh session the fallback starts is what the next boot resumes.
-   `--dry-run` prints exactly this plan without running any of it.
+   `--dry-run` prints exactly this plan without running any of it, shell-quoted so the printed lines can be pasted as they stand.
+   The trailing `--session` is the session the whole run addresses, and it is printed because every call the script makes carries it; a plan without it would be the version that can reach a different server.
+   The launch command is one argument, not a shell pipeline the calling shell interprets.
 
 6. Confirms a live firstmate actually appears **with a real agent process behind its pane** before reporting success.
    A created pane is not a started agent, a replayed record is not a process, and the bare shell Herdr restores into a persisted pane is neither.
