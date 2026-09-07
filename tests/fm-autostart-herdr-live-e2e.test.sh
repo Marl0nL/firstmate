@@ -33,6 +33,15 @@
 # guarded lab helper (bin/fm-herdr-lab.sh): leading --session, refuse-default,
 # before/after fleet-state tripwire. The captain's default session is untouched.
 #
+# That isolation is also a stated LIMIT on what this guard proves. The wrapper
+# forces every herdr call into the lab session, so a call the script makes
+# bare and a call it makes through fm_backend_herdr_cli converge on the same
+# server here no matter what. A session-targeting split between them - the
+# defect where the pane enumeration and the close address one server while the
+# process-info that authorizes the close answers from another - is therefore
+# invisible to this guard by construction, and nothing here should be read as
+# evidence against it.
+#
 # Run explicitly after a Herdr upgrade, and before trusting a refreshed
 # docs/verification/runtime-backends.md "Boot autostart launch shape" entry:
 #

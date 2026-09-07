@@ -717,6 +717,8 @@ The counts this section carried before were produced ahead of two later fix roun
 Everything else recorded in this section measures the Herdr binary rather than this branch's code and stands unchanged: the 0.7.4 and 0.8.2 `agent start` help shapes, the 0.8.2 `agent start --kind claude --pane` timeout with its empty `agent list`, the `workspace create` and `pane run` response shapes, the bare-shell `process-info` body, the zero-delay `pane run` trials above, and the `claude --continue` exit status.
 Re-run `FM_AUTOSTART_HERDR_LIVE=1 tests/fm-autostart-herdr-live-e2e.test.sh` against the installed Herdr and against the 0.7.4 release `bin/fm-install-herdr.sh` pins, then record the dated per-version result here; until that is done the end-to-end result for this change is unverified.
 It launches a stand-in agent (a copy of `sleep` named `claude`, a real process carrying a verified-harness name) rather than a real Claude: the subject under test is Herdr, and no real firstmate is ever created.
+One class of defect this guard cannot catch by construction: its wrapper forces every herdr call into the isolated lab session, so a bare call and an `fm_backend_herdr_cli` call converge on one server there regardless of how the script targets them.
+A session-targeting split between the destructive close and the process-info that authorizes it would therefore never appear in a live-guard run, and only the source-level rule that every call goes through the adapter with one resolved session name prevents it.
 
 ### Restored-manual-mode detection (2026-08-28, herdr 0.8.2 / protocol 20)
 

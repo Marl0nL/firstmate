@@ -350,10 +350,22 @@ FM_AUTOSTART_ROOT=$FM_ROOT
 # shellcheck source=bin/backends/herdr.sh
 . "$DEFAULT_ROOT/bin/backends/herdr.sh"
 FM_ROOT=$FM_AUTOSTART_ROOT
-# The same session `herdr agent start` below lands in: ambient HERDR_SESSION if
-# the operator set one, herdr's own `default` otherwise. Held in its own
-# variable rather than assigned back into HERDR_SESSION, which would change
-# which session the start itself targets.
+# The one session this whole run addresses: ambient HERDR_SESSION if the
+# operator set one, herdr's own `default` otherwise.
+#
+# EVERY herdr call this script makes goes through fm_backend_herdr_cli with
+# this name, never bare, and that is a correctness requirement rather than a
+# style one. bin/backends/herdr.sh records it verified: the HERDR_SESSION env
+# var alone is NOT reliably honored by CLI subcommands once any other herdr
+# server is bound on the machine - a query silently falls back to whatever
+# server IS running - while `--session <name>` always routes correctly. A bare
+# call and an adapter call can therefore reach DIFFERENT servers, and this
+# script's destructive step is gated on exactly those adapter probes: the pane
+# enumeration and the close would run against one server while the
+# process-info that proves the workspace agent-free answered from another,
+# where those panes do not exist and every one of them reads `dead`. The
+# live-agent refusal would never fire and the close would land on a firstmate
+# that genuinely came up.
 HERDR_SESSION_NAME=$(fm_backend_herdr_session)
 
 # Which identity test a launched pane has to pass, decided once from the argv
@@ -577,8 +589,8 @@ EOF
 firstmate_present() {
   local agents panes name cwd fgcwd pane line desc matched_by count seen=0 rc unknown=0
   local agent_count pane_count
-  agents=$(herdr agent list 2>/dev/null) || return 2
-  panes=$(herdr pane list 2>/dev/null) || return 2
+  agents=$(fm_backend_herdr_cli "$HERDR_SESSION_NAME" agent list 2>/dev/null) || return 2
+  panes=$(fm_backend_herdr_cli "$HERDR_SESSION_NAME" pane list 2>/dev/null) || return 2
   # A response that does not carry its array is an error or an unrecognised
   # shape, not an empty fleet. Never read either one as "absent".
   printf '%s' "$agents" | jq -e 'has("result") and (.result | has("agents"))' >/dev/null 2>&1 || return 2
@@ -704,7 +716,7 @@ launch_command() {
 # signal the live guard exists to raise.
 create_firstmate_workspace() {
   local out ws pane
-  out=$(herdr workspace create --cwd "$FM_ROOT" --label "$AGENT_NAME" --no-focus 2>&1) || {
+  out=$(fm_backend_herdr_cli "$HERDR_SESSION_NAME" workspace create --cwd "$FM_ROOT" --label "$AGENT_NAME" --no-focus 2>&1) || {
     printf 'fm-autostart.sh: creating the firstmate workspace failed; herdr said:\n%s\n' "$out" >&2
     return 1
   }
@@ -758,7 +770,7 @@ create_firstmate_workspace() {
 # the captain's.
 discard_created_workspace() {  # <workspace_id>
   local ws=$1 panes pane floor=0
-  panes=$(herdr pane list --workspace "$ws" 2>/dev/null) || panes=""
+  panes=$(fm_backend_herdr_cli "$HERDR_SESSION_NAME" pane list --workspace "$ws" 2>/dev/null) || panes=""
   if ! printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1; then
     printf 'fm-autostart.sh: could not inspect workspace %s to remove it; close it by hand before the next boot.\n' \
       "$ws" >&2
@@ -799,7 +811,7 @@ EOF
       return 0
       ;;
   esac
-  herdr workspace close "$ws" >/dev/null 2>&1 ||
+  fm_backend_herdr_cli "$HERDR_SESSION_NAME" workspace close "$ws" >/dev/null 2>&1 ||
     printf 'fm-autostart.sh: could not remove the half-started workspace %s; close it by hand before the next boot.\n' \
       "$ws" >&2
 }
@@ -857,7 +869,7 @@ created=$(create_firstmate_workspace) ||
 started_workspace=${created%% *}
 started_pane=${created#* }
 
-if ! herdr pane run "$started_pane" "$(launch_command)" >/dev/null; then
+if ! fm_backend_herdr_cli "$HERDR_SESSION_NAME" pane run "$started_pane" "$(launch_command)" >/dev/null; then
   discard_created_workspace "$started_workspace"
   die "the launch command could not be sent to pane $started_pane; no firstmate is running" 4
 fi

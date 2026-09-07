@@ -563,6 +563,25 @@ assert_not_contains "$out" "already up" \
   fail "RESTORED SHELL: a bare shell in the firstmate home must not block the start"
 pass "liveness: a restored bare shell in the home does not count as a firstmate"
 
+# The strict half of the conditional identity test, and the only case where the
+# two probes disagree under the DEFAULT claude argv. This pane holds a real live
+# process that is not the pane's own shell, working in the firstmate home, but
+# it is not one of our harnesses. A harness launch must call that a husk and
+# boot anyway; scoring it live would be the permanent silent no-op this script
+# exists to end, with the captain's firstmate never coming up because something
+# unrelated happened to be running in the home.
+server=$(new_server "$TMP_ROOT/s-nonharness-in-home" '[]' \
+  "[{\"pane_id\":\"w1:p1\",\"cwd\":\"$HOME_ABS\",\"foreground_cwd\":\"$HOME_ABS\"}]")
+set_pane "$server" w1:p1 "custom $HOME_ABS"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 0 "$rc" "a non-harness process in the home must not stop a harness boot: $out"
+assert_not_contains "$out" "already up" \
+  "IDENTITY: a live non-harness process in the home is not a running firstmate"
+[ "$(started_count "$server")" = 1 ] ||
+  fail "IDENTITY: a harness launch must still start when the home holds only a non-harness process"
+pass "liveness: a live non-harness process in the home does not count as a firstmate"
+
 # ... and the same shell must not be mistaken for a firstmate when it appears
 # in the agent registry either, which is where the pre-0.8 ghost records live.
 server=$(new_server "$TMP_ROOT/s-restored-shell-agent" \
