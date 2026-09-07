@@ -4,32 +4,42 @@
 # the firstmate agent inside an already-running, headless herdr server.
 #
 # Every case drives the script against a FAKE `herdr` on PATH, backed by a
-# fixture directory that models the server's readiness and its agent list. The
-# live herdr server is never contacted: no real `herdr status`, no real
-# `herdr agent list`, and above all no real `herdr agent start`, which on the
-# captain's machine would create a SECOND firstmate.
+# fixture directory that models the server's readiness, its agent list, its
+# pane list, and what each pane really holds. The live herdr server is never
+# contacted: no real `herdr status`, no real inventory reads, and above all no
+# real `herdr workspace create` or `herdr pane run`, which on the captain's
+# machine would create a SECOND firstmate.
 #
 # What is proven here: the readiness wait polls and times out cleanly without
 # starting anything; and - the sharp part - the idempotence guard never creates
 # a second firstmate, whether the existing one is matched by name, by working
 # directory, or by an aliased (/home vs /var/home) spelling of that directory,
-# and whether the list is readable at all.
+# whether it is visible in the agent registry or only in the pane inventory,
+# and whether either inventory is readable at all.
 #
 # The other half of that guard is that a matching entry must be LIVE. herdr
 # persists its session layout, so after a reboot `agent list`, `pane get` and
 # `agent get` all replay GHOST records - complete with agent_status "idle" - for
 # agents that are not running; only `pane process-info` sees that no process is
 # behind them. The fake herdr below therefore models a pane's state, not just
-# the agent list, so the ghost cases can prove the script starts firstmate
+# the inventories, so the ghost cases can prove the script starts firstmate
 # instead of mistaking a replayed record for a live supervisor and doing nothing
 # at every boot, forever.
 #
-# Liveness is judged on `pane process-info` alone - existence of a process,
-# plus its kernel-reported cwd for a cwd-matched entry - because on herdr
-# 0.7.4 `agent get`'s agent_status reports "unknown" for a genuinely live
-# agent, and consulting it made the unit declare two working boots failures
-# (verified 2026-07-20). The fake's process-info therefore carries the real
-# 0.7.4 body shape, including per-process cwd.
+# Liveness is judged on `pane process-info` alone - existence of a process, its
+# identity as a verified harness, and its kernel-reported cwd for a cwd-matched
+# entry - because on herdr 0.7.4 `agent get`'s agent_status reports "unknown"
+# for a genuinely live agent, and consulting it made the unit declare two
+# working boots failures (verified 2026-07-20). The fake's process-info
+# therefore carries the real body shape, including per-process argv and cwd, so
+# a restored BARE SHELL in the firstmate home is modelled distinctly from a
+# live agent there.
+#
+# The launch itself is two calls - `workspace create` then `pane run` - and the
+# fake models their real consequences (a new pane appears in the pane list and
+# starts out holding nothing but a shell; typing the launch command is what
+# puts an agent in it), so the end-to-end cases exercise the same sequence a
+# boot really performs.
 #
 # The suite also drives the NETWORK GATE against fake `curl` and `ping` on
 # PATH: reachable, unreachable (bounded, polled, exit 5, nothing started),
@@ -62,15 +72,34 @@ export PATH
 #                 running (0 = ready immediately)
 #   status_fail   if present, `status server` exits non-zero every time
 #   agents.json   the exact `agent list` response body
+#   panes.json    the exact `pane list` response body
 #   list_fail     if present, `agent list` exits non-zero
-#   start_fail    if present, `agent start` exits non-zero
-#   start.log     appended with the argv of every `agent start` call
+#   panelist_fail if present, `pane list` exits non-zero
+#   panelist_ws_fail  if present, only `pane list --workspace` exits non-zero,
+#                 so the cleanup path cannot prove a workspace is agent-free
+#   ws_fail       if present, `workspace create` exits non-zero
+#   ws_nopane     if present, `workspace create` omits root_pane, so the pane
+#                 has to be resolved from `pane list --workspace` instead
+#   ws_wspanes    how many panes a `workspace create` seeds (default 1); more
+#                 than one must be refused rather than guessed at
+#   run_fail      if present, `pane run` exits non-zero
+#   run_inert     if present, `pane run` succeeds but leaves the pane a bare
+#                 shell - the launch that types fine and never becomes an agent
+#   run_cwd       if present, the cwd `pane run` records for the agent it
+#                 leaves running, instead of the workspace's own cwd
+#   launch.log    appended with the argv of every `pane run` call
+#   create.log    appended with the argv of every `workspace create` call
+#   closed.log    appended with the workspace id of every `workspace close`
 #   polls         appended with one line per `status server` call
 #   panes/<id>    this pane's state: a state word, optionally followed by the
 #                 cwd process-info should report for the live process (default
 #                 when the file is absent: live, cwd /x):
-#                   live [cwd]  process-info answers with a real process body
-#                               carrying the given cwd - the real 0.7.4 shape
+#                   live [cwd]  process-info answers with a real claude process
+#                               body carrying the given cwd - the real shape
+#                   shell [cwd] process-info answers with a real /bin/bash
+#                               process body carrying the given cwd - the
+#                               restored bare shell herdr leaves behind, which
+#                               is a husk however live its shell is
 #                   ghost       pane get and agent get answer from the persisted
 #                               layout, process-info says pane_not_found - the
 #                               post-reboot shape that made this guard a no-op
@@ -115,9 +144,17 @@ case "$1 ${2:-}" in
     done
     case "$(pane_state_kind "$pane")" in
       live)
-        # The verified herdr 0.7.4 body: foreground_processes entries carry
-        # argv, cmdline, cwd, name, and pid.
+        # The verified herdr body: foreground_processes entries carry argv,
+        # cmdline, cwd, name, and pid.
         printf '{"id":"cli:fake","result":{"process_info":{"foreground_process_group_id":1,"shell_pid":1,"pane_id":"%s","foreground_processes":[{"argv":["claude"],"cmdline":"claude","cwd":"%s","name":"claude","pid":1}]},"type":"pane_process_info"}}\n' \
+          "$pane" "$(pane_state_cwd "$pane")"
+        exit 0
+        ;;
+      shell)
+        # The restored bare shell: a real live process with a real cwd, and no
+        # agent anywhere in it. Verified body shape (herdr 0.8.2): the pane's
+        # own shell is its whole foreground process group.
+        printf '{"id":"cli:fake","result":{"process_info":{"foreground_process_group_id":1,"shell_pid":1,"pane_id":"%s","foreground_processes":[{"argv":["/bin/bash"],"cmdline":"/bin/bash","cwd":"%s","name":"bash","pid":1}]},"type":"pane_process_info"}}\n' \
           "$pane" "$(pane_state_cwd "$pane")"
         exit 0
         ;;
@@ -141,26 +178,65 @@ case "$1 ${2:-}" in
     cat "$d/agents.json"
     exit 0
     ;;
-  "agent start")
+  "pane list")
+    [ -e "$d/panelist_fail" ] && exit 1
+    # `pane list --workspace <id>` selects only the panes a `workspace create`
+    # put in that workspace; pre-existing fixture panes belong to none.
+    if [ "${3:-}" = "--workspace" ]; then
+      [ -e "$d/panelist_ws_fail" ] && exit 1
+      jq --arg w "${4:-}" '.result.panes |= map(select(.workspace_id == $w))' "$d/panes.json"
+      exit 0
+    fi
+    cat "$d/panes.json"
+    exit 0
+    ;;
+  "workspace create")
     shift 2
-    printf '%s\n' "$*" >> "$d/start.log"
-    [ -e "$d/start_fail" ] && exit 1
-    # A real start makes the agent visible to the next `agent list`; modelling
-    # that is what lets a case run the script twice and prove idempotence.
-    name=$1
+    printf '%s\n' "$*" >> "$d/create.log"
+    [ -e "$d/ws_fail" ] && exit 1
     cwd=""
     while [ "$#" -gt 0 ]; do
       [ "$1" = "--cwd" ] && cwd=$2
       shift
     done
-    # A real start produces a real pane with a real process behind it, so the
-    # started agent's pane is left at the default `live` state. agent_status
-    # is "unknown" because that is what herdr 0.7.4 really reports for a
-    # freshly started, genuinely live agent (verified 2026-07-20): the
-    # confirmation must succeed in spite of it.
-    jq --arg n "$name" --arg c "$cwd" \
-      '.result.agents += [{"name":$n,"cwd":$c,"agent":"claude","agent_status":"unknown","pane_id":"w9:pS"}]' \
-      "$d/agents.json" > "$d/agents.json.new" && mv "$d/agents.json.new" "$d/agents.json"
+    printf '%s' "$cwd" > "$d/ws_cwd"
+    # A real create seeds one tab holding one pane at a SHELL PROMPT: live, but
+    # holding no agent at all until something is typed into it.
+    n=$(cat "$d/ws_wspanes" 2>/dev/null || echo 1)
+    i=0
+    while [ "$i" -lt "$n" ]; do
+      i=$((i + 1))
+      printf 'shell %s\n' "$cwd" > "$d/panes/w9:pS$i"
+      jq --arg p "w9:pS$i" --arg c "$cwd" \
+        '.result.panes += [{"pane_id":$p,"cwd":$c,"foreground_cwd":$c,"workspace_id":"w9"}]' \
+        "$d/panes.json" > "$d/panes.json.new" && mv "$d/panes.json.new" "$d/panes.json"
+    done
+    if [ -e "$d/ws_nopane" ]; then
+      printf '{"id":"cli:fake","result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"type":"workspace_created"}}\n'
+    else
+      printf '{"id":"cli:fake","result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:pS1","cwd":"%s","tab_id":"w9:t1","workspace_id":"w9"},"type":"workspace_created"}}\n' "$cwd"
+    fi
+    exit 0
+    ;;
+  "workspace close")
+    printf '%s\n' "$3" >> "$d/closed.log"
+    for p in $(jq -r --arg w "$3" '.result.panes[]? | select(.workspace_id == $w) | .pane_id' "$d/panes.json"); do
+      printf 'dead\n' > "$d/panes/$p"
+    done
+    jq --arg w "$3" '.result.panes |= map(select(.workspace_id != $w))' \
+      "$d/panes.json" > "$d/panes.json.new" && mv "$d/panes.json.new" "$d/panes.json"
+    printf '{"id":"cli:fake","result":{"type":"workspace_closed"}}\n'
+    exit 0
+    ;;
+  "pane run")
+    # `pane run <pane_id> <command>`: $3 is the pane, $4 the command line.
+    printf '%s\n' "$4" >> "$d/launch.log"
+    [ -e "$d/run_fail" ] && exit 1
+    # Typing the launch command is what puts a real agent in the pane - unless
+    # the case is modelling a launch that types fine and never becomes one.
+    [ -e "$d/run_inert" ] ||
+      printf 'live %s\n' "$(cat "$d/run_cwd" 2>/dev/null || cat "$d/ws_cwd" 2>/dev/null)" > "$d/panes/$3"
+    printf '{"id":"cli:fake","result":{"type":"pane_run"}}\n'
     exit 0
     ;;
 esac
@@ -205,16 +281,19 @@ make_home() {
   chmod +x "$dir/bin/fm-spawn.sh"
 }
 
-# A fresh fake-server state dir. `agents` is a JSON array literal for the
-# response body, so a case spells out exactly the fleet it wants the script to
-# see.
+# A fresh fake-server state dir. `agents` and `panes` are JSON array literals
+# for the two inventory response bodies, so a case spells out exactly the fleet
+# it wants the script to see - including the herdr 0.8.2 shape, where the agent
+# registry is empty and only the pane inventory sees the live firstmate.
 new_server() {
-  local dir=$1 agents=${2:-[]}
+  local dir=$1 agents=${2:-[]} panes=${3:-[]}
   rm -rf "$dir"
   mkdir -p "$dir"
   mkdir -p "$dir/panes"
   printf '{"id":"cli:agent:list","result":{"agents":%s,"type":"agent_list"}}\n' "$agents" \
     > "$dir/agents.json"
+  printf '{"id":"cli:pane:list","result":{"panes":%s,"type":"pane_list"}}\n' "$panes" \
+    > "$dir/panes.json"
   printf '%s\n' "$dir"
 }
 
@@ -233,10 +312,20 @@ run_autostart() {
   FAKE_HERDR_DIR="$server" "$SCRIPT" --fm-root "$root" --interval 0.05 --timeout 2 --confirm 2 "$@" 2>&1
 }
 
+# One "start" is one launch command typed into a pane. Counting the typing
+# rather than the workspace create is what the ONE RULE is really about: a
+# second firstmate is a second launched agent.
 started_count() {
   local server=$1
-  [ -f "$server/start.log" ] || { printf '0\n'; return; }
-  wc -l < "$server/start.log" | tr -d ' '
+  [ -f "$server/launch.log" ] || { printf '0\n'; return; }
+  wc -l < "$server/launch.log" | tr -d ' '
+}
+
+# One "cleanup" is one workspace this run created and then removed.
+closed_count() {
+  local server=$1
+  [ -f "$server/closed.log" ] || { printf '0\n'; return; }
+  wc -l < "$server/closed.log" | tr -d ' '
 }
 
 HOME_DIR="$TMP_ROOT/firstmate"
@@ -382,6 +471,51 @@ assert_contains "$out" "already up" "a live firstmate must be reported as alread
   fail "IDEMPOTENCE: a pane with a real process behind it must never be duplicated"
 pass "liveness: a confirmed-live firstmate is still a no-op"
 
+# THE HERDR 0.8.2 REGISTRY BLIND SPOT. A live Claude registers no agent record
+# at all there, so `agent list` answers with an empty array right next to the
+# running firstmate and the pane inventory is the only one that still sees it.
+# Reading the registry alone would report "no firstmate present" and start a
+# second supervisor - the exact outcome THE ONE RULE exists to prevent.
+server=$(new_server "$TMP_ROOT/s-registry-blind" '[]' \
+  "[{\"pane_id\":\"w1:p1\",\"cwd\":\"$HOME_ABS\",\"foreground_cwd\":\"$HOME_ABS\"}]")
+set_pane "$server" w1:p1 "live $HOME_ABS"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 0 "$rc" "a firstmate visible only in the pane inventory must be a no-op: $out"
+assert_contains "$out" "already up" "a pane-only firstmate must be reported as already up"
+[ "$(started_count "$server")" = 0 ] ||
+  fail "REGISTRY BLIND SPOT: an empty agent registry must never license a duplicate"
+pass "idempotence: a firstmate visible only in the pane inventory blocks the start"
+
+# The other side of that coin. Herdr restores its persisted panes as plain
+# shells after a server restart, so the firstmate home's pane comes back with
+# the right cwd and a real live process - its own shell - and nothing else.
+# Counting that as a running firstmate would no-op every boot forever, which is
+# the failure this whole script was written to end.
+server=$(new_server "$TMP_ROOT/s-restored-shell" '[]' \
+  "[{\"pane_id\":\"w1:p1\",\"cwd\":\"$HOME_ABS\",\"foreground_cwd\":\"$HOME_ABS\"}]")
+set_pane "$server" w1:p1 "shell $HOME_ABS"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 0 "$rc" "a restored bare shell must not stop the start: $out"
+assert_not_contains "$out" "already up" \
+  "RESTORED SHELL: a pane holding nothing but a shell is not a running firstmate"
+[ "$(started_count "$server")" = 1 ] ||
+  fail "RESTORED SHELL: a bare shell in the firstmate home must not block the start"
+pass "liveness: a restored bare shell in the home does not count as a firstmate"
+
+# ... and the same shell must not be mistaken for a firstmate when it appears
+# in the agent registry either, which is where the pre-0.8 ghost records live.
+server=$(new_server "$TMP_ROOT/s-restored-shell-agent" \
+  "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\",\"pane_id\":\"w1:p1\"}]")
+set_pane "$server" w1:p1 "shell $HOME_ABS"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 0 "$rc" "a registry entry backed by a bare shell must not stop the start: $out"
+[ "$(started_count "$server")" = 1 ] ||
+  fail "RESTORED SHELL: a registry entry over a bare shell must not block the start"
+pass "liveness: a registry entry backed by only a shell does not count as a firstmate"
+
 # A ghost sitting next to the real thing: the husk must be skipped, and the scan
 # must go on to find the live one rather than starting a second supervisor.
 server=$(new_server "$TMP_ROOT/s-ghost-and-live" \
@@ -488,6 +622,38 @@ expect_code 3 "$rc" "an agents field that cannot be walked must exit 3"
   fail "IDEMPOTENCE: a partial or failed extraction must never be read as an empty fleet"
 pass "idempotence: an unwalkable agents field fails closed rather than starting"
 
+# The pane inventory is now load-bearing, so losing it is exactly as unknown as
+# losing the agent registry: the live firstmate could be the entry never read.
+server=$(new_server "$TMP_ROOT/s-panelistfail")
+: > "$server/panelist_fail"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 3 "$rc" "an unreadable pane list must exit 3"
+assert_contains "$out" "refusing to start a possible duplicate" \
+  "an unreadable pane list must say why it refused"
+[ "$(started_count "$server")" = 0 ] ||
+  fail "IDEMPOTENCE: an unreadable pane list must never lead to a start"
+pass "idempotence: an unreadable pane list fails closed and starts nothing"
+
+server=$(new_server "$TMP_ROOT/s-panelistjunk")
+printf '{"id":"cli:pane:list","error":{"code":"nope"}}\n' > "$server/panes.json"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 3 "$rc" "a pane-list error response must exit 3, not be read as an empty fleet"
+[ "$(started_count "$server")" = 0 ] ||
+  fail "IDEMPOTENCE: a pane-list error must never be read as 'no firstmate present'"
+pass "idempotence: a pane-list error response is unknown state, not an empty fleet"
+
+server=$(new_server "$TMP_ROOT/s-paneshortread")
+printf '{"id":"cli:pane:list","result":{"panes":"not-an-array","type":"pane_list"}}\n' \
+  > "$server/panes.json"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 3 "$rc" "a panes field that cannot be walked must exit 3"
+[ "$(started_count "$server")" = 0 ] ||
+  fail "IDEMPOTENCE: a partial pane extraction must never be read as an empty fleet"
+pass "idempotence: an unwalkable panes field fails closed rather than starting"
+
 # --- end-to-end idempotence -------------------------------------------------
 
 server=$(new_server "$TMP_ROOT/s-twice")
@@ -495,14 +661,20 @@ out=$(run_autostart "$server" "$HOME_DIR")
 rc=$?
 expect_code 0 "$rc" "the first run on an empty server must start firstmate: $out"
 [ "$(started_count "$server")" = 1 ] || fail "the first run must start exactly one agent"
-assert_contains "$(cat "$server/start.log")" "--cwd $HOME_ABS" \
-  "the start must pass the resolved firstmate home as --cwd"
-assert_contains "$(cat "$server/start.log")" -- "-- claude" \
-  "the start must launch claude"
-assert_contains "$(cat "$server/start.log")" "--continue" \
-  "the start must use --continue so it survives session-id churn"
-assert_contains "$(cat "$server/start.log")" "--dangerously-skip-permissions" \
-  "the start must pass the unattended flag rather than depend on the shim"
+assert_contains "$(cat "$server/create.log")" "--cwd $HOME_ABS" \
+  "the workspace must be created in the resolved firstmate home"
+assert_contains "$(cat "$server/create.log")" "--no-focus" \
+  "the workspace create must never steal the captain's focus"
+assert_contains "$(cat "$server/launch.log")" "claude" \
+  "the launch command must run claude"
+assert_contains "$(cat "$server/launch.log")" "--continue" \
+  "the launch must use --continue so it survives session-id churn"
+assert_contains "$(cat "$server/launch.log")" "--dangerously-skip-permissions" \
+  "the launch must pass the unattended flag rather than depend on the shim"
+# The fallback is what keeps a host with nothing to resume from booting into a
+# dead pane: `claude --continue` exits non-zero there.
+assert_contains "$(cat "$server/launch.log")" "|| claude --dangerously-skip-permissions --remote-control" \
+  "the launch must fall back to a fresh session when there is nothing to continue"
 
 out=$(run_autostart "$server" "$HOME_DIR")
 rc=$?
@@ -583,13 +755,95 @@ pass "network gate: --skip-net-check starts without probing"
 
 # --- start failures ---------------------------------------------------------
 
-server=$(new_server "$TMP_ROOT/s-startfail")
-: > "$server/start_fail"
+server=$(new_server "$TMP_ROOT/s-runfail")
+: > "$server/run_fail"
 out=$(run_autostart "$server" "$HOME_DIR")
 rc=$?
-expect_code 4 "$rc" "a failing 'agent start' must exit 4"
-assert_contains "$out" "no firstmate is running" "a failed start must say so plainly"
-pass "failure: a failing 'agent start' is reported loudly, not swallowed"
+expect_code 4 "$rc" "a launch command that cannot be sent must exit 4"
+assert_contains "$out" "no firstmate is running" "a failed launch must say so plainly"
+[ "$(closed_count "$server")" = 1 ] ||
+  fail "a failed launch must not leave its half-built workspace behind"
+pass "failure: a launch that cannot be sent is reported loudly and cleaned up"
+
+# A workspace that cannot be created is a refusal, not a silent no-op, and
+# nothing may be typed anywhere.
+server=$(new_server "$TMP_ROOT/s-wsfail")
+: > "$server/ws_fail"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 4 "$rc" "a failing workspace create must exit 4"
+assert_contains "$out" "could not create the firstmate workspace" \
+  "a failed create must name what could not be created"
+[ "$(started_count "$server")" = 0 ] || fail "a failed create must never launch anything"
+pass "failure: a workspace that cannot be created is refused loudly"
+
+# A create response with no pane of its own: the pane is resolved from the
+# workspace instead, and the boot still succeeds.
+server=$(new_server "$TMP_ROOT/s-nopane-resolved")
+: > "$server/ws_nopane"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 0 "$rc" "a create response with no pane must resolve one and succeed: $out"
+[ "$(started_count "$server")" = 1 ] ||
+  fail "a resolved pane must still receive exactly one launch"
+pass "launch: a create response carrying no pane resolves it from the workspace"
+
+# ... but only when the answer is unambiguous. Typing a firstmate launch into
+# the wrong pane is worse than not starting, so anything but exactly one pane
+# is refused rather than guessed at.
+server=$(new_server "$TMP_ROOT/s-nopane-ambiguous")
+: > "$server/ws_nopane"
+printf '2\n' > "$server/ws_wspanes"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 4 "$rc" "an unresolvable pane must exit 4"
+assert_contains "$out" "could not be identified" "an unresolvable pane must say so"
+[ "$(started_count "$server")" = 0 ] ||
+  fail "an unresolvable pane must never be launched into"
+[ "$(closed_count "$server")" = 1 ] ||
+  fail "an unresolvable pane must not leave the workspace it created behind"
+pass "failure: an ambiguous seeded pane is refused rather than guessed at"
+
+# The launch typed fine and never became an agent. That is a failure, loudly,
+# and the pane this run created must not be left for the next boot to inherit.
+server=$(new_server "$TMP_ROOT/s-inert")
+: > "$server/run_inert"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 4 "$rc" "a launch that never becomes an agent must exit 4"
+assert_contains "$out" "no live firstmate appeared" "the confirmation timeout must say what was missing"
+[ "$(closed_count "$server")" = 1 ] ||
+  fail "a launch that never became an agent must not leave its pane behind"
+pass "failure: a launch that never becomes an agent is reported and cleaned up"
+
+# Cleanup must never be the thing that kills a firstmate. Here the launched
+# agent is real but cannot be tied to the home, so the boot cannot confirm it -
+# and the workspace must be LEFT ALONE, loudly, rather than closed over a live
+# agent.
+server=$(new_server "$TMP_ROOT/s-cleanup-live")
+printf '/somewhere/entirely/else\n' > "$server/run_cwd"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 4 "$rc" "an unconfirmable launch must still exit 4"
+assert_contains "$out" "an agent is running in pane" \
+  "cleanup must say which live agent it refused to close over"
+[ "$(closed_count "$server")" = 0 ] ||
+  fail "CLEANUP: a workspace holding a live agent must never be closed"
+pass "failure: cleanup refuses to close a workspace that holds a live agent"
+
+# ... and it refuses just as firmly when it cannot PROVE the workspace is
+# agent-free, rather than closing on an unreadable answer.
+server=$(new_server "$TMP_ROOT/s-cleanup-blind")
+: > "$server/run_inert"
+: > "$server/panelist_ws_fail"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 4 "$rc" "an unconfirmable launch must still exit 4"
+assert_contains "$out" "could not inspect workspace" \
+  "cleanup must say it could not inspect what it left behind"
+[ "$(closed_count "$server")" = 0 ] ||
+  fail "CLEANUP: an unprovable workspace must never be closed"
+pass "failure: cleanup refuses to close a workspace it cannot prove is agent-free"
 
 # --- dry run and guards -----------------------------------------------------
 
@@ -597,8 +851,11 @@ server=$(new_server "$TMP_ROOT/s-dry")
 out=$(run_autostart "$server" "$HOME_DIR" --dry-run)
 rc=$?
 expect_code 0 "$rc" "--dry-run must succeed: $out"
-assert_contains "$out" "herdr agent start firstmate --cwd $HOME_ABS" \
-  "--dry-run must print the exact command"
+assert_contains "$out" "herdr workspace create --cwd $HOME_ABS --label firstmate --no-focus" \
+  "--dry-run must print the exact create it would run"
+assert_contains "$out" "herdr pane run" "--dry-run must print the exact launch it would run"
+assert_contains "$out" "claude --dangerously-skip-permissions --remote-control --continue ||" \
+  "--dry-run's plan must be the command the real path would actually type"
 [ "$(started_count "$server")" = 0 ] || fail "--dry-run must never start an agent"
 assert_contains "$out" "network gate would pass" \
   "--dry-run must report the gate's current verdict"
@@ -624,10 +881,12 @@ server=$(new_server "$TMP_ROOT/s-argv")
 out=$(run_autostart "$server" "$HOME_DIR" -- echo hello)
 rc=$?
 expect_code 0 "$rc" "an explicit -- argv must be honoured: $out"
-assert_contains "$(cat "$server/start.log")" -- "-- echo hello" \
+assert_contains "$(cat "$server/launch.log")" "echo hello" \
   "an explicit -- argv must replace the default command"
-assert_not_contains "$(cat "$server/start.log")" "--continue" \
+assert_not_contains "$(cat "$server/launch.log")" "--continue" \
   "an explicit -- argv must not also carry the default flags"
+assert_not_contains "$(cat "$server/launch.log")" "||" \
+  "an argv that never asked to continue must not carry a fallback"
 pass "argv: an explicit -- command replaces the default"
 
 # A bare `--` must be refused rather than expanding an empty array, which is an

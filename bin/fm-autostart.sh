@@ -7,8 +7,46 @@
 # herdr says so itself in its own boot log ("did you mean to open the Herdr TUI?
 # run 'herdr'; you do not need 'herdr server'"). So boot produced a server and
 # no firstmate, and the fleet stayed dark until a human attached. This script is
-# the missing client-side step, driven over the socket API instead of a TUI:
-# `herdr agent start`, which materialises an agent headlessly.
+# the missing client-side step, driven over the socket API instead of a TUI: it
+# creates the firstmate workspace and types the launch command into its pane.
+#
+# HOW THE AGENT IS LAUNCHED, AND WHY NOT `herdr agent start`.
+# The launch is two calls: `herdr workspace create --cwd <home> --label <name>
+# --no-focus`, which seeds exactly one tab holding one pane at a shell prompt,
+# then `herdr pane run <pane> <command>`, which types the launch command into
+# that pane and submits it. This is the same shape bin/backends/herdr.sh uses
+# for every crewmate firstmate spawns (docs/herdr-backend.md: firstmate launches
+# every crew by TYPING the launch command into a pane), and both primitives are
+# present unchanged across the whole supported Herdr range - verified against
+# the real 0.7.4 binary CI pins (bin/fm-install-herdr.sh) and the installed
+# 0.8.2 - so there is no version-dependent launch shape to gate on.
+#
+# `herdr agent start` was the original mechanism and is deliberately gone.
+# Herdr 0.8 split "make a pane" from "start an agent in it": 0.7.4 spells it
+# `agent start <name> [--cwd PATH] [--focus|--no-focus] -- <argv...>` while
+# 0.8.2 spells it `agent start <NAME> --kind <KIND> --pane <ID> [--timeout MS]`
+# and accepts neither --cwd nor --no-focus, so the old call fails outright on
+# any 0.8 host and no firstmate comes up. Rewriting it into the 0.8 shape does
+# not fix it either: `agent start --kind claude --pane <P>` types the command
+# and the agent really does come up, but its readiness detection never
+# completes - the call burns the whole --timeout and then exits non-zero with
+# {"error":{"code":"timeout"}}, registering nothing, so `agent list` stays
+# empty and the call can never report success (measured 2026-09-07 on Herdr
+# 0.8.2 / protocol 20 with the current v8 Claude integration installed and the
+# workspace already trusted; docs/verification/runtime-backends.md, "Boot
+# autostart launch shape"). A boot step cannot be built on a primitive whose
+# success is indistinguishable from its failure. `--kind` also takes only
+# Herdr's own fixed list of agent kinds, which would silently break this
+# script's `-- <argv>` escape hatch for any other command.
+#
+# THE `--continue` FALLBACK.
+# `claude --continue` exits 1 with no usable prior conversation for the
+# directory (verified 2026-09-07), so a first boot on a fresh machine would
+# leave a dead pane rather than a fresh firstmate. The typed command therefore
+# carries its own fallback - `<argv> || <argv without --continue>` - whenever
+# the argv asks for --continue. That needs no knowledge of where the harness
+# keeps its conversations, so nothing here rots when that storage layout
+# changes, and the fresh session it starts is what the next boot resumes.
 #
 # THE ONE RULE: NEVER CREATE A SECOND FIRSTMATE.
 # Two firstmates on one home fight over the session lock and the fleet - a
@@ -19,10 +57,23 @@
 # where the server answered and the answer positively contained no firstmate.
 #
 # WHAT COUNTS AS "a firstmate is already running"
-# An agent list ENTRY IS NOT ENOUGH. The entry must first MATCH this home -
-# either an agent named --name (default `firstmate`), or ANY agent whose
-# working directory is the firstmate home - and then that match must be
-# CONFIRMED LIVE against the pane it claims to occupy.
+# A listed ENTRY IS NOT ENOUGH. The entry must first MATCH this home - either
+# an agent named --name (default `firstmate`), or ANY entry whose working
+# directory is the firstmate home - and then that match must be CONFIRMED LIVE
+# against the pane it claims to occupy.
+#
+# The inventory is read from BOTH `herdr agent list` AND `herdr pane list`,
+# because on Herdr 0.8.2 the agent registry alone cannot see a live firstmate:
+# a Claude crew registers no agent record there at all, so `agent list` answers
+# with an empty array for a genuinely live, integration-claimed Claude pane
+# (docs/herdr-backend.md, "Restart and liveness behavior"). Reading only the
+# registry would report "no firstmate present" next to the running one and
+# start a second supervisor - the one outcome this script exists to prevent.
+# `pane list` carries each pane's cwd and foreground_cwd on every supported
+# release, so it is the inventory that still sees the firstmate. Pane entries
+# never carry an AGENT name (a pane label is a different thing), so they can
+# only ever match by directory; that is the load-bearing half of matching
+# anyway, for the reason below.
 #
 # The directory match is the load-bearing half of matching: an agent herdr
 # resurrected, or one the captain launched by hand, carries no name at all
@@ -44,18 +95,31 @@
 # Confirmation asks bin/backends/herdr.sh, which owns this classification for
 # the whole fleet, about the entry's pane - and it deliberately asks ONLY the
 # reality-touching questions, never the metadata ones:
-#   fm_backend_herdr_pane_process_state  - is there a real PROCESS behind the
-#                                          pane (live), or none (dead)?
-#   fm_backend_herdr_pane_process_cwds   - where do those processes actually
-#                                          run, per the kernel, not per herdr?
-# A name-matched entry needs a live process; a cwd-matched entry additionally
-# needs some foreground process whose real working directory is the firstmate
-# home, because the cwd that MATCHED came from replayable metadata and only the
-# process's own cwd is evidence. Only `pane process-info` sees reality: a ghost
-# passes `pane get` and `agent get` intact - they replay from the same
-# persisted layout the list came from. Anything else, including an entry that
-# names no pane at all, is UNKNOWN, and unknown never licenses a start (see THE
-# ONE RULE above).
+#   fm_backend_herdr_pane_process_state      - is there a real PROCESS behind
+#                                              the pane (live), or none (dead)?
+#   fm_backend_herdr_pane_foreground_harness - is one of those processes one of
+#                                              OUR agents, per the fleet-wide
+#                                              fm_harness_process_matches?
+#   fm_backend_herdr_pane_process_cwds       - where do those processes actually
+#                                              run, per the kernel, not per
+#                                              herdr?
+# A name-matched entry needs a live process. A cwd-matched entry needs two more
+# things, because the cwd that MATCHED came from replayable metadata and only
+# the processes themselves are evidence: the pane must really hold a harness,
+# and some foreground process must really work in the firstmate home.
+#
+# The harness half is what keeps a RESTORED BARE SHELL from reading as a live
+# supervisor. Herdr restores its persisted panes as plain shells after a server
+# restart, and such a pane still reports the firstmate home as its cwd and a
+# real live process (its own /bin/bash) - so process existence plus a cwd match
+# would call the emptiest possible pane a running firstmate and no-op forever.
+# docs/herdr-backend.md ("Restart and liveness behavior") owns that rule for the
+# fleet: a pane with no verified-harness foreground process is a husk.
+#
+# Only `pane process-info` sees reality: a ghost passes `pane get` and `agent
+# get` intact - they replay from the same persisted layout the list came from.
+# Anything else, including an entry that names no pane at all, is UNKNOWN, and
+# unknown never licenses a start (see THE ONE RULE above).
 #
 # `agent get`'s agent_status is deliberately NOT consulted. On herdr 0.7.4 /
 # protocol 16 it is miscalibrated in both directions: a genuinely live,
@@ -120,7 +184,7 @@
 #   --skip-net-check    skip the network gate (for a deliberately offline start;
 #                       the gate otherwise refuses to start an agent that
 #                       cannot register)
-#   --dry-run           report the decision and print the command; start nothing
+#   --dry-run           report the decision and print the plan; start nothing
 #   --help              print this usage
 #   -- <argv>...        command to run in the agent, replacing the default
 #
@@ -132,15 +196,16 @@
 # that did (docs/claude-resume-shim.md). `--continue` resumes the most recent
 # conversation IN THAT DIRECTORY, which survives session-id churn; a pinned
 # `--resume <id>` goes stale the first time the session id changes and would
-# then fail at boot with no human present.
+# then fail at boot with no human present. This script header's THE `--continue`
+# FALLBACK note owns what happens when there is nothing to resume.
 #
 # Exit status:
 #   0  a firstmate is up: either already present (no-op) or started and confirmed
 #   1  usage or environment error (bad flag, no herdr, no jq, no firstmate home)
 #   2  the herdr server did not become ready within --timeout
-#   3  the agent list could not be read or understood, or an entry matching this
-#      home could not be classified live-or-not - state unknown, so nothing was
-#      started (fail closed)
+#   3  the fleet inventory could not be read or understood, or an entry matching
+#      this home could not be classified live-or-not - state unknown, so nothing
+#      was started (fail closed)
 #   4  the start was attempted and failed, or the agent never appeared
 #   5  the network gate failed: no usable route to the registration endpoint
 #      within --net-timeout, so nothing was started
@@ -364,15 +429,18 @@ wait_for_network() {
   return 1
 }
 
-# Confirm that a matching agent-list entry is a LIVE firstmate rather than a
-# ghost record replayed from herdr's persisted session layout (see the
-# header). Judged ONLY on reality-touching signals - `pane process-info` and
-# the processes' kernel-reported working directories - never on `agent get`
-# metadata, whose agent_status reports "unknown" for a genuinely live agent on
-# herdr 0.7.4 and made this guard cry failure over a working boot.
+# Confirm that a matching inventory entry is a LIVE firstmate rather than a
+# ghost record replayed from herdr's persisted session layout, or the bare
+# shell a restore leaves behind (see the header). Judged ONLY on
+# reality-touching signals - `pane process-info`, the identity of the processes
+# it reports, and their kernel-reported working directories - never on
+# `agent get` metadata, whose agent_status reports "unknown" for a genuinely
+# live agent on herdr 0.7.4 and made this guard cry failure over a working boot.
 #   0  live      - a real process runs behind the pane, and (for a cwd match)
-#                  some foreground process really works in the firstmate home
-#   1  not live  - positively a husk: no process behind the pane
+#                  that pane holds one of our agents, working in the firstmate
+#                  home
+#   1  not live  - positively a husk: no process behind the pane, or (for a cwd
+#                  match) no agent in it, only a shell
 #   2  unknown   - could not be classified; the caller must fail closed
 entry_is_live() {
   local pane=$1 matched_by=$2 cwds line
@@ -388,14 +456,24 @@ entry_is_live() {
   # produces it, herdr's server-global name registry keeps a second agent from
   # ever taking the same name, and replayed ghost records carry no name (both
   # observed boots re-registered the name freely after restart). A live
-  # process behind a name-matched pane is the firstmate.
+  # process behind a name-matched pane is the firstmate. This script no longer
+  # creates such a name itself, but a firstmate the captain started that way
+  # still carries one, and it is still the strongest identity available.
   [ "$matched_by" = name ] && return 0
-  # A cwd match came from replayable METADATA, so the process itself must
-  # corroborate it: some foreground process must really work in the firstmate
-  # home per the kernel. A live process that cannot be tied to the home is
-  # UNKNOWN, not a husk - it may be the firstmate mid-tool-call (a child
-  # process working elsewhere could momentarily front the group) - and unknown
-  # refuses the start rather than licensing a duplicate.
+  # A cwd match came from replayable METADATA, so the processes themselves must
+  # corroborate it twice over. First: the pane must really hold one of our
+  # agents. Without this, the bare shell herdr restores into a persisted pane
+  # after a server restart - a real live process, reporting the firstmate home
+  # as its cwd - would read as a running firstmate and no-op the boot forever.
+  # bin/backends/herdr.sh owns that husk rule for the whole fleet, so a pane
+  # with no verified-harness foreground process is positively a husk here too,
+  # not merely unclassifiable.
+  fm_backend_herdr_pane_foreground_harness "$HERDR_SESSION_NAME" "$pane" || return 1
+  # Second: some foreground process must really work in the firstmate home per
+  # the kernel. A live harness that cannot be tied to the home is UNKNOWN, not
+  # a husk - it may be the firstmate mid-tool-call (a child process working
+  # elsewhere could momentarily front the group) - and unknown refuses the
+  # start rather than licensing a duplicate.
   cwds=$(fm_backend_herdr_pane_process_cwds "$HERDR_SESSION_NAME" "$pane") || return 2
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -407,28 +485,46 @@ EOF
 }
 
 # Answer "is a firstmate already running?" over the socket API.
+#
+# The inventory is the union of `agent list` and `pane list`, because neither
+# alone sees every firstmate: the agent registry carries the NAME an
+# `agent start` once produced, while on herdr 0.8.2 it carries no record at all
+# for a live Claude and only the pane inventory still sees it (see WHAT COUNTS
+# AS "a firstmate is already running" in the header). A pane appearing in both
+# is simply classified twice, which is harmless; missing it in both is the
+# failure that starts a second supervisor.
+#
 #   0  yes, one is present and confirmed live (prints the matching identity)
 #   1  no, positively absent
-#   2  unknown - the list could not be read or understood, or a matching entry
-#      could not be confirmed live-or-not
+#   2  unknown - an inventory could not be read or understood, or a matching
+#      entry could not be confirmed live-or-not
 firstmate_present() {
-  local raw name cwd fgcwd pane line desc matched_by count seen=0 rc unknown=0
-  raw=$(herdr agent list 2>/dev/null) || return 2
-  # A response that does not carry the agents array is an error or an
-  # unrecognised shape, not an empty fleet. Never read it as "absent".
-  printf '%s' "$raw" | jq -e 'has("result") and (.result | has("agents"))' >/dev/null 2>&1 || return 2
-  # How many agents the response claims, so a truncated or failed extraction
+  local agents panes name cwd fgcwd pane line desc matched_by count seen=0 rc unknown=0
+  local agent_count pane_count
+  agents=$(herdr agent list 2>/dev/null) || return 2
+  panes=$(herdr pane list 2>/dev/null) || return 2
+  # A response that does not carry its array is an error or an unrecognised
+  # shape, not an empty fleet. Never read either one as "absent".
+  printf '%s' "$agents" | jq -e 'has("result") and (.result | has("agents"))' >/dev/null 2>&1 || return 2
+  printf '%s' "$panes" | jq -e 'has("result") and (.result | has("panes"))' >/dev/null 2>&1 || return 2
+  # How many entries the responses claim, so a truncated or failed extraction
   # below cannot masquerade as an empty fleet and green-light a duplicate.
-  count=$(printf '%s' "$raw" | jq '(.result.agents // []) | length' 2>/dev/null) || return 2
-  case "$count" in
+  agent_count=$(printf '%s' "$agents" | jq '(.result.agents // []) | length' 2>/dev/null) || return 2
+  pane_count=$(printf '%s' "$panes" | jq '(.result.panes // []) | length' 2>/dev/null) || return 2
+  case "$agent_count" in
     '' | *[!0-9]*) return 2 ;;
   esac
+  case "$pane_count" in
+    '' | *[!0-9]*) return 2 ;;
+  esac
+  count=$((agent_count + pane_count))
 
-  # NUL-delimited, four fields per agent, read through a process substitution.
-  # Not @tsv and not one-field-per-line: an absent name is the COMMON case, and
-  # bash's `read` silently swallows a leading empty field when the delimiter is
+  # NUL-delimited, four fields per entry, read through a process substitution.
+  # Not @tsv and not one-field-per-line: an absent name is the COMMON case -
+  # universal for pane entries, which have no agent name at all - and bash's
+  # `read` silently swallows a leading empty field when the delimiter is
   # whitespace (a tab is IFS whitespace), which would misread every unnamed
-  # agent's cwd as its name and let a duplicate firstmate through. NUL is the
+  # entry's cwd as its name and let a duplicate firstmate through. NUL is the
   # one delimiter that cannot appear in a name or a path.
   while
     IFS= read -r -d '' name &&
@@ -474,18 +570,143 @@ firstmate_present() {
       # no-op; only a scan that finds no live match at all fails closed.
       *) unknown=1 ;;
     esac
-  done < <(printf '%s' "$raw" | jq -j '(.result.agents // [])[] |
+  done < <(
+    printf '%s' "$agents" | jq -j '(.result.agents // [])[] |
       (.name // ""), "\u0000", (.cwd // ""), "\u0000", (.foreground_cwd // ""),
-      "\u0000", (.pane_id // ""), "\u0000"')
+      "\u0000", (.pane_id // ""), "\u0000"'
+    # A pane carries no agent name - `pane rename` labels are a different
+    # namespace entirely - so the name field is emitted empty and pane entries
+    # can only ever match this home by directory.
+    printf '%s' "$panes" | jq -j '(.result.panes // [])[] |
+      "", "\u0000", (.cwd // ""), "\u0000", (.foreground_cwd // ""),
+      "\u0000", (.pane_id // ""), "\u0000"'
+  )
 
-  # Reaching here means no agent both matched and was confirmed live. Only trust
-  # that as "positively absent" if every agent the response claimed was actually
+  # Reaching here means no entry both matched and was confirmed live. Only trust
+  # that as "positively absent" if every entry the responses claimed was actually
   # examined - a short read means the extraction failed partway, and an
-  # unexamined agent could be the live firstmate - and if no entry that DID match
+  # unexamined entry could be the live firstmate - and if no entry that DID match
   # was left unclassified.
   [ "$seen" -eq "$count" ] || return 2
   [ "$unknown" -eq 0 ] || return 2
   return 1
+}
+
+# The exact command line typed into the firstmate pane: AGENT_ARGV, shell-quoted
+# so a path with a space survives the trip through the terminal. When the argv
+# asks for `--continue`, the line carries its own `|| <argv without --continue>`
+# fallback, so a host with no conversation to resume still comes up with a
+# firstmate rather than a dead pane (see THE `--continue` FALLBACK in the
+# header). A later non-zero exit re-runs the fallback once, which is the right
+# outcome for an unattended supervisor; a clean exit re-runs nothing.
+launch_command() {
+  local a primary="" fallback="" has_continue=0
+  for a in "${AGENT_ARGV[@]}"; do
+    primary="${primary}${primary:+ }$(printf '%q' "$a")"
+    if [ "$a" = "--continue" ]; then
+      has_continue=1
+      continue
+    fi
+    fallback="${fallback}${fallback:+ }$(printf '%q' "$a")"
+  done
+  if [ "$has_continue" -eq 1 ] && [ -n "$fallback" ]; then
+    printf '%s || %s' "$primary" "$fallback"
+  else
+    printf '%s' "$primary"
+  fi
+}
+
+# Create the firstmate workspace and print "<workspace_id> <pane_id>".
+# `workspace create` seeds the workspace with exactly one tab holding one pane
+# at a shell prompt, and its response carries that pane as .result.root_pane
+# (verified against the real herdr 0.7.4 and 0.8.2 binaries by
+# tests/fm-autostart-herdr-live-e2e.test.sh). A release that reports the
+# workspace but not
+# its pane is not guessed at: the pane is resolved from the workspace itself,
+# and anything other than exactly one pane there is refused, because typing a
+# firstmate launch into the wrong pane is worse than not starting.
+create_firstmate_workspace() {
+  local out ws pane panes count
+  out=$(herdr workspace create --cwd "$FM_ROOT" --label "$AGENT_NAME" --no-focus 2>&1) || {
+    printf 'fm-autostart.sh: creating the firstmate workspace failed; herdr said:\n%s\n' "$out" >&2
+    return 1
+  }
+  ws=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null) || ws=""
+  if [ -z "$ws" ]; then
+    printf 'fm-autostart.sh: creating the firstmate workspace returned no workspace id; herdr said:\n%s\n' "$out" >&2
+    return 1
+  fi
+  pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null) || pane=""
+  if [ -z "$pane" ]; then
+    panes=$(herdr pane list --workspace "$ws" 2>&1) || {
+      printf 'fm-autostart.sh: workspace %s was created but its panes could not be listed; herdr said:\n%s\n' \
+        "$ws" "$panes" >&2
+      discard_created_workspace "$ws"
+      return 1
+    }
+    count=$(printf '%s' "$panes" | jq '(.result.panes // []) | length' 2>/dev/null) || count=""
+    if [ "$count" = 1 ]; then
+      pane=$(printf '%s' "$panes" | jq -r '.result.panes[0].pane_id // empty' 2>/dev/null) || pane=""
+    fi
+  fi
+  if [ -z "$pane" ]; then
+    printf 'fm-autostart.sh: workspace %s was created but its pane could not be identified, so nothing was launched into it.\n' \
+      "$ws" >&2
+    discard_created_workspace "$ws"
+    return 1
+  fi
+  printf '%s %s' "$ws" "$pane"
+}
+
+# Wait until the new pane's shell is a real running process, so the launch
+# command is typed into a terminal that exists rather than into one still being
+# set up. Bounded by --confirm.
+wait_for_pane_shell() {
+  local pane=$1 deadline
+  deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
+  while :; do
+    [ "$(fm_backend_herdr_pane_process_state "$HERDR_SESSION_NAME" "$pane")" = live ] && return 0
+    [ "$(date +%s)" -lt "$deadline" ] || break
+    sleep "$INTERVAL"
+  done
+  return 1
+}
+
+# Remove a workspace THIS run just created, after its launch failed. Without
+# this, every failed boot would leave a half-built container behind for the
+# next one to inherit, and they would accumulate.
+#
+# A workspace holding a live agent is NEVER closed. By this point the firstmate
+# may genuinely be coming up, and closing it would be the one outcome worse
+# than reporting the failure. Neither is one this function cannot PROVE is
+# agent-free: an unreadable pane list leaves the workspace alone. Both
+# refusals, and a close that fails, say exactly what was left behind, so the
+# journal never has to guess.
+#
+# Only a workspace this same run created is ever passed here - `workspace
+# create` always creates, so the id can never name something that was already
+# the captain's.
+discard_created_workspace() {  # <workspace_id>
+  local ws=$1 panes pane
+  panes=$(herdr pane list --workspace "$ws" 2>/dev/null) || panes=""
+  if ! printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1; then
+    printf 'fm-autostart.sh: could not inspect workspace %s to remove it; close it by hand before the next boot.\n' \
+      "$ws" >&2
+    return 0
+  fi
+  while IFS= read -r pane; do
+    [ -n "$pane" ] || continue
+    if fm_backend_herdr_pane_foreground_harness "$HERDR_SESSION_NAME" "$pane"; then
+      printf 'fm-autostart.sh: leaving workspace %s in place: an agent is running in pane %s. Check it before the next boot.\n' \
+        "$ws" "$pane" >&2
+      return 0
+    fi
+  done <<EOF
+$(printf '%s' "$panes" | jq -r '.result.panes[]?.pane_id // empty' 2>/dev/null)
+EOF
+  herdr workspace close "$ws" >/dev/null 2>&1 ||
+    printf 'fm-autostart.sh: could not remove the half-started workspace %s; close it by hand before the next boot.\n' \
+      "$ws" >&2
 }
 
 # --- run --------------------------------------------------------------------
@@ -522,9 +743,8 @@ if [ "$DRY_RUN" -eq 1 ]; then
       "$NET_PROBE_HOST" "$(net_diagnosis)" "$NET_TIMEOUT"
   fi
   printf 'fm-autostart.sh: no firstmate present; would run:\n'
-  printf '  herdr agent start %s --cwd %s --no-focus --' "$AGENT_NAME" "$FM_ROOT"
-  printf ' %s' "${AGENT_ARGV[@]}"
-  printf '\n'
+  printf '  herdr workspace create --cwd %s --label %s --no-focus\n' "$FM_ROOT" "$AGENT_NAME"
+  printf '  herdr pane run <the pane that creates> %s\n' "$(launch_command)"
   exit 0
 fi
 
@@ -537,8 +757,19 @@ printf 'fm-autostart.sh: no firstmate present; starting one in %s.\n' "$FM_ROOT"
 # steals whatever space the captain is watching. In a brand-new empty session
 # herdr focuses the first workspace regardless, so a boot-time start still lands
 # in view (docs/herdr-backend.md).
-if ! herdr agent start "$AGENT_NAME" --cwd "$FM_ROOT" --no-focus -- "${AGENT_ARGV[@]}"; then
-  die "'herdr agent start' failed; no firstmate is running" 4
+created=$(create_firstmate_workspace) ||
+  die "could not create the firstmate workspace; no firstmate is running" 4
+started_workspace=${created%% *}
+started_pane=${created#* }
+
+if ! wait_for_pane_shell "$started_pane"; then
+  discard_created_workspace "$started_workspace"
+  die "the new firstmate pane ($started_pane) never came up within ${CONFIRM_TIMEOUT}s; no firstmate is running" 4
+fi
+
+if ! herdr pane run "$started_pane" "$(launch_command)" >/dev/null; then
+  discard_created_workspace "$started_workspace"
+  die "the launch command could not be sent to pane $started_pane; no firstmate is running" 4
 fi
 
 # A created pane is not a started agent: confirm the agent actually shows up
@@ -557,4 +788,9 @@ while :; do
   sleep "$INTERVAL"
 done
 
-die "started the agent but it never appeared in the agent list within ${CONFIRM_TIMEOUT}s" 4
+# The launch was typed but nothing recognisable as a firstmate ever appeared.
+# Clean up what this run created, which leaves a genuinely slow agent alone
+# (discard_created_workspace refuses a workspace that holds one), and report the
+# failure rather than leaving a stray pane for the next boot to inherit.
+discard_created_workspace "$started_workspace"
+die "started the agent but no live firstmate appeared within ${CONFIRM_TIMEOUT}s" 4

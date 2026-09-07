@@ -18,7 +18,10 @@ So boot produced a server with zero panes and no firstmate.
 The fleet stayed dark - no supervision, no wake handling, nothing - until a human ran `herdr` and attached.
 That is the last manual step between a reboot and a working fleet, and this unit removes it.
 
-The mechanism is `herdr agent start`, which materialises an agent over the socket API with no TUI and no attached client.
+The mechanism is two socket-API calls with no TUI and no attached client: `herdr workspace create` makes the firstmate workspace, and `herdr pane run` types the launch command into the pane it seeded.
+That is the same way firstmate launches every crewmate, and it works unchanged on every supported Herdr release.
+`herdr agent start` was the original mechanism and is deliberately gone: Herdr 0.8 replaced its `--cwd` form with a `--kind`/`--pane` form that needs a pane to already exist, and on Herdr 0.8.2 that replacement never finishes detecting the agent it just launched, so it always reports failure.
+The script's own header owns that reasoning, and [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) "Boot autostart launch shape" holds the dated per-version measurements.
 
 ## What it does
 
@@ -28,18 +31,25 @@ On start, the script:
 2. **Polls** `herdr status server` until the server reports running and protocol-compatible, bounded by `--timeout` (120s in the shipped unit).
    `After=herdr-server.service` orders the unit after the server *process* starts, which is not the same as the socket being answerable; a fixed `sleep` would be a guess in both directions.
    On timeout it exits non-zero and prints the last status it saw, so the journal records *why*.
-3. Asks whether a firstmate is already **running** - a listed agent that is confirmed live, not merely a record - and **exits 0 as a no-op if one is**.
+3. Asks whether a firstmate is already **running** - a listed entry that is confirmed live, not merely a record - and **exits 0 as a no-op if one is**.
+   The question is asked of both `herdr agent list` and `herdr pane list`, because on Herdr 0.8.2 a live Claude registers no agent record at all and only the pane inventory still sees it.
    The no-op deliberately needs no network: a downed network must not turn "nothing to do" into a failed unit.
 4. **Waits for a genuinely usable network** - the gate described below - bounded by `--net-timeout`, and exits 5 having started nothing if it never comes up.
 5. Only then starts one:
 
 ```
-herdr agent start firstmate --cwd /var/home/marlon/firstmate --no-focus -- \
-  claude --dangerously-skip-permissions --remote-control --continue
+herdr workspace create --cwd /var/home/marlon/firstmate --label firstmate --no-focus
+herdr pane run <the pane that creates> \
+  'claude --dangerously-skip-permissions --remote-control --continue || claude --dangerously-skip-permissions --remote-control'
 ```
 
-6. Confirms the agent actually appears in the agent list **with a real process behind its pane** before reporting success.
-   A created pane is not a started agent, and a replayed record is not a process.
+   The `||` half is not decoration.
+   `claude --continue` exits non-zero in a directory with no conversation to resume, so a first boot on a fresh machine would otherwise leave a dead pane instead of a firstmate; the fresh session the fallback starts is what the next boot resumes.
+   `--dry-run` prints exactly this plan without running any of it.
+
+6. Confirms a live firstmate actually appears **with a real agent process behind its pane** before reporting success.
+   A created pane is not a started agent, a replayed record is not a process, and the bare shell Herdr restores into a persisted pane is neither.
+   If nothing recognisable comes up, the script removes the pane it created - unless that pane already holds a live agent, which it will never close - and exits non-zero rather than leaving a half-built workspace for the next boot.
 
 ### The network gate: no agent on a dead network
 
@@ -83,6 +93,7 @@ So a match is now confirmed against the pane it claims, through the **reality-to
 | Question | Owner | Must answer |
 | --- | --- | --- |
 | Is there a real process behind the pane? | `fm_backend_herdr_pane_process_state` | `live` |
+| Is one of those processes one of our agents (cwd-matched entries only)? | `fm_backend_herdr_pane_foreground_harness` | yes |
 | Where does that process really run (cwd-matched entries only)? | `fm_backend_herdr_pane_process_cwds` | some process cwd resolves to the firstmate home |
 
 Only `pane process-info` reaches an actual process.
@@ -95,13 +106,16 @@ A unit that cannot tell a working boot from a broken one is worse than cosmetica
 
 The name-matched and cwd-matched halves need different identity evidence.
 A **name** match is strong on its own - only `agent start firstmate` produces it, and herdr's server-global name registry refuses to register the name twice - so a live process behind a name-matched pane is the firstmate.
-A **cwd** match came from replayable metadata, so the process itself must corroborate it: some foreground process must really work in the firstmate home per the kernel's `cwd` in `pane process-info`.
-A live process that cannot be tied to the home is *unknown*, not a husk - it may be the firstmate mid-tool-call, with a child momentarily fronting the process group from another directory - and unknown refuses to start rather than duplicating.
+A **cwd** match came from replayable metadata, so the processes themselves must corroborate it twice: the pane must really hold one of our agents, and some foreground process must really work in the firstmate home per the kernel's `cwd` in `pane process-info`.
+The agent half is what keeps a restored bare shell from passing.
+Herdr restores its persisted panes as plain shells after a server restart, and such a pane reports the firstmate home as its cwd and a real live process - its own `/bin/bash` - so a pane holding nothing at all would otherwise read as a running firstmate and no-op every boot.
+[`herdr-backend.md`](herdr-backend.md) "Restart and liveness behavior" owns that husk rule for the whole fleet.
+A live agent that cannot be tied to the home is *unknown*, not a husk - it may be the firstmate mid-tool-call, with a child momentarily fronting the process group from another directory - and unknown refuses to start rather than duplicating.
 
 A confirmed husk - no process behind the pane - simply does not count, and the scan continues; another entry may still be the real firstmate.
 Anything that cannot be classified, including a matching entry that names no pane at all, is unknown, and unknown still starts nothing and exits 3.
 
-One limit worth knowing: this guard sees only agents herdr knows about.
+One limit worth knowing: this guard sees only panes herdr knows about.
 A firstmate running outside herdr entirely is invisible to it.
 That is safe at boot, when nothing else is up yet, and firstmate's own session lock remains the backstop in every other case.
 
@@ -229,13 +243,15 @@ systemctl --user status firstmate-autostart.service
 #    reachable after Ns" BEFORE "starting one", then "firstmate is up".
 journalctl --user -u firstmate-autostart.service -b
 
-# 4. A firstmate agent exists in the headless server, with no client ever
-#    attached. Note its pane_id.
-herdr agent list
+# 4. A firstmate pane exists in the headless server, with no client ever
+#    attached. Note its pane_id. (`agent list` may well be empty: on Herdr
+#    0.8.2 a live Claude registers no agent record at all.)
+herdr pane list
 
-# 5. The proof. `agent list` alone is NOT proof: it replays records for agents
-#    that are not running. Ask for the pane's actual process instead - it must
-#    return a real foreground_process_group_id and a claude argv.
+# 5. The proof. A listing alone is NOT proof: it replays records for panes
+#    whose processes are not running, and a restored pane holds nothing but a
+#    shell. Ask for the pane's actual process instead - it must return a real
+#    foreground_process_group_id and a claude argv.
 herdr pane process-info --pane <pane_id>
 
 # 6. Only now attach and confirm the pane is a live firstmate.
@@ -243,11 +259,14 @@ herdr
 ```
 
 Step 5 is the one that matters, and step 4 alone is the trap.
-`agent list` talks to the server over the socket, so a firstmate showing up there before any attach is the gap this unit closes - but a post-reboot list also replays ghost records for agents that are not running, which is precisely what once fooled the guard.
-Only `pane process-info` distinguishes the two.
+The inventory talks to the server over the socket, so a firstmate showing up there before any attach is the gap this unit closes - but a post-reboot listing also replays records for agents that are not running, and a restored pane holds a live shell and nothing else, which is precisely what once fooled the guard.
+Only `pane process-info` distinguishes them.
 
-For the behavioural contract, `tests/fm-autostart.test.sh` drives the script against a fake `herdr`, a fake `curl`, and a fake `ping`, and covers the bounded readiness wait, the timeout path, the network gate (bounded, polled, exit 5, ICMP-filtered, late-arriving network, offline no-op and dry run), the idempotence guard by name, by working directory, by `foreground_cwd`, and across aliased path spellings, the herdr 0.7.4 `agent_status: "unknown"` regression, the cwd identity guard, plus failing closed on an unreadable agent list.
+For the behavioural contract, `tests/fm-autostart.test.sh` drives the script against a fake `herdr`, a fake `curl`, and a fake `ping`, and covers the bounded readiness wait, the timeout path, the network gate (bounded, polled, exit 5, ICMP-filtered, late-arriving network, offline no-op and dry run), the idempotence guard by name, by working directory, by `foreground_cwd`, and across aliased path spellings, a firstmate visible only in the pane inventory, a restored bare shell in the home, the herdr 0.7.4 `agent_status: "unknown"` regression, the cwd identity guard, the launch and cleanup failure paths, plus failing closed on an unreadable inventory.
 It never contacts the real herdr server, never probes the real network, and never starts a real agent.
+
+The Herdr surface that contract is built on is a harness-dependent check, so it is measured separately against the real binary by `FM_AUTOSTART_HERDR_LIVE=1 tests/fm-autostart-herdr-live-e2e.test.sh`, which drives this script end to end in a guarded isolated Herdr session and fails naming the Herdr version.
+Run it after every Herdr upgrade; its dated results live in [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) "Boot autostart launch shape".
 
 ## Open question: can registration still fail with the network up?
 
