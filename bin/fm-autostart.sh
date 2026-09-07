@@ -789,12 +789,21 @@ create_firstmate_workspace() {
 # may genuinely be coming up, and closing it would be the one outcome worse
 # than reporting the failure. Neither is one this function cannot PROVE is
 # agent-free, and there are two ways to fail that proof: an unreadable pane
-# list, and a pane whose process-info cannot be read at all. The second matters
-# because the identity probe answers non-zero for "nothing there" AND for
-# "could not read", so it is asked only about a pane whose process state is
-# already known - a pane that answers `unknown` is not evidence of emptiness and
-# leaves the workspace alone. Every refusal, and a close that fails, says
-# exactly what was left behind and why, so the journal never has to guess.
+# list, and a pane whose process-info cannot be read.
+#
+# That second one is why each pane is asked twice before its identity answer is
+# believed. The identity probe returns non-zero for "nothing there" AND for
+# "could not read", and `pane process-info` has more than one unreadable shape:
+# it can error outright, which process_state reports as `unknown`, but it can
+# also answer a body that parses and says nothing about processes, which
+# process_state reports as `live` because a body IS there. Reading a non-zero
+# identity answer as "agent-free" on either would close over a pane nothing was
+# ever proven about. So a live pane must first produce readable process
+# information - fm_backend_herdr_pane_process_cwds, the same readability proof
+# entry_is_live runs before it trusts the same probe - and only then does a
+# non-zero identity answer mean the pane is empty. Every refusal, and a close
+# that fails, says exactly what was left behind and why, so the journal never
+# has to guess which one fired.
 #
 # The close itself is gated on the release, for the third refusal. Below Herdr
 # 0.8.0 an EXPLICIT close that empties a workspace - `workspace close` included
@@ -834,6 +843,11 @@ discard_created_workspace() {  # <workspace_id>
         return 0
         ;;
     esac
+    if ! fm_backend_herdr_pane_process_cwds "$HERDR_SESSION_NAME" "$pane" >/dev/null; then
+      printf 'fm-autostart.sh: leaving workspace %s in place: pane %s reported no readable process information, so it cannot be proven agent-free. Check it before the next boot.\n' \
+        "$ws" "$pane" >&2
+      return 0
+    fi
     if pane_holds_launched_agent "$pane"; then
       printf 'fm-autostart.sh: leaving workspace %s in place: an agent is running in pane %s. Check it before the next boot.\n' \
         "$ws" "$pane" >&2

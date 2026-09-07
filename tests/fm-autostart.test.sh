@@ -977,6 +977,23 @@ assert_contains "$out" "could not be inspected" \
   fail "CLEANUP: a pane that cannot be inspected must never be closed over"
 pass "failure: cleanup refuses to close over a pane it cannot inspect"
 
+# ... and the shape that slipped through both guards: a pane whose process-info
+# ANSWERS, and parses, but says nothing about what is running in it. The pane
+# state reads `live` because a body is there, while the identity probe answers
+# non-zero for "nothing there" and for "could not read" alike, so believing that
+# answer would close over a pane nothing was ever proven about - the firstmate
+# this run just launched, possibly still coming up in it.
+server=$(new_server "$TMP_ROOT/s-cleanup-opaque")
+printf 'opaque\n' > "$server/run_leaves"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 4 "$rc" "an unconfirmable launch must still exit 4"
+assert_contains "$out" "no readable process information" \
+  "cleanup must say the pane told it nothing, distinctly from a pane it could not inspect at all"
+[ "$(closed_count "$server")" = 0 ] ||
+  fail "CLEANUP: a pane that reports no readable process information must never be closed over"
+pass "failure: cleanup refuses to close over a pane that reports nothing about itself"
+
 # The fourth refusal, and the only one that is about the RELEASE rather than the
 # workspace. Below the floor where an explicit close preserves focus, closing an
 # emptied workspace hands focus to its right neighbor, so a boot that failed
