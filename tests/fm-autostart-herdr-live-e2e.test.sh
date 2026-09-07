@@ -190,8 +190,9 @@ lab pane close "$probe_pane" >/dev/null 2>&1 || true
 
 # --- B. a real boot brings a firstmate up ------------------------------------
 HOME_A=$(make_home "$TMP_ROOT/home-a")
-plan=$(autostart "$HOME_A" --dry-run -- "$AGENT" 600 --continue)
-[ "$?" = 0 ] || fail "--dry-run failed on $V: $plan"
+if ! plan=$(autostart "$HOME_A" --dry-run -- "$AGENT" 600 --continue); then
+  fail "--dry-run failed on $V: $plan"
+fi
 case "$plan" in
   *"herdr workspace create --cwd $HOME_A --label firstmate --no-focus"*) ;;
   *) fail "--dry-run's plan does not name the create the real path runs on $V: $plan" ;;
