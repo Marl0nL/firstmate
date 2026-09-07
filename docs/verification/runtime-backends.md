@@ -638,8 +638,120 @@ $ herdr pane process-info --pane w1:p2R
     "cwd":"/var/home/marlon/firstmate","name":"2.1.215","pid":1991}], "shell_pid":1991 ...
 ```
 
-So `bin/fm-autostart.sh` consults `pane process-info` (`fm_backend_herdr_pane_process_state`, `fm_backend_herdr_pane_process_cwds`) and never `agent_status` for its duplicate-guard.
-The behavioral contract runs offline against a fake `herdr` in `tests/fm-autostart.test.sh`; the systemd unit and the real boot path cannot run in CI or a worktree, so re-verifying this probe live on the current Herdr floor is a Phase 6 cutover live-smoke item.
+So `bin/fm-autostart.sh` consults `pane process-info` (`fm_backend_herdr_pane_process_state`, `fm_backend_herdr_pane_process_cwds`, and now `fm_backend_herdr_pane_foreground_harness`, or `fm_backend_herdr_pane_foreground_beyond_shell` when the launched argv is deliberately not a harness) and never `agent_status` for its duplicate-guard.
+The behavioral contract runs offline against a fake `herdr` in `tests/fm-autostart.test.sh`, and the Herdr surface that contract is built on is measured live by the guard in the next section.
+
+### Boot autostart launch shape (2026-09-07, herdr 0.8.2 / protocol 20 and herdr 0.7.4 / protocol 16)
+
+Measured on the captain's host (Fedora) in isolated `fm-lab-` sessions through `bin/fm-herdr-lab.sh`, default-session tripwire clean.
+Refresh this section with the guard that produced it, on every installed Herdr:
+
+```sh
+FM_AUTOSTART_HERDR_LIVE=1 tests/fm-autostart-herdr-live-e2e.test.sh
+```
+
+Herdr 0.8 split "make a pane" from "start an agent in it", so the `agent start` shape `bin/fm-autostart.sh` originally used no longer exists:
+
+```
+$ herdr --version                                   # 0.7.4
+$ herdr agent start --help
+usage: herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down]
+       [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
+
+$ herdr --version                                   # 0.8.2
+$ herdr agent start --help
+Usage: herdr agent start <NAME> --kind <KIND> --pane <ID> [OPTIONS] [-- [AGENT_ARG]...]
+      --kind <KIND>     Supported agent kind and canonical executable
+      --pane <ID>       Existing pane at an interactive shell prompt
+      --timeout <MS>    Wait for interactive readiness (default: 30000; max: 300000)
+```
+
+Rewriting the call into the 0.8 shape does not recover it.
+On 0.8.2 with the current v8 Claude integration installed (`herdr integration status` reports `claude: current (v8)`) and the target directory already trusted, `agent start --kind claude --pane` types the command and Claude really does come up in the pane, but the call burns the whole `--timeout` and then exits 1 without registering anything:
+
+```
+$ herdr agent start probe2 --kind claude --pane w2:p1 --timeout 90000 -- --dangerously-skip-permissions
+{"error":{"code":"timeout","message":"timed out waiting for agent startup"},"id":"cli:agent:start"}   # after 90s, exit 1
+$ herdr agent list
+{"id":"cli:agent:list","result":{"agents":[],"type":"agent_list"}}
+$ herdr pane read w2:p1 | tail -3                   # Claude is live at its own prompt
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+```
+
+A boot step cannot be built on a primitive whose success is indistinguishable from its failure, so the launch is `workspace create` plus `pane run` instead - the same shape every crew spawn already uses.
+Both primitives, and the response fields the script reads from them, are identical on 0.7.4 and 0.8.2:
+
+```
+$ herdr workspace create --cwd <home> --label firstmate --no-focus
+{"result":{"workspace":{"workspace_id":"w1",...},"tab":{"tab_id":"w1:t1",...},
+           "root_pane":{"pane_id":"w1:p1","cwd":"<home>",...},"type":"workspace_created"}}
+$ herdr pane run w1:p1 '<launch command>'           # types AND submits in one call
+$ herdr pane list                                   # optional --workspace on both releases
+```
+
+The bare shell a created (or restored) pane holds is a real live process, which is why the presence check cannot stop at "a process exists":
+
+```
+$ herdr pane process-info --pane w3:p1              # freshly created pane, nothing typed yet
+... "foreground_processes":[{"argv":["/bin/bash"],"cmdline":"/bin/bash","cwd":"<home>",
+    "name":"bash","pid":32152}], "shell_pid":32152 ...
+```
+
+No readiness wait is needed before typing that launch command, measured 2026-09-07 in guarded isolated `fm-lab-` sessions through `bin/fm-herdr-lab.sh`, default-session tripwire clean.
+The zero-delay case is `herdr pane run <root_pane_id> '<command>'` issued as the very next call after `herdr workspace create` returns, with no wait of any kind, and evidence of execution is the command's own side effect (a file it creates) rather than screen text.
+On 0.8.2 the command executed in 10 of 10 idle trials and 10 of 10 trials under full CPU load (one busy loop per `nproc`), first observed at the 100ms poll; on 0.7.4 the same, 10 of 10 idle and 10 of 10 loaded.
+All 40 trials executed with zero losses, so the seeded pane really is at an interactive shell prompt when `workspace create` returns, and `bin/fm-autostart.sh` types the launch straight into it rather than spending a second `--confirm` budget proving what the create already guarantees.
+
+The boot's readiness gate polls `herdr status --json` for the session it targets, and the two fields it reads were measured on both supported releases in guarded isolated `fm-lab-` sessions, default-session tripwire clean, on 2026-09-07.
+On herdr 0.8.2 and on the pinned herdr 0.7.4 alike, the body carries `.server.compatible`: it is `true` for a matched running server, and `null` when no server is running, in which case `.server.running` is already `false`.
+The gate is written so that only a positively `false` compatibility blocks a running server, because a release that omitted the key entirely would otherwise never pass and would fail every boot on the full `--timeout`.
+That omitted-key case is unobserved on either supported release rather than proven impossible, which is why the gate tolerates it instead of depending on the key being present.
+
+`claude --continue` exits 1 in a directory with no usable prior conversation, which is why the typed command carries its own `|| <argv without --continue>` fallback:
+
+```
+$ cd <fresh directory> && claude --continue </dev/null ; echo "rc=$?"
+Error: ... Provide a prompt to continue the conversation.
+rc=1
+```
+
+The live guard drives `bin/fm-autostart.sh` itself end to end against both releases - a real create, a real launch, a real confirmation, the printed `--dry-run` plan read back against the command the real boot actually typed, a launch whose `--continue` form exits and must leave the fallback form running, a second run that must stay a no-op, a real bare shell in the home that must not block the boot, and a launch that never becomes an agent, which must exit 4.
+What that last case then does with the workspace is release-dependent, and the guard asserts both halves: at or above the `FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION` floor the workspace is removed, and below it the close is refused and the workspace is deliberately left behind, because an explicit close that empties a workspace steals the captain's focus on those releases.
+It reported 10 of 10 checks passing on herdr 0.8.2 and 10 of 10 on herdr 0.7.4, run on 2026-09-07 against the exact code this section describes, with the default-session tripwire clean after each run:
+
+```
+$ FM_AUTOSTART_HERDR_LIVE=1 tests/fm-autostart-herdr-live-e2e.test.sh
+ok - workspace create reports its workspace (w1) and seeded pane (w1:p1) on herdr 0.8.2
+ok - pane run types and submits a launch command, leaving it running, on herdr 0.8.2
+ok - a pane-typed agent is invisible to the agent registry and visible in the pane inventory on herdr 0.8.2
+ok - --dry-run prints the create and the launch command without touching Herdr on herdr 0.8.2
+ok - a real boot creates the workspace, launches the agent, and confirms it live on herdr 0.8.2
+ok - the command --dry-run printed is the command the real boot typed on herdr 0.8.2
+ok - a launch whose --continue form exits leaves the fallback form running on herdr 0.8.2
+ok - running twice against the real server starts exactly one firstmate on herdr 0.8.2
+ok - a live bare shell in the firstmate home does not block the boot on herdr 0.8.2
+ok - a launch that never becomes an agent exits 4 and disposes of its workspace as the release allows on herdr 0.8.2
+ok - live Herdr boot-autostart guard complete: 10 checks on herdr 0.8.2 in isolated session fm-lab-autostart-live-1999119-29991
+
+$ PATH=<0.7.4 install dir>:$PATH FM_AUTOSTART_HERDR_LIVE=1 tests/fm-autostart-herdr-live-e2e.test.sh
+ok - workspace create reports its workspace (w1) and seeded pane (w1:p1) on herdr 0.7.4
+ok - pane run types and submits a launch command, leaving it running, on herdr 0.7.4
+ok - a pane-typed agent is invisible to the agent registry and visible in the pane inventory on herdr 0.7.4
+ok - --dry-run prints the create and the launch command without touching Herdr on herdr 0.7.4
+ok - a real boot creates the workspace, launches the agent, and confirms it live on herdr 0.7.4
+ok - the command --dry-run printed is the command the real boot typed on herdr 0.7.4
+ok - a launch whose --continue form exits leaves the fallback form running on herdr 0.7.4
+ok - running twice against the real server starts exactly one firstmate on herdr 0.7.4
+ok - a live bare shell in the firstmate home does not block the boot on herdr 0.7.4
+ok - a launch that never becomes an agent exits 4 and disposes of its workspace as the release allows on herdr 0.7.4
+ok - live Herdr boot-autostart guard complete: 10 checks on herdr 0.7.4 in isolated session fm-lab-autostart-live-2001850-27643
+```
+
+The 0.7.4 binary is the one `bin/fm-install-herdr.sh` pins, installed to a scratch directory and put first on `PATH`; that is how the below-floor half of the release-dependent cleanup case above is exercised on a real binary rather than modelled.
+Re-run both to refresh this record after any Herdr upgrade.
+It launches a stand-in agent (a copy of `sleep` named `claude`, a real process carrying a verified-harness name) rather than a real Claude: the subject under test is Herdr, and no real firstmate is ever created.
+One class of defect this guard cannot catch by construction: its wrapper forces every herdr call into the isolated lab session, so a bare call and an `fm_backend_herdr_cli` call converge on one server there regardless of how the script targets them.
+A session-targeting split between the destructive close and the process-info that authorizes it would therefore never appear in a live-guard run, and only the source-level rule that every call goes through the adapter with one resolved session name prevents it.
 
 ### Restored-manual-mode detection (2026-08-28, herdr 0.8.2 / protocol 20)
 

@@ -41,8 +41,9 @@ RemainAfterExit=yes
 Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
 ExecStart=__FM_ROOT__/bin/fm-autostart.sh --timeout 120
 # Must exceed the script's own budget (--timeout 120 for the server wait, plus
-# --net-timeout 120 for the network gate, plus its 20s start confirmation) so
-# systemd never kills the wait before it can report why.
+# --net-timeout 120 for the network gate, plus the --confirm-bounded 20s wait
+# for the launched agent to appear) so systemd never kills the wait before it
+# can report why.
 TimeoutStartSec=420
 
 [Install]
