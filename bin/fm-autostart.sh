@@ -21,6 +21,16 @@
 # the real 0.7.4 binary CI pins (bin/fm-install-herdr.sh) and the installed
 # 0.8.2 - so there is no version-dependent launch shape to gate on.
 #
+# Nothing waits for that seeded pane's shell before typing into it, because the
+# pane really is at an interactive prompt when `workspace create` returns:
+# issuing `pane run` as the very next call, with no readiness wait at all,
+# executed the command in 40 of 40 trials - 10 idle and 10 under full CPU load
+# on each of 0.7.4 and 0.8.2, measured 2026-09-07 in isolated lab sessions
+# (docs/verification/runtime-backends.md, "Boot autostart launch shape"). A
+# readiness loop here would only add a second --confirm budget and a failure
+# path of its own; the post-launch confirmation below already covers a launch
+# that never takes.
+#
 # `herdr agent start` was the original mechanism and is deliberately gone.
 # Herdr 0.8 split "make a pane" from "start an agent in it": 0.7.4 spells it
 # `agent start <name> [--cwd PATH] [--focus|--no-focus] -- <argv...>` while
@@ -713,20 +723,6 @@ create_firstmate_workspace() {
   printf '%s %s' "$ws" "$pane"
 }
 
-# Wait until the new pane's shell is a real running process, so the launch
-# command is typed into a terminal that exists rather than into one still being
-# set up. Bounded by --confirm.
-wait_for_pane_shell() {
-  local pane=$1 deadline
-  deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
-  while :; do
-    [ "$(fm_backend_herdr_pane_process_state "$HERDR_SESSION_NAME" "$pane")" = live ] && return 0
-    [ "$(date +%s)" -lt "$deadline" ] || break
-    sleep "$INTERVAL"
-  done
-  return 1
-}
-
 # Remove a workspace THIS run just created, after its launch failed. Without
 # this, every failed boot would leave a half-built container behind for the
 # next one to inherit, and they would accumulate.
@@ -742,11 +738,26 @@ wait_for_pane_shell() {
 # leaves the workspace alone. Every refusal, and a close that fails, says
 # exactly what was left behind and why, so the journal never has to guess.
 #
+# The close itself is gated on the release, for the third refusal. Below Herdr
+# 0.8.0 an EXPLICIT close that empties a workspace - `workspace close` included
+# - routes through close_selected_workspace, which hands focus to the CLOSING
+# workspace's right neighbor and ignores whatever the captain was watching
+# (bin/backends/herdr.sh records both upstream fixes and the releases carrying
+# them). That is exactly what FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION floors,
+# so this asks that owner - fm_backend_herdr_presentation_release_supported -
+# rather than comparing versions again here; the floor is not borrowed from an
+# unrelated setting, it IS "an explicit close preserves focus". An
+# indeterminate verdict refuses too, matching this script's rule everywhere
+# else that an unprovable read never licenses the risky action.
+# bin/fm-teardown.sh already refuses `workspace close` for this same reason.
+# A stray workspace is recoverable and is already the outcome of this
+# function's other refusals; hijacking the captain's focus mid-work is not.
+#
 # Only a workspace this same run created is ever passed here - `workspace
 # create` always creates, so the id can never name something that was already
 # the captain's.
 discard_created_workspace() {  # <workspace_id>
-  local ws=$1 panes pane
+  local ws=$1 panes pane floor=0
   panes=$(herdr pane list --workspace "$ws" 2>/dev/null) || panes=""
   if ! printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1; then
     printf 'fm-autostart.sh: could not inspect workspace %s to remove it; close it by hand before the next boot.\n' \
@@ -773,6 +784,21 @@ discard_created_workspace() {  # <workspace_id>
   done <<EOF
 $(printf '%s' "$panes" | jq -r '.result.panes[]?.pane_id // empty' 2>/dev/null)
 EOF
+  fm_backend_herdr_presentation_release_supported "$HERDR_SESSION_NAME" || floor=$?
+  case "$floor" in
+    0) : ;;
+    1)
+      printf 'fm-autostart.sh: leaving workspace %s in place: herdr %s is below the %s floor where an explicit workspace close preserves focus, so closing it would move the captain off the space being watched. Close it by hand before the next boot.\n' \
+        "$ws" "$FM_BACKEND_HERDR_PRESENTATION_RELEASE" \
+        "$FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION" >&2
+      return 0
+      ;;
+    *)
+      printf 'fm-autostart.sh: leaving workspace %s in place: the herdr release could not be read, so it cannot be verified against the %s floor where an explicit workspace close preserves focus. Close it by hand before the next boot.\n' \
+        "$ws" "$FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION" >&2
+      return 0
+      ;;
+  esac
   herdr workspace close "$ws" >/dev/null 2>&1 ||
     printf 'fm-autostart.sh: could not remove the half-started workspace %s; close it by hand before the next boot.\n' \
       "$ws" >&2
@@ -830,11 +856,6 @@ created=$(create_firstmate_workspace) ||
   die "could not create the firstmate workspace; no firstmate is running" 4
 started_workspace=${created%% *}
 started_pane=${created#* }
-
-if ! wait_for_pane_shell "$started_pane"; then
-  discard_created_workspace "$started_workspace"
-  die "the new firstmate pane ($started_pane) never came up within ${CONFIRM_TIMEOUT}s; no firstmate is running" 4
-fi
 
 if ! herdr pane run "$started_pane" "$(launch_command)" >/dev/null; then
   discard_created_workspace "$started_workspace"

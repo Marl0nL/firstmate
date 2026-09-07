@@ -697,6 +697,11 @@ $ herdr pane process-info --pane w3:p1              # freshly created pane, noth
     "name":"bash","pid":32152}], "shell_pid":32152 ...
 ```
 
+No readiness wait is needed before typing that launch command, measured 2026-09-07 in guarded isolated `fm-lab-` sessions through `bin/fm-herdr-lab.sh`, default-session tripwire clean.
+The zero-delay case is `herdr pane run <root_pane_id> '<command>'` issued as the very next call after `herdr workspace create` returns, with no wait of any kind, and evidence of execution is the command's own side effect (a file it creates) rather than screen text.
+On 0.8.2 the command executed in 10 of 10 idle trials and 10 of 10 trials under full CPU load (one busy loop per `nproc`), first observed at the 100ms poll; on 0.7.4 the same, 10 of 10 idle and 10 of 10 loaded.
+All 40 trials executed with zero losses, so the seeded pane really is at an interactive shell prompt when `workspace create` returns, and `bin/fm-autostart.sh` types the launch straight into it rather than spending a second `--confirm` budget proving what the create already guarantees.
+
 `claude --continue` exits 1 in a directory with no usable prior conversation, which is why the typed command carries its own `|| <argv without --continue>` fallback:
 
 ```
@@ -705,7 +710,8 @@ Error: ... Provide a prompt to continue the conversation.
 rc=1
 ```
 
-The live guard drives `bin/fm-autostart.sh` itself end to end against both releases - a real create, a real launch, a real confirmation, a second run that must stay a no-op, a real bare shell in the home that must not block the boot, and a launch that never becomes an agent, which must exit 4 and remove what it created.
+The live guard drives `bin/fm-autostart.sh` itself end to end against both releases - a real create, a real launch, a real confirmation, a second run that must stay a no-op, a real bare shell in the home that must not block the boot, and a launch that never becomes an agent, which must exit 4.
+What that last case then does with the workspace is release-dependent, and the guard asserts both halves: at or above the `FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION` floor the workspace is removed, and below it the close is refused and the workspace is deliberately left behind, because an explicit close that empties a workspace steals the captain's focus on those releases.
 It reported 10 checks passing on `herdr 0.8.2` and 10 on `herdr 0.7.4`.
 It launches a stand-in agent (a copy of `sleep` named `claude`, a real process carrying a verified-harness name) rather than a real Claude: the subject under test is Herdr, and no real firstmate is ever created.
 

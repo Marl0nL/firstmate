@@ -272,10 +272,39 @@ case "$out" in
   *"no live firstmate appeared"*) ;;
   *) fail "the confirmation timeout did not say what was missing on $V: $out" ;;
 esac
-[ "$(panes_in "$HOME_C")" = 0 ] ||
-  fail "a failed boot left its half-started pane behind in $HOME_C on $V: $out"
+# What the failed boot then does with the workspace is release-dependent, and
+# both halves are asserted rather than one being skipped. Below the floor where
+# an explicit close preserves focus, closing the emptied workspace would move
+# the captain off whatever space was being watched, so cleanup deliberately
+# leaves it behind and says so; at or above the floor it removes it.
+FLOOR_STATUS=$(lab status --json) || fail "could not read the herdr release on $V"
+FLOOR_VERSION=$(printf '%s' "$FLOOR_STATUS" | jq -r 'if .server.running then .server.version else .client.version end')
+FLOOR_PROTOCOL=$(printf '%s' "$FLOOR_STATUS" | jq -r 'if .server.running then .server.protocol else .client.protocol end')
+FLOOR_VERDICT=$(bash -c '
+  . "$0/bin/backends/herdr.sh"
+  status=0
+  fm_backend_herdr_release_floor_verdict "$1" "$2" || status=$?
+  printf "%s\n" "$status"
+' "$ROOT" "$FLOOR_PROTOCOL" "$FLOOR_VERSION")
+case "$FLOOR_VERDICT" in
+  0)
+    [ "$(panes_in "$HOME_C")" = 0 ] ||
+      fail "a failed boot left its half-started pane behind in $HOME_C on $V, which is at or above the focus-safe-close floor: $out"
+    ;;
+  1)
+    [ "$(panes_in "$HOME_C")" = 1 ] ||
+      fail "a failed boot closed its workspace on $V, which is below the focus-safe-close floor where that steals the captain's focus: $out"
+    case "$out" in
+      *"Close it by hand"*) ;;
+      *) fail "a failed boot below the floor on $V did not report the workspace it deliberately left behind: $out" ;;
+    esac
+    ;;
+  *)
+    fail "herdr $V (version $FLOOR_VERSION, protocol $FLOOR_PROTOCOL) could not be classified against the focus-safe-close floor, so what cleanup must do is unverifiable"
+    ;;
+esac
 CHECKED=$((CHECKED + 1))
-pass "a launch that never becomes an agent exits 4 and removes what it created on $V"
+pass "a launch that never becomes an agent exits 4 and disposes of its workspace as the release allows on $V"
 
 [ "$CHECKED" -ge 10 ] || fail "FM_AUTOSTART_HERDR_LIVE=1 completed fewer checks ($CHECKED) than expected"
 pass "live Herdr boot-autostart guard complete: $CHECKED checks on $V in isolated session $SESSION"

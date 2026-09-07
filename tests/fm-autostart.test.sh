@@ -86,9 +86,18 @@ export PATH
 #   panelist_fail if present, `pane list` exits non-zero
 #   panelist_ws_fail  if present, only `pane list --workspace` exits non-zero,
 #                 so the cleanup path cannot prove a workspace is agent-free
+#   release       "<version> <protocol>" the fake reports for both `status
+#                 server` and `status --json` (default 0.8.2 20, at or above the
+#                 floor where an explicit workspace close preserves focus);
+#                 "0.7.4 16" is provably below it and "? ?" is unclassifiable
+#   statusjson_fail  if present, only `status --json` exits non-zero, so the
+#                 release cannot be classified at all
 #   ws_fail       if present, `workspace create` exits non-zero
 #   ws_nopane     if present, `workspace create` omits root_pane, which no
 #                 supported release does and which must be refused loudly
+#   create_pane_state  the state the pane `workspace create` seeds starts in
+#                 (default `shell`), so a case can model a pane whose
+#                 process-info does not yet answer when the launch is typed
 #   run_fail      if present, `pane run` exits non-zero
 #   run_inert     if present, `pane run` succeeds but leaves the pane a bare
 #                 shell - the launch that types fine and never becomes an agent
@@ -203,10 +212,24 @@ case "$1 ${2:-}" in
     [ -e "$d/status_fail" ] && { echo 'connect: no such file or directory' >&2; exit 1; }
     n=$(wc -l < "$d/polls" | tr -d ' ')
     if [ "$n" -gt "$(cat "$d/ready_after" 2>/dev/null || echo 0)" ]; then
-      printf 'status: running\nversion: 0.7.4\nprotocol: 16\ncompatible: yes\n'
+      read -r v p < "$d/release"
+      printf 'status: running\nversion: %s\nprotocol: %s\ncompatible: yes\n' "$v" "$p"
     else
       printf 'status: not running\n'
     fi
+    exit 0
+    ;;
+  "status --json")
+    # The machine-readable release surface bin/backends/herdr.sh classifies
+    # against its focus-safe-close floor. One fixture drives both status forms,
+    # so the release a case declares is the release the whole run sees.
+    [ -e "$d/statusjson_fail" ] && { echo 'connect: no such file or directory' >&2; exit 1; }
+    read -r v p < "$d/release"
+    # Real herdr reports protocol as a number; a fixture that names no usable
+    # protocol reports null, which is what an unclassifiable release looks like.
+    case "$p" in '' | *[!0-9]*) p=null ;; esac
+    printf '{"client":{"version":"%s","protocol":%s},"server":{"running":true,"version":"%s","protocol":%s}}\n' \
+      "$v" "$p" "$v" "$p"
     exit 0
     ;;
   "agent list")
@@ -238,7 +261,8 @@ case "$1 ${2:-}" in
     printf '%s' "$cwd" > "$d/ws_cwd"
     # A real create seeds one tab holding one pane at a SHELL PROMPT: live, but
     # holding no agent at all until something is typed into it.
-    printf 'shell %s\n' "$cwd" > "$d/panes/w9:pS1"
+    printf '%s %s\n' "$(cat "$d/create_pane_state" 2>/dev/null || printf 'shell')" "$cwd" \
+      > "$d/panes/w9:pS1"
     jq --arg p "w9:pS1" --arg c "$cwd" \
       '.result.panes += [{"pane_id":$p,"cwd":$c,"foreground_cwd":$c,"workspace_id":"w9"}]' \
       "$d/panes.json" > "$d/panes.json.new" && mv "$d/panes.json.new" "$d/panes.json"
@@ -326,6 +350,9 @@ new_server() {
     > "$dir/agents.json"
   printf '{"id":"cli:pane:list","result":{"panes":%s,"type":"pane_list"}}\n' "$panes" \
     > "$dir/panes.json"
+  # At or above the focus-safe-close floor unless a case says otherwise, so the
+  # cases that assert a workspace was removed keep testing the removal.
+  printf '0.8.2 20\n' > "$dir/release"
   printf '%s\n' "$dir"
 }
 
@@ -896,6 +923,55 @@ assert_contains "$out" "could not be inspected" \
 [ "$(closed_count "$server")" = 0 ] ||
   fail "CLEANUP: a pane that cannot be inspected must never be closed over"
 pass "failure: cleanup refuses to close over a pane it cannot inspect"
+
+# The fourth refusal, and the only one that is about the RELEASE rather than the
+# workspace. Below the floor where an explicit close preserves focus, closing an
+# emptied workspace hands focus to its right neighbor, so a boot that failed
+# while the captain was working would yank the captain off the space being
+# watched. A stray workspace is recoverable; that is not.
+server=$(new_server "$TMP_ROOT/s-cleanup-belowfloor")
+printf '0.7.4 16\n' > "$server/release"
+: > "$server/run_fail"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 4 "$rc" "a failed launch must still exit 4 below the floor"
+assert_contains "$out" "is below the 0.8.0 floor" \
+  "the refusal must name the release and the floor it is below"
+assert_contains "$out" "Close it by hand" "the refusal must say the workspace was left behind"
+[ "$(closed_count "$server")" = 0 ] ||
+  fail "FOCUS: a workspace must never be closed on a release where that steals the captain's focus"
+pass "failure: cleanup refuses to close below the focus-safe-close floor"
+
+# ... and an unreadable release refuses just as firmly, because an unprovable
+# read never licenses the risky action anywhere else in this script either.
+server=$(new_server "$TMP_ROOT/s-cleanup-nofloor")
+: > "$server/statusjson_fail"
+: > "$server/run_fail"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 4 "$rc" "a failed launch must still exit 4 on an unreadable release"
+assert_contains "$out" "could not be read" \
+  "the refusal must say the release could not be classified"
+[ "$(closed_count "$server")" = 0 ] ||
+  fail "FOCUS: an unverifiable release must never license a focus-stealing close"
+pass "failure: cleanup refuses to close on a release it cannot classify"
+
+# Nothing waits for the seeded pane's shell before typing into it: `workspace
+# create` returns a pane that is already at a prompt (verified on both supported
+# releases). Here process-info does not answer for that pane at all, which the
+# old readiness loop would have spent the whole --confirm budget on and then
+# failed; the launch must simply be typed, and the boot must succeed.
+server=$(new_server "$TMP_ROOT/s-nowait")
+printf 'dead\n' > "$server/create_pane_state"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 0 "$rc" "a created pane that does not answer process-info must still be launched into: $out"
+[ "$(started_count "$server")" = 1 ] ||
+  fail "the launch must be typed without first probing the new pane's shell"
+assert_not_contains "$out" "never came up" \
+  "the removed pane-shell readiness failure must no longer be reachable"
+[ "$(closed_count "$server")" = 0 ] || fail "a successful boot must not close its own workspace"
+pass "launch: the launch is typed straight into the created pane, with no readiness wait"
 
 # --- dry run and guards -----------------------------------------------------
 
