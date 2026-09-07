@@ -77,9 +77,13 @@ export PATH
 
 # The fake herdr. Its whole behaviour is files in $FAKE_HERDR_DIR, so a case
 # sets up state declaratively and then asserts on what the script did:
-#   ready_after   number of `status server` polls before the server reports
+#   ready_after   number of `status --json` polls before the server reports
 #                 running (0 = ready immediately)
-#   status_fail   if present, `status server` exits non-zero every time
+#   status_fail   if present, `status --json` exits non-zero every time
+#   incompatible  if present, the server reports running but not
+#                 protocol-compatible, which must never pass the readiness gate
+#   status_garbage  if present, `status --json` exits 0 with this body instead
+#                 of a parseable one, which must never pass the readiness gate
 #   agents.json   the exact `agent list` response body
 #   panes.json    the exact `pane list` response body
 #   list_fail     if present, `agent list` exits non-zero
@@ -90,8 +94,6 @@ export PATH
 #                 server` and `status --json` (default 0.8.2 20, at or above the
 #                 floor where an explicit workspace close preserves focus);
 #                 "0.7.4 16" is provably below it and "? ?" is unclassifiable
-#   statusjson_fail  if present, only `status --json` exits non-zero, so the
-#                 release cannot be classified at all
 #   ws_fail       if present, `workspace create` exits non-zero
 #   ws_nopane     if present, `workspace create` omits root_pane, which no
 #                 supported release does and which must be refused loudly
@@ -112,7 +114,7 @@ export PATH
 #                 PRINTS it would run against what it really runs
 #   create.log    appended with the argv of every `workspace create` call
 #   closed.log    appended with the workspace id of every `workspace close`
-#   polls         appended with one line per `status server` call
+#   polls         appended with one line per `status --json` call
 #   panes/<id>    this pane's state: a state word, optionally followed by the
 #                 cwd process-info should report for the live process (default
 #                 when the file is absent: live, cwd /x):
@@ -217,29 +219,31 @@ case "$1 ${2:-}" in
       *) err pane_not_found ;;
     esac
     ;;
-  "status server")
+  "status --json")
+    # The one status surface: the readiness gate polls it for
+    # .server.running and .server.compatible, and bin/backends/herdr.sh reads
+    # the same body's version and protocol to classify the release against its
+    # focus-safe-close floor. Readiness and release are driven by separate
+    # fixtures so a case can vary either without disturbing the other.
     printf 'x\n' >> "$d/polls"
     [ -e "$d/status_fail" ] && { echo 'connect: no such file or directory' >&2; exit 1; }
+    [ -e "$d/status_garbage" ] && { cat "$d/status_garbage"; exit 0; }
     n=$(wc -l < "$d/polls" | tr -d ' ')
     if [ "$n" -gt "$(cat "$d/ready_after" 2>/dev/null || echo 0)" ]; then
-      read -r v p < "$d/release"
-      printf 'status: running\nversion: %s\nprotocol: %s\ncompatible: yes\n' "$v" "$p"
+      running=true
+      state='"running"'
     else
-      printf 'status: not running\n'
+      running=false
+      state='"not running"'
     fi
-    exit 0
-    ;;
-  "status --json")
-    # The machine-readable release surface bin/backends/herdr.sh classifies
-    # against its focus-safe-close floor. One fixture drives both status forms,
-    # so the release a case declares is the release the whole run sees.
-    [ -e "$d/statusjson_fail" ] && { echo 'connect: no such file or directory' >&2; exit 1; }
+    compatible=true
+    [ -e "$d/incompatible" ] && compatible=false
     read -r v p < "$d/release"
     # Real herdr reports protocol as a number; a fixture that names no usable
     # protocol reports null, which is what an unclassifiable release looks like.
     case "$p" in '' | *[!0-9]*) p=null ;; esac
-    printf '{"client":{"version":"%s","protocol":%s},"server":{"running":true,"version":"%s","protocol":%s}}\n' \
-      "$v" "$p" "$v" "$p"
+    printf '{"client":{"version":"%s","protocol":%s},"server":{"status":%s,"running":%s,"compatible":%s,"version":"%s","protocol":%s}}\n' \
+      "$v" "$p" "$state" "$running" "$compatible" "$v" "$p"
     exit 0
     ;;
   "agent list")
@@ -447,6 +451,33 @@ expect_code 2 "$rc" "an unreachable socket must exit 2"
 assert_contains "$out" "last status was" "the timeout must report the last status seen"
 [ "$(started_count "$server")" = 0 ] || fail "an unreachable server must never start an agent"
 pass "readiness: an unreachable socket times out and reports the last status"
+
+# Compatibility is half of what this gate enforces: a server that is up but
+# speaks a protocol this client cannot use must not be treated as ready, or the
+# boot would proceed to calls that cannot work.
+server=$(new_server "$TMP_ROOT/s-incompatible")
+: > "$server/incompatible"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 2 "$rc" "a running but incompatible server must exit 2"
+assert_contains "$out" "last status was" "the timeout must report the last status seen"
+assert_contains "$out" '"compatible":false' \
+  "the diagnostic must show the incompatibility, not just that a wait elapsed"
+[ "$(started_count "$server")" = 0 ] ||
+  fail "READINESS: an incompatible server must never start an agent"
+pass "readiness: a running but incompatible server is not ready and starts nothing"
+
+# An answer that cannot be understood is not a ready server either: the gate
+# fails closed and ends as the same bounded timeout.
+server=$(new_server "$TMP_ROOT/s-unparseable")
+printf 'not json at all\n' > "$server/status_garbage"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 2 "$rc" "an unparseable status response must exit 2"
+assert_contains "$out" "not json at all" "the diagnostic must carry what the server actually said"
+[ "$(started_count "$server")" = 0 ] ||
+  fail "READINESS: an unparseable status response must never start an agent"
+pass "readiness: an unparseable status response fails closed and starts nothing"
 
 server=$(new_server "$TMP_ROOT/s-slow")
 printf '2\n' > "$server/ready_after"
@@ -1015,7 +1046,7 @@ pass "failure: cleanup refuses to close below the focus-safe-close floor"
 # ... and an unreadable release refuses just as firmly, because an unprovable
 # read never licenses the risky action anywhere else in this script either.
 server=$(new_server "$TMP_ROOT/s-cleanup-nofloor")
-: > "$server/statusjson_fail"
+printf '? ?\n' > "$server/release"
 : > "$server/run_fail"
 out=$(run_autostart "$server" "$HOME_DIR")
 rc=$?

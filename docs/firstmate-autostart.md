@@ -28,7 +28,7 @@ The script's own header owns that reasoning, and [`verification/runtime-backends
 On start, the script:
 
 1. Resolves the firstmate home and refuses to continue unless it structurally looks like one (`AGENTS.md` plus an executable `bin/fm-spawn.sh`).
-2. **Polls** `herdr status server` until the server reports running and protocol-compatible, bounded by `--timeout` (120s in the shipped unit).
+2. **Polls** `herdr status --json` until the session's own server reports running and protocol-compatible, bounded by `--timeout` (120s in the shipped unit).
    `After=herdr-server.service` orders the unit after the server *process* starts, which is not the same as the socket being answerable; a fixed `sleep` would be a guess in both directions.
    On timeout it exits non-zero and prints the last status it saw, so the journal records *why*.
 3. Asks whether a firstmate is already **running** - a listed entry that is confirmed live, not merely a record - and **exits 0 as a no-op if one is**.
@@ -39,14 +39,15 @@ On start, the script:
 
 ```
 herdr workspace create --cwd /var/home/marlon/firstmate --label firstmate --no-focus --session default
-herdr pane run <the pane that creates> \
+herdr pane run PANE_ID \
   'claude --dangerously-skip-permissions --remote-control --continue || claude --dangerously-skip-permissions --remote-control' \
   --session default
 ```
 
    The `||` half is not decoration.
    `claude --continue` exits non-zero in a directory with no conversation to resume, so a first boot on a fresh machine would otherwise leave a dead pane instead of a firstmate; the fresh session the fallback starts is what the next boot resumes.
-   `--dry-run` prints exactly this plan without running any of it, shell-quoted so the printed lines can be pasted as they stand.
+   `--dry-run` prints exactly this plan without running any of it, shell-quoted so the printed lines can be pasted as they stand, and follows it with one line naming `PANE_ID`.
+   `PANE_ID` is the only value a plan cannot know yet: a real run reads it back from the create response's `.result.root_pane.pane_id` and types the launch into that pane.
    The trailing `--session` is the session the whole run addresses, and it is printed because every call the script makes carries it; a plan without it would be the version that can reach a different server.
    The launch command is one argument, not a shell pipeline the calling shell interprets.
 

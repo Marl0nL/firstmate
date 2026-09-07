@@ -186,9 +186,9 @@
 # READINESS IS POLLED, NEVER SLEPT.
 # `After=herdr-server.service` orders the unit after the server PROCESS starts,
 # which is not the same as the socket being answerable. The script polls
-# `herdr status server` until it reports a running, protocol-compatible server,
-# bounded by --timeout, and fails with the last status it saw rather than
-# guessing a sleep long enough to cover a slow boot.
+# `herdr status --json` until the session's own server reports running and
+# protocol-compatible, bounded by --timeout, and fails with the last response
+# it saw rather than guessing a sleep long enough to cover a slow boot.
 #
 # THE NETWORK GATE: NO AGENT ON A DEAD NETWORK.
 # The agent this script starts registers with Anthropic's remote-control
@@ -401,33 +401,38 @@ physical_path() {
   fi
 }
 
-# Poll `herdr status server` until it reports a running, compatible server.
-# Prints nothing on success; on timeout, reports the last status it saw so the
-# journal shows WHY rather than only that a wait elapsed.
+# Poll `herdr status --json` until the session's own server reports both
+# running and protocol-compatible. Prints nothing on success; on timeout,
+# reports the last response it saw so the journal distinguishes a server that
+# never came up from one that came up incompatible from one that answered
+# something unreadable, rather than only saying a wait elapsed.
 #
-# Routed like every other call here, and safe to route: a scoped status call
-# QUERIES the named session and starts nothing. bin/backends/herdr.sh proves it
-# both ways - fm_backend_herdr_server_ensure asks exactly this way to decide
-# whether a server is up ("a bare socket CLI call does NOT auto-start the
-# server", verified there), and starting one is a separate call
-# (`fm_backend_herdr_cli <session> server`) this script never makes. Left bare,
-# this poll could certify a DIFFERENT server than the one every later call
-# addresses, so the gate would pass while the session this run targets was
-# still down.
+# `status --json` rather than `status server` because this is the boot's first
+# gate and it may not rest on an unmeasured argument shape. Scoped through the
+# adapter, `status --json` is the exact call bin/backends/herdr.sh already makes
+# in production to decide whether a session's server is up
+# (fm_backend_herdr_server_ensure, which also records the verified fact that
+# such a call QUERIES and never auto-starts a server); starting one is a
+# separate call this script never makes. Its body carries both fields this poll
+# needs, .server.running and .server.compatible, so nothing here has to derive a
+# verdict the response does not state.
+#
+# Routed for the same reason every other call is: left bare, this poll could
+# certify a DIFFERENT server than the one every later call addresses, so the
+# gate would pass while the session this run targets was still down.
 wait_for_server() {
-  local deadline last="(no response from 'herdr status server')" out
+  local deadline last="(no response from 'herdr status --json')" out
   deadline=$(( $(date +%s) + TIMEOUT ))
   while :; do
-    if out=$(fm_backend_herdr_cli "$HERDR_SESSION_NAME" status server 2>&1); then
+    if out=$(fm_backend_herdr_cli "$HERDR_SESSION_NAME" status --json 2>&1); then
       last=$out
-      case "$out" in
-        *'status: running'*)
-          case "$out" in
-            *'compatible: no'*) : ;;
-            *) return 0 ;;
-          esac
-          ;;
-      esac
+      # One read, and it fails closed: a body that cannot be parsed, omits
+      # either field, or states either as anything but true keeps the poll
+      # waiting rather than passing the gate.
+      if printf '%s' "$out" |
+        jq -e '.server.running == true and .server.compatible == true' >/dev/null 2>&1; then
+        return 0
+      fi
     else
       last=$out
     fi
