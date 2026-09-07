@@ -33,7 +33,16 @@
 # working boots failures (verified 2026-07-20). The fake's process-info
 # therefore carries the real body shape, including per-process argv and cwd, so
 # a restored BARE SHELL in the firstmate home is modelled distinctly from a
-# live agent there.
+# live agent there, and a pane whose body says nothing at all is modelled
+# distinctly from both, because "could not read it" must never be scored as the
+# husk verdict that licenses a start.
+#
+# Which identity a launched pane must show depends on what the run was asked to
+# launch: a harness argv (the default) must show a verified harness, while the
+# `-- <argv>` escape hatch's own command - which is by definition not one of our
+# harnesses - must show a process that is not merely the pane's own shell. Both
+# arms are exercised, including that cleanup never closes over a custom command
+# that did come up.
 #
 # The launch itself is two calls - `workspace create` then `pane run` - and the
 # fake models their real consequences (a new pane appears in the pane list and
@@ -78,13 +87,14 @@ export PATH
 #   panelist_ws_fail  if present, only `pane list --workspace` exits non-zero,
 #                 so the cleanup path cannot prove a workspace is agent-free
 #   ws_fail       if present, `workspace create` exits non-zero
-#   ws_nopane     if present, `workspace create` omits root_pane, so the pane
-#                 has to be resolved from `pane list --workspace` instead
-#   ws_wspanes    how many panes a `workspace create` seeds (default 1); more
-#                 than one must be refused rather than guessed at
+#   ws_nopane     if present, `workspace create` omits root_pane, which no
+#                 supported release does and which must be refused loudly
 #   run_fail      if present, `pane run` exits non-zero
 #   run_inert     if present, `pane run` succeeds but leaves the pane a bare
 #                 shell - the launch that types fine and never becomes an agent
+#   run_leaves    the pane state `pane run` leaves behind (default `live`), so
+#                 a case can model a launch that produces a non-harness command
+#                 or a pane that stops answering
 #   run_cwd       if present, the cwd `pane run` records for the agent it
 #                 leaves running, instead of the workspace's own cwd
 #   launch.log    appended with the argv of every `pane run` call
@@ -95,11 +105,22 @@ export PATH
 #                 cwd process-info should report for the live process (default
 #                 when the file is absent: live, cwd /x):
 #                   live [cwd]  process-info answers with a real claude process
-#                               body carrying the given cwd - the real shape
+#                               body carrying the given cwd - the real shape,
+#                               with the agent running as the pane shell's
+#                               child, which is what a typed launch produces
+#                   custom [cwd] the same, but the running process is an
+#                               ordinary non-harness command: what the
+#                               `-- <argv>` escape hatch actually leaves behind
 #                   shell [cwd] process-info answers with a real /bin/bash
-#                               process body carrying the given cwd - the
-#                               restored bare shell herdr leaves behind, which
-#                               is a husk however live its shell is
+#                               process body carrying the given cwd, its pid
+#                               the pane's own shell_pid - the restored bare
+#                               shell herdr leaves behind, which is a husk
+#                               however live its shell is
+#                   opaque      process-info answers with a real process_info
+#                               body that carries no walkable
+#                               foreground_processes: readable enough to prove
+#                               the pane exists, not readable enough to prove
+#                               what is in it
 #                   ghost       pane get and agent get answer from the persisted
 #                               layout, process-info says pane_not_found - the
 #                               post-reboot shape that made this guard a no-op
@@ -145,9 +166,24 @@ case "$1 ${2:-}" in
     case "$(pane_state_kind "$pane")" in
       live)
         # The verified herdr body: foreground_processes entries carry argv,
-        # cmdline, cwd, name, and pid.
-        printf '{"id":"cli:fake","result":{"process_info":{"foreground_process_group_id":1,"shell_pid":1,"pane_id":"%s","foreground_processes":[{"argv":["claude"],"cmdline":"claude","cwd":"%s","name":"claude","pid":1}]},"type":"pane_process_info"}}\n' \
+        # cmdline, cwd, name, and pid. A command TYPED into the pane runs as
+        # the shell's child, so its pid is not the pane's shell_pid.
+        printf '{"id":"cli:fake","result":{"process_info":{"foreground_process_group_id":2,"shell_pid":1,"pane_id":"%s","foreground_processes":[{"argv":["claude"],"cmdline":"claude","cwd":"%s","name":"claude","pid":2}]},"type":"pane_process_info"}}\n' \
           "$pane" "$(pane_state_cwd "$pane")"
+        exit 0
+        ;;
+      custom)
+        # The same shape for a command that is deliberately NOT one of our
+        # harnesses - the `-- <argv>` escape hatch's launched process.
+        printf '{"id":"cli:fake","result":{"process_info":{"foreground_process_group_id":2,"shell_pid":1,"pane_id":"%s","foreground_processes":[{"argv":["/usr/local/bin/my-supervisor"],"cmdline":"/usr/local/bin/my-supervisor","cwd":"%s","name":"my-supervisor","pid":2}]},"type":"pane_process_info"}}\n' \
+          "$pane" "$(pane_state_cwd "$pane")"
+        exit 0
+        ;;
+      opaque)
+        # A body herdr answered but nothing can be read out of: the pane is
+        # there, what runs in it is unprovable.
+        printf '{"id":"cli:fake","result":{"process_info":{"shell_pid":1,"pane_id":"%s"},"type":"pane_process_info"}}\n' \
+          "$pane"
         exit 0
         ;;
       shell)
@@ -202,15 +238,10 @@ case "$1 ${2:-}" in
     printf '%s' "$cwd" > "$d/ws_cwd"
     # A real create seeds one tab holding one pane at a SHELL PROMPT: live, but
     # holding no agent at all until something is typed into it.
-    n=$(cat "$d/ws_wspanes" 2>/dev/null || echo 1)
-    i=0
-    while [ "$i" -lt "$n" ]; do
-      i=$((i + 1))
-      printf 'shell %s\n' "$cwd" > "$d/panes/w9:pS$i"
-      jq --arg p "w9:pS$i" --arg c "$cwd" \
-        '.result.panes += [{"pane_id":$p,"cwd":$c,"foreground_cwd":$c,"workspace_id":"w9"}]' \
-        "$d/panes.json" > "$d/panes.json.new" && mv "$d/panes.json.new" "$d/panes.json"
-    done
+    printf 'shell %s\n' "$cwd" > "$d/panes/w9:pS1"
+    jq --arg p "w9:pS1" --arg c "$cwd" \
+      '.result.panes += [{"pane_id":$p,"cwd":$c,"foreground_cwd":$c,"workspace_id":"w9"}]' \
+      "$d/panes.json" > "$d/panes.json.new" && mv "$d/panes.json.new" "$d/panes.json"
     if [ -e "$d/ws_nopane" ]; then
       printf '{"id":"cli:fake","result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"type":"workspace_created"}}\n'
     else
@@ -235,7 +266,8 @@ case "$1 ${2:-}" in
     # Typing the launch command is what puts a real agent in the pane - unless
     # the case is modelling a launch that types fine and never becomes one.
     [ -e "$d/run_inert" ] ||
-      printf 'live %s\n' "$(cat "$d/run_cwd" 2>/dev/null || cat "$d/ws_cwd" 2>/dev/null)" > "$d/panes/$3"
+      printf '%s %s\n' "$(cat "$d/run_leaves" 2>/dev/null || printf 'live')" \
+        "$(cat "$d/run_cwd" 2>/dev/null || cat "$d/ws_cwd" 2>/dev/null)" > "$d/panes/$3"
     printf '{"id":"cli:fake","result":{"type":"pane_run"}}\n'
     exit 0
     ;;
@@ -576,6 +608,21 @@ expect_code 3 "$rc" "an unclassifiable matching pane must exit 3: $out"
   fail "IDEMPOTENCE: an unclassifiable pane must never lead to a start"
 pass "liveness: a matching entry that cannot be classified fails closed"
 
+# The same uncertainty one layer in: process-info ANSWERS for this pane, so the
+# pane is real and a process is behind it, but the body carries nothing that
+# says what is running there. "Could not read it" is not "there is only a
+# shell", and only the husk verdict licenses a start, so this must fail closed
+# rather than start a second supervisor beside a live firstmate.
+server=$(new_server "$TMP_ROOT/s-pane-opaque" '[]' \
+  "[{\"pane_id\":\"w1:p1\",\"cwd\":\"$HOME_ABS\",\"foreground_cwd\":\"$HOME_ABS\"}]")
+set_pane "$server" w1:p1 opaque
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 3 "$rc" "a pane whose process-info says nothing must exit 3: $out"
+[ "$(started_count "$server")" = 0 ] ||
+  fail "IDEMPOTENCE: an unreadable process-info must never be scored a husk and license a start"
+pass "liveness: a pane whose process-info cannot be read fails closed, not as a husk"
+
 # A matching entry that names no pane at all cannot be verified either.
 server=$(new_server "$TMP_ROOT/s-nopane" \
   "[{\"name\":null,\"cwd\":\"$HOME_ABS\",\"agent\":\"claude\",\"agent_status\":\"idle\"}]")
@@ -777,32 +824,21 @@ assert_contains "$out" "could not create the firstmate workspace" \
 [ "$(started_count "$server")" = 0 ] || fail "a failed create must never launch anything"
 pass "failure: a workspace that cannot be created is refused loudly"
 
-# A create response with no pane of its own: the pane is resolved from the
-# workspace instead, and the boot still succeeds.
-server=$(new_server "$TMP_ROOT/s-nopane-resolved")
+# A create response with no pane of its own. Every supported release reports
+# one, so this is release drift, and it is refused loudly rather than routed
+# around: typing a firstmate launch into a pane picked by some other rule is
+# worse than not starting.
+server=$(new_server "$TMP_ROOT/s-nopane-response")
 : > "$server/ws_nopane"
 out=$(run_autostart "$server" "$HOME_DIR")
 rc=$?
-expect_code 0 "$rc" "a create response with no pane must resolve one and succeed: $out"
-[ "$(started_count "$server")" = 1 ] ||
-  fail "a resolved pane must still receive exactly one launch"
-pass "launch: a create response carrying no pane resolves it from the workspace"
-
-# ... but only when the answer is unambiguous. Typing a firstmate launch into
-# the wrong pane is worse than not starting, so anything but exactly one pane
-# is refused rather than guessed at.
-server=$(new_server "$TMP_ROOT/s-nopane-ambiguous")
-: > "$server/ws_nopane"
-printf '2\n' > "$server/ws_wspanes"
-out=$(run_autostart "$server" "$HOME_DIR")
-rc=$?
-expect_code 4 "$rc" "an unresolvable pane must exit 4"
-assert_contains "$out" "could not be identified" "an unresolvable pane must say so"
+expect_code 4 "$rc" "a create response carrying no pane must exit 4"
+assert_contains "$out" "root_pane" "the refusal must name the field that was missing"
 [ "$(started_count "$server")" = 0 ] ||
-  fail "an unresolvable pane must never be launched into"
+  fail "a create response with no pane must never be launched into"
 [ "$(closed_count "$server")" = 1 ] ||
-  fail "an unresolvable pane must not leave the workspace it created behind"
-pass "failure: an ambiguous seeded pane is refused rather than guessed at"
+  fail "a create response with no pane must not leave the workspace it created behind"
+pass "failure: a create response carrying no pane is refused loudly and cleaned up"
 
 # The launch typed fine and never became an agent. That is a failure, loudly,
 # and the pane this run created must not be left for the next boot to inherit.
@@ -844,6 +880,22 @@ assert_contains "$out" "could not inspect workspace" \
 [ "$(closed_count "$server")" = 0 ] ||
   fail "CLEANUP: an unprovable workspace must never be closed"
 pass "failure: cleanup refuses to close a workspace it cannot prove is agent-free"
+
+# ... and the same refusal when it is the PANE, not the list, that cannot be
+# read. The identity probe answers "no agent here" and "I could not look" with
+# the same non-zero, so a pane whose process state is unknown must never be
+# taken for proof of emptiness: the firstmate may be coming up in it, and
+# closing over that is the one outcome worse than reporting the failure.
+server=$(new_server "$TMP_ROOT/s-cleanup-unreadable")
+printf 'garbage\n' > "$server/run_leaves"
+out=$(run_autostart "$server" "$HOME_DIR")
+rc=$?
+expect_code 4 "$rc" "an unconfirmable launch must still exit 4"
+assert_contains "$out" "could not be inspected" \
+  "cleanup must say which pane it could not prove empty"
+[ "$(closed_count "$server")" = 0 ] ||
+  fail "CLEANUP: a pane that cannot be inspected must never be closed over"
+pass "failure: cleanup refuses to close over a pane it cannot inspect"
 
 # --- dry run and guards -----------------------------------------------------
 
@@ -888,6 +940,36 @@ assert_not_contains "$(cat "$server/launch.log")" "--continue" \
 assert_not_contains "$(cat "$server/launch.log")" "||" \
   "an argv that never asked to continue must not carry a fallback"
 pass "argv: an explicit -- command replaces the default"
+
+# The `-- <argv>` escape hatch has to be able to SUCCEED, and its command is by
+# definition not one of our harnesses. Confirmation therefore asks the question
+# such a command can answer - the pane holds a real process that is not merely
+# its own shell, working in the firstmate home - so a custom supervisor that
+# comes up is confirmed and, critically, is not destroyed by the failure
+# cleanup afterwards.
+server=$(new_server "$TMP_ROOT/s-argv-custom")
+printf 'custom\n' > "$server/run_leaves"
+out=$(run_autostart "$server" "$HOME_DIR" -- /usr/local/bin/my-supervisor)
+rc=$?
+expect_code 0 "$rc" "a custom command that comes up must be confirmed: $out"
+assert_contains "$out" "firstmate is up" "a confirmed custom command must report the firstmate up"
+[ "$(started_count "$server")" = 1 ] || fail "a custom command must be launched exactly once"
+[ "$(closed_count "$server")" = 0 ] ||
+  fail "ESCAPE HATCH: cleanup must never close the workspace over a custom command it just started"
+pass "argv: a custom non-harness command is confirmed and left running"
+
+# ... and the bare-shell hole stays closed on that path too: a custom command
+# that exits leaves the pane holding nothing but its own shell, which is a husk,
+# not a running supervisor.
+server=$(new_server "$TMP_ROOT/s-argv-custom-inert")
+: > "$server/run_inert"
+out=$(run_autostart "$server" "$HOME_DIR" -- /usr/local/bin/my-supervisor)
+rc=$?
+expect_code 4 "$rc" "a custom command that leaves only a shell must exit 4"
+assert_contains "$out" "no live firstmate appeared" "the confirmation timeout must say what was missing"
+[ "$(closed_count "$server")" = 1 ] ||
+  fail "a custom command that never came up must not leave its pane behind"
+pass "argv: a custom command that leaves only a shell is still a husk"
 
 # A bare `--` must be refused rather than expanding an empty array, which is an
 # error under `set -u` on stock macOS Bash 3.2.

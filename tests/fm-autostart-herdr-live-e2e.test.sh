@@ -145,7 +145,7 @@ probe_pane=$(printf '%s' "$ws_out" | jq -r '.result.root_pane.pane_id // empty')
 [ -n "$probe_ws" ] ||
   fail "workspace create no longer reports .result.workspace.workspace_id on $V; bin/fm-autostart.sh reads it to identify what it created"
 [ -n "$probe_pane" ] ||
-  fail "workspace create no longer reports .result.root_pane.pane_id on $V; bin/fm-autostart.sh falls back to pane list, but re-measure the response shape"
+  fail "workspace create no longer reports .result.root_pane.pane_id on $V; bin/fm-autostart.sh reads it to locate the pane it launches into and refuses the boot without it"
 CHECKED=$((CHECKED + 1))
 pass "workspace create reports its workspace ($probe_ws) and seeded pane ($probe_pane) on $V"
 

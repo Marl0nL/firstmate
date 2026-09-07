@@ -638,7 +638,7 @@ $ herdr pane process-info --pane w1:p2R
     "cwd":"/var/home/marlon/firstmate","name":"2.1.215","pid":1991}], "shell_pid":1991 ...
 ```
 
-So `bin/fm-autostart.sh` consults `pane process-info` (`fm_backend_herdr_pane_process_state`, `fm_backend_herdr_pane_process_cwds`, and now `fm_backend_herdr_pane_foreground_harness`) and never `agent_status` for its duplicate-guard.
+So `bin/fm-autostart.sh` consults `pane process-info` (`fm_backend_herdr_pane_process_state`, `fm_backend_herdr_pane_process_cwds`, and now `fm_backend_herdr_pane_foreground_harness`, or `fm_backend_herdr_pane_foreground_beyond_shell` when the launched argv is deliberately not a harness) and never `agent_status` for its duplicate-guard.
 The behavioral contract runs offline against a fake `herdr` in `tests/fm-autostart.test.sh`, and the Herdr surface that contract is built on is measured live by the guard in the next section.
 
 ### Boot autostart launch shape (2026-09-07, herdr 0.8.2 / protocol 20 and herdr 0.7.4 / protocol 16)

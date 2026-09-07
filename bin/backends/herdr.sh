@@ -2105,6 +2105,47 @@ EOF
   return 1
 }
 
+# fm_backend_herdr_pane_foreground_beyond_shell: return 0 when <pane_id> in
+# <session> holds a foreground process that is NOT the pane's own shell.
+#
+# The sibling probe above answers "is that process one of OUR agents", which is
+# the right question for every pane firstmate itself launches. It is the wrong
+# question for a pane running a command that is deliberately not a harness -
+# bin/fm-autostart.sh's `-- <argv>` escape hatch - because no verified-harness
+# name will ever appear there, so the harness probe would call a perfectly
+# healthy custom supervisor a husk. This answers the weaker question that such
+# a command CAN satisfy while still closing the bare-shell hole: `pane
+# process-info` reports shell_pid alongside foreground_processes, and a pane
+# sitting at its own idle shell prompt reports exactly one foreground process
+# whose pid IS shell_pid - the same "the pane is ready for a command" proof the
+# live Herdr guards already poll for (tests/fm-afk-inject-herdr-e2e.test.sh,
+# tests/fm-backend-herdr-prune-safety-e2e.test.sh). A command TYPED into that
+# pane runs as the shell's child, so a foreground pid other than shell_pid is a
+# real command in the pane.
+#
+# The scope of that claim is the typed launch, which is the only way firstmate
+# starts anything. An agent herdr itself exec'd as the pane's root process can
+# report its own pid AS shell_pid (measured on 0.7.4 for an `agent start`
+# firstmate: pid 1991, shell_pid 1991, docs/verification/runtime-backends.md),
+# so this is a launch-shape probe and never a general "is an agent here"
+# question - that one belongs to the harness probe above.
+#
+# Returns non-zero when every foreground process is the pane's own shell, and
+# when process-info is unreadable or reports no shell_pid to compare against,
+# so - exactly like the harness probe - an unprovable read never upgrades a
+# pane to live.
+fm_backend_herdr_pane_foreground_beyond_shell() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 out
+  # 2>&1 for the same verified reason as the classifiers above: herdr writes
+  # error bodies to stderr.
+  out=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>&1)
+  printf '%s' "$out" | jq -e '
+    .result.process_info as $p
+    | ($p.shell_pid | numbers) as $shell
+    | [$p.foreground_processes[]? | (.pid | numbers) | select(. != $shell)]
+    | length > 0' >/dev/null 2>&1
+}
+
 # fm_backend_herdr_pane_claude_launch_health: for the foreground Claude process
 # of <pane_id> in <session>, print whether it carries firstmate's launch
 # signature (bin/fm-launch-health-lib.sh): `healthy`, `degraded`, or `unknown`.
