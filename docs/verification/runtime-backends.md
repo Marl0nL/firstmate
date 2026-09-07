@@ -715,7 +715,7 @@ Error: ... Provide a prompt to continue the conversation.
 rc=1
 ```
 
-The live guard drives `bin/fm-autostart.sh` itself end to end against both releases - a real create, a real launch, a real confirmation, a second run that must stay a no-op, a real bare shell in the home that must not block the boot, and a launch that never becomes an agent, which must exit 4.
+The live guard drives `bin/fm-autostart.sh` itself end to end against both releases - a real create, a real launch, a real confirmation, the printed `--dry-run` plan read back against the command the real boot actually typed, a launch whose `--continue` form exits and must leave the fallback form running, a second run that must stay a no-op, a real bare shell in the home that must not block the boot, and a launch that never becomes an agent, which must exit 4.
 What that last case then does with the workspace is release-dependent, and the guard asserts both halves: at or above the `FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION` floor the workspace is removed, and below it the close is refused and the workspace is deliberately left behind, because an explicit close that empties a workspace steals the captain's focus on those releases.
 **That end-to-end guard run is not confirmed against the code on this branch, and no check count is recorded for it here.**
 The counts this section carried before were produced ahead of two later fix rounds that changed the behaviour under test and rewrote the failed-launch case into the release-aware one described just above, so they measured different code and are deliberately not carried forward or adjusted.

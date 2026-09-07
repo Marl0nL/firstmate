@@ -82,15 +82,15 @@ The lines ship anyway: they are harmless, self-documenting, and engage on any ho
 
 This is the sharp edge, not a nicety.
 Two firstmates on one home fight over the session lock and the fleet, which is strictly worse than no autostart at all.
-So every uncertainty resolves to *do not start*: a server that never becomes ready, an agent list that cannot be read, an unrecognised response shape, a matching agent whose pane cannot be classified - all exit non-zero having started nothing.
+So every uncertainty resolves to *do not start*: a server that never becomes ready, either half of the inventory that cannot be read, an unrecognised response shape, a matching entry whose pane cannot be classified - all exit non-zero having started nothing.
 The only path that starts an agent is one where the server answered and the answer positively contained no firstmate.
 
-"A firstmate is already running" is two tests, and an agent-list entry alone satisfies neither.
+"A firstmate is already running" is two tests, and a listed entry alone satisfies neither.
 
 **First, does the entry match this home?**
 Either it is an agent named `firstmate`, or its working directory is the firstmate home.
 The second half is the load-bearing one.
-`name` is absent or null for every agent not created through `agent start <name>` - which includes the firstmate the captain launched by hand and any pane herdr resurrected - so name matching alone would cheerfully start a duplicate right next to the live one.
+`name` is absent or null for every agent not created through `agent start <name>` - which includes the firstmate this script itself starts, since it types the launch into a pane and registers no agent name at all, the firstmate the captain launched by hand, and any pane herdr resurrected - so name matching alone would cheerfully start a duplicate right next to the live one.
 
 **Second, is the matching entry actually alive?**
 This half was missing when the script first shipped, and its absence made the whole unit a silent permanent no-op.
