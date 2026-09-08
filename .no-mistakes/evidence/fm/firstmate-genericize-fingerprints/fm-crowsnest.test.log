@@ -1,0 +1,41 @@
+ok - relay stashes the message, enqueues a durable wake, and acks
+ok - relay is inert when the Crowsnest is off
+ok - relay acks empty text without stashing
+ok - poll is a hard no-op when disabled
+ok - poll is silent when the inbox is empty
+ok - poll surfaces the oldest pending message as a chat-mention line
+ok - poll refuses an unsafe inbox filename
+ok - poll skips an unsafe stray and continues to the next safe pending entry
+ok - post --reply resolves the thread and records a dry-run reply without touching the inbox
+ok - post supports a proactive space/thread post (the reverse channel)
+ok - post --reply errors on an unknown inbox id
+ok - post refuses empty/whitespace-only text
+ok - post rejects --reply and --space together
+ok - context reader dedups the echo, orders oldest-first, and extracts reply_to + display name
+ok - context reader bounds thread_context to the requested limit
+ok - context.sh merges thread context into the inbox entry without losing base fields
+ok - context.sh is a no-op for a message with no thread
+ok - context.sh does not touch the entry when no thread messages come back
+ok - context.sh is a hard no-op when the Crowsnest is disabled
+ok - context.sh never resurrects an inbox entry that is not present
+ok - relay enriches the inbox entry with thread context while still acking instantly
+ok - CROWSNEST_THREAD_CONTEXT=0 reverts the relay to text-only stashing
+ok - shared resolver fixes the credential fallback (None -> backend default config path)
+ok - relay populates quoted/reply_to/sender_display_name from LOCAL_AGENTS_CONTEXT_JSON
+ok - relay falls back to the convenience scalars when no JSON blob is forwarded
+ok - relay forwards the sender display name for a no-quote message without inventing a quote
+ok - relay stashes exactly as before when the backend forwards no context
+ok - CROWSNEST_THREAD_CONTEXT=0 reverts forwarded-context stashing to text-only
+ok - context.py --get-message hydrates one quoted message into reply_to + quoted_snapshot
+ok - context.sh hydrates a name-only forwarded quote via a single spaces.messages.get
+ok - context.sh treats an inline forwarded quote as authoritative and skips the read-back
+ok - fmc_safe_id validates inbox slugs
+ok - fmc_resolve_cli prefers the renamed local-agents-chat CLI
+ok - fmc_wire_shim / fmc_unwire_shim manage the watcher check shim
+ok - enable wires the shim, persists the flag, and registers the relay
+ok - disable unwires the shim, clears the flag, and unregisters
+ok - status reports resolved config and registration state
+ok - bootstrap arms the Crowsnest from config, idempotently
+ok - bootstrap is inert about the Crowsnest without config
+ok - bootstrap removes the shim on opt-out
+all fm-crowsnest tests passed

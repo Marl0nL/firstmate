@@ -1,0 +1,19 @@
+# Mutation check: inject a leaked home path from a DIFFERENT user into the shipped unit template,
+# NOTE: pre-change strings quoted in this transcript are themselves redacted to <REDACTED-*> tokens so this evidence file does not republish them.
+# then show (a) the OLD assertion substring would not have caught it, (b) the NEW assertion in
+# tests/fm-autostart.test.sh fails the suite on it, and (c) the template is restored afterwards.
+
+--- injected line ---
+ExecStartPre=/var/home/someone-else/firstmate/bin/true
+
+--- (a) old assertion substring '/var/home/<REDACTED-USER>' ---
+old guard: WOULD PASS (leak NOT caught)
+--- (a') new assertion substring '/var/home/' ---
+new guard: WOULD FAIL (caught)
+
+--- (b) run tests/fm-autostart.test.sh against the mutated template ---
+56:not ok - the template must carry no captain-specific path (unexpected: '/var/home/')
+suite exit status: 1
+
+--- (c) restored ---
+git status for template: '' (empty = clean)

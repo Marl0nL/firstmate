@@ -1,0 +1,63 @@
+# Substitution-only proof: apply the placeholder substitutions to the BASE (7523c62) copy of each file
+# NOTE: pre-change strings quoted in this transcript are themselves redacted to <REDACTED-*> tokens so this evidence file does not republish them.
+# and diff it against the TARGET (8a83b3a). Anything left over is a change beyond pure user/path/distro/fixture substitution.
+
+=== bin/backends/herdr.sh ===
+(identical after substitution)
+
+=== docs/claude-resume-shim.md ===
+(identical after substitution)
+
+=== docs/firstmate-autostart.md ===
+140c140
+< Observed on the captain's host, 2026-07-20:
+---
+> Observed on the captain's host, 2026-07-20 (paths redacted to placeholders):
+
+=== docs/treehouse-path-contract.md ===
+6c6
+< Verified against treehouse v2.0.0 on Fedora/<REDACTED-DISTRO> (ostree), 2026-07-16.
+---
+> Verified against treehouse v2.0.0 on an ostree/atomic Fedora variant, 2026-07-16.
+20c20
+< On every ostree/atomic Fedora variant (Silverblue, Kinoite, <REDACTED-DISTRO>), `/home` is a symlink to `/var/home`.
+---
+> On every ostree/atomic Fedora variant (Silverblue, Kinoite, and similar atomic spins), `/home` is a symlink to `/var/home`.
+
+=== docs/verification/runtime-backends.md ===
+179c179
+< tmux target resolution was verified on 2026-09-02 with tmux 3.5a on Fedora/<REDACTED-DISTRO> Linux x86_64, on a private socket, killing the `fm-a` window while a live `fm-a-sibling` remained.
+---
+> tmux target resolution was verified on 2026-09-02 with tmux 3.5a on an ostree/atomic Fedora Linux variant, x86_64, on a private socket, killing the `fm-a` window while a live `fm-a-sibling` remained.
+215c215
+< Verified 2026-09-03 with tmux 3.5a on Fedora/<REDACTED-DISTRO> Linux x86_64, on a private socket, driving the real `fm_backend_target_exists` while the session kept a surviving window so `display-message`'s CANFAIL fallback pane was present:
+---
+> Verified 2026-09-03 with tmux 3.5a on an ostree/atomic Fedora Linux variant, x86_64, on a private socket, driving the real `fm_backend_target_exists` while the session kept a surviving window so `display-message`'s CANFAIL fallback pane was present:
+613a614
+> Paths below are redacted to placeholders; dates, versions, and measured outputs are unchanged.
+622c623
+<   {"agent":"claude","agent_status":"idle","cwd":"/var/home/you/<REDACTED-REPO>","pane_id":"w2:p1",...}]}}
+---
+>   {"agent":"claude","agent_status":"idle","cwd":"/var/home/you/other-project","pane_id":"w2:p1",...}]}}
+759a761
+> Paths below are redacted to placeholders; dates, versions, and measured outputs are unchanged.
+971c973
+< Verified 2026-09-03 against the installed herdr on Fedora/<REDACTED-DISTRO> Linux x86_64, in an isolated throwaway lab session, driving the real `fm_backend_herdr_kill`:
+---
+> Verified 2026-09-03 against the installed herdr on an ostree/atomic Fedora Linux variant, x86_64, in an isolated throwaway lab session, driving the real `fm_backend_herdr_kill`:
+
+=== tests/fm-autostart.test.sh ===
+562c562
+<   '[{"name":null,"cwd":"/var/home/you/<REDACTED-REPO>","agent":"claude","agent_status":"idle","pane_id":"w1:p1"}]')
+---
+>   '[{"name":null,"cwd":"/var/home/other/other-project","agent":"claude","agent_status":"idle","pane_id":"w1:p1"}]')
+1246c1246
+< assert_not_contains "$tmpl" "/var/home/<REDACTED-USER>" "the template must carry no captain-specific path"
+---
+> assert_not_contains "$tmpl" "/var/home/" "the template must carry no captain-specific path"
+
+=== tests/fm-backend-herdr.test.sh ===
+(identical after substitution)
+
+=== tests/fm-crowsnest.test.sh ===
+(identical after substitution)

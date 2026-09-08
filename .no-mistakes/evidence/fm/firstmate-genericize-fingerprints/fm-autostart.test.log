@@ -1,0 +1,57 @@
+ok - readiness: a never-ready server times out cleanly, polling, starting nothing
+ok - readiness: an unreachable socket times out and reports the last status
+ok - readiness: a running but incompatible server is not ready and starts nothing
+ok - readiness: a running server that does not declare incompatibility is ready
+ok - readiness: an unparseable status response fails closed and starts nothing
+ok - readiness: a server ready only on a later poll is waited for, then used
+ok - idempotence: an agent named firstmate makes the run a no-op
+ok - idempotence: an UNNAMED agent in the firstmate home makes the run a no-op
+ok - idempotence: foreground_cwd in the firstmate home makes the run a no-op
+ok - idempotence: an aliased path spelling of the home still makes the run a no-op
+ok - idempotence: an unrelated agent elsewhere does not block the start
+ok - ghost: a listed 'idle' agent with no process behind it does not block the start
+ok - ghost: a dead pane and an agent-less pane both fail to block the start
+ok - liveness: a confirmed-live firstmate is still a no-op
+ok - idempotence: a firstmate visible only in the pane inventory blocks the start
+ok - liveness: a restored bare shell in the home does not count as a firstmate
+ok - liveness: a live non-harness process in the home does not count as a firstmate
+ok - liveness: a registry entry backed by only a shell does not count as a firstmate
+ok - liveness: a ghost listed beside the live firstmate does not license a start
+ok - regression: agent_status 'unknown' (herdr 0.7.4) no longer breaks the no-op
+ok - identity: a cwd-matched entry needs the process really working in the home
+ok - liveness: a matching entry that cannot be classified fails closed
+ok - liveness: a pane whose process-info cannot be read fails closed, not as a husk
+ok - liveness: a matching entry with no pane id fails closed
+ok - idempotence: an unreadable agent list fails closed and starts nothing
+ok - idempotence: an error response is unknown state, not an empty fleet
+ok - idempotence: an unwalkable agents field fails closed rather than starting
+ok - idempotence: an unreadable pane list fails closed and starts nothing
+ok - idempotence: a pane-list error response is unknown state, not an empty fleet
+ok - idempotence: an unwalkable panes field fails closed rather than starting
+ok - idempotence: running twice against one server starts exactly one firstmate
+ok - network gate: an unreachable network exits 5, bounded, polling, starting nothing
+ok - network gate: a network arriving on a later poll is waited for, then used
+ok - network gate: filtered ICMP does not block a reachable start
+ok - network gate: the already-up no-op succeeds with the network down
+ok - network gate: --skip-net-check starts without probing
+ok - failure: a launch that cannot be sent is reported loudly and cleaned up
+ok - failure: a workspace that cannot be created is refused loudly
+ok - failure: a create response carrying no pane is refused loudly and cleaned up
+ok - failure: a launch that never becomes an agent is reported and cleaned up
+ok - failure: cleanup refuses to close a workspace that holds a live agent
+ok - failure: cleanup refuses to close a workspace it cannot prove is agent-free
+ok - failure: cleanup refuses to close over a pane it cannot inspect
+ok - failure: cleanup refuses to close over a pane that reports nothing about itself
+ok - failure: cleanup refuses to close below the focus-safe-close floor
+ok - failure: cleanup refuses to close on a release it cannot classify
+ok - launch: the launch is typed straight into the created pane, with no readiness wait
+ok - dry run: reports the decision and the command without starting anything
+ok - dry run: the printed plan expands to exactly the invocation the real path runs
+ok - dry run: reports an offline gate verdict without waiting or failing
+ok - argv: an explicit -- command replaces the default
+ok - argv: a custom non-harness command is confirmed and left running
+ok - argv: a custom command that leaves only a shell is still a husk
+ok - argv: a bare -- is refused with a clear message
+ok - guard: refuses to start a supervisor outside a firstmate home
+ok - template: the shipped unit has the required ordering, type, and no baked-in paths
+ok - fm-autostart tests passed
