@@ -6,7 +6,8 @@
 # meta. fm-teardown reads tasktmp= and removes the whole root on cleanup.
 #
 # These tests exercise fm-teardown directly as a subprocess against a fake FM_HOME/FM_ROOT
-# built so the real script resolves into it, with stub helper scripts.
+# built so the real script resolves into it, mirroring the real bin/ inventory with
+# stub helper scripts overlaid.
 # The isolated fm-spawn subprocess in fm-kimi-harness.test.sh covers temp-root creation,
 # metadata publication, and the pane environment export.
 set -u
@@ -18,7 +19,6 @@ set -u
 export FM_GATE_REFUSE_BYPASS=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TEARDOWN="$ROOT/bin/fm-teardown.sh"
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
@@ -41,69 +41,61 @@ trap cleanup EXIT
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-gotmp-tests.XXXXXX")
 
 # Build a fake FM_HOME/FM_ROOT so the real fm-teardown.sh (symlinked in) resolves
-# state and helper scripts inside it. Stub the helper scripts fm-teardown calls so no
-# live tmux/treehouse/fleet state is touched. A nonexistent worktree path makes both
-# `if [ -d "$WT" ]` guards skip, so teardown runs straight to the cleanup + state rm.
+# state and helper scripts inside it. The fake bin/ mirrors the COMPLETE real
+# bin/ inventory as symlinks, so every sibling library teardown sources today or
+# grows tomorrow resolves without this fixture keeping a hand-maintained list
+# that falls behind (it did: fm-pending-reply-lib.sh gained fm-busy-lib.sh and
+# the old list did not). The helper scripts that would touch live fleet state
+# are then replaced by stubs. A nonexistent worktree path makes both
+# `if [ -d "$WT" ]` guards skip, so teardown runs straight to the cleanup +
+# state rm.
+
+# mirror_real_bin <fake-root>: symlink every real bin/ and bin/backends/ file
+# into the fake root.
+mirror_real_bin() {
+  local fake=$1 f
+  mkdir -p "$fake/bin/backends" "$fake/state"
+  for f in "$ROOT"/bin/* "$ROOT"/bin/backends/*; do
+    [ -f "$f" ] || continue
+    ln -s "$f" "$fake/bin/${f#"$ROOT"/bin/}"
+  done
+}
+
+# stub_script <fake-root> <name>: replace the mirrored symlink for bin/<name>
+# with the stub read from stdin. The symlink is removed first so the stub can
+# never be written THROUGH it into the real script.
+stub_script() {
+  local fake=$1 name=$2
+  rm -f "$fake/bin/$name"
+  cat > "$fake/bin/$name"
+  chmod +x "$fake/bin/$name"
+}
+
+# stub_fleet_helpers <fake-root>: fm-guard.sh (teardown calls it with `|| true`)
+# and fm-fleet-sync.sh (called for non-scout/non-local-only teardowns) become
+# no-ops so no live tmux/treehouse/fleet state is touched, and
+# fm-tasks-axi-lib.sh reports no backend so backlog_refresh_reminder takes the
+# plain-message path; no tasks-axi here.
+stub_fleet_helpers() {
+  local fake=$1
+  stub_script "$fake" fm-guard.sh <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  stub_script "$fake" fm-fleet-sync.sh <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  stub_script "$fake" fm-tasks-axi-lib.sh <<'SH'
+fm_tasks_axi_backend_available() { return 1; }
+SH
+}
+
 make_fake_root() {
   local id=$1 tasktmp=$2
   local fake="$TMP_ROOT/$id"
-  mkdir -p "$fake/bin/backends" "$fake/state"
-  # Symlink the REAL teardown so the test exercises actual code, not a copy.
-  ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
-  # fm-backend.sh + its tmux adapter: symlink the REAL files (teardown sources
-  # fm-backend.sh unconditionally, and dispatches the kill call through the
-  # tmux adapter; both are unchanged by this suite's fixture, just newly
-  # required siblings since the P1 backend extraction).
-  ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
-  ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
-  ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
-  ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
-  ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
-  ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
-  # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
-  ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
-  # Lifecycle serialization, status presentation retirement, and shared adapter
-  # ownership are sourced by teardown.
-  ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
-  ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
-  # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
-  # wedge detector's bounded worktree write probe.
-  ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
-  ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
-  # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
-  ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
-  # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
-  ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
-  # fm-public-followup-lib.sh (and the fm-x-lib.sh it sources): teardown sources
-  # it for the relay-activation gate on the promised-public-reply check. Neither
-  # does anything in this fixture, which has no .env, but both are real siblings
-  # teardown now requires.
-  ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
-  ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
-  ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
-  ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
-  # Receiver-wake retirement sources the pending-reply library, which in turn
-  # requires the marker helper even for this ordinary-task teardown fixture.
-  ln -s "$ROOT/bin/fm-pending-reply-lib.sh" "$fake/bin/fm-pending-reply-lib.sh"
-  ln -s "$ROOT/bin/fm-marker-lib.sh" "$fake/bin/fm-marker-lib.sh"
-  ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
-  # fm-guard.sh: stub (teardown calls it with `|| true`).
-  cat > "$fake/bin/fm-guard.sh" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fake/bin/fm-guard.sh"
-  # fm-fleet-sync.sh: stub (called for non-scout/non-local-only teardowns).
-  cat > "$fake/bin/fm-fleet-sync.sh" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fake/bin/fm-fleet-sync.sh"
-  # fm-tasks-axi-lib.sh: stub (teardown sources it). Report no backend so
-  # backlog_refresh_reminder takes the plain-message path; no tasks-axi here.
-  cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
-fm_tasks_axi_backend_available() { return 1; }
-SH
+  mirror_real_bin "$fake"
+  stub_fleet_helpers "$fake"
   # Meta with a nonexistent worktree so the dirty/treehouse blocks skip.
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id
@@ -142,49 +134,8 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # not error and must not remove anything.
   local id=td-absent-z3
   local fake="$TMP_ROOT/$id-root"
-  mkdir -p "$fake/bin/backends" "$fake/state"
-  ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
-  ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
-  ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
-  ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
-  ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
-  ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
-  ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
-  ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
-  ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
-  ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
-  # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
-  # wedge detector's bounded worktree write probe.
-  ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
-  ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
-  # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
-  ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
-  # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
-  ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
-  # fm-public-followup-lib.sh (and the fm-x-lib.sh it sources): teardown sources
-  # it for the relay-activation gate on the promised-public-reply check. Neither
-  # does anything in this fixture, which has no .env, but both are real siblings
-  # teardown now requires.
-  ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
-  ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
-  ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
-  ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
-  ln -s "$ROOT/bin/fm-pending-reply-lib.sh" "$fake/bin/fm-pending-reply-lib.sh"
-  ln -s "$ROOT/bin/fm-marker-lib.sh" "$fake/bin/fm-marker-lib.sh"
-  ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
-  cat > "$fake/bin/fm-guard.sh" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fake/bin/fm-guard.sh"
-  cat > "$fake/bin/fm-fleet-sync.sh" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fake/bin/fm-fleet-sync.sh"
-  cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
-fm_tasks_axi_backend_available() { return 1; }
-SH
+  mirror_real_bin "$fake"
+  stub_fleet_helpers "$fake"
   # No tasktmp= line at all.
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id
