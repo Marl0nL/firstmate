@@ -559,7 +559,7 @@ pass "idempotence: an aliased path spelling of the home still makes the run a no
 # An agent in a DIFFERENT directory with no name must not be mistaken for
 # firstmate - the guard has to stay a guard, not become a blanket refusal.
 server=$(new_server "$TMP_ROOT/s-other" \
-  '[{"name":null,"cwd":"/var/home/marlon/challenges","agent":"claude","agent_status":"idle","pane_id":"w1:p1"}]')
+  '[{"name":null,"cwd":"/var/home/other/other-project","agent":"claude","agent_status":"idle","pane_id":"w1:p1"}]')
 out=$(run_autostart "$server" "$HOME_DIR")
 rc=$?
 expect_code 0 "$rc" "an unrelated agent must not block the start: $out"
@@ -1243,7 +1243,7 @@ assert_contains "$tmpl" "Type=oneshot" "the template must be a oneshot"
 assert_contains "$tmpl" "RemainAfterExit=yes" "the template must remain after exit"
 assert_contains "$tmpl" "WantedBy=default.target" "the template must install into default.target"
 # A leaked absolute home would install a unit pointing at someone else's machine.
-assert_not_contains "$tmpl" "/var/home/marlon" "the template must carry no captain-specific path"
+assert_not_contains "$tmpl" "/var/home/" "the template must carry no captain-specific path"
 # ExecStart must not depend on a shell variable: an empty one silently yields a
 # broken path, the exact failure mode of the 2026-07-20 dangling-symlink outage.
 assert_not_contains "$tmpl" 'ExecStart=$' "the template's ExecStart must not start from a variable"

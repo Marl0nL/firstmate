@@ -176,7 +176,7 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that 
 ### Endpoint absence probe
 
 A failed spawn tears the tmux window it created back down and prints a leftover-residue remedy only when that teardown cannot be confirmed gone (`bin/fm-spawn.sh`, `spawn_endpoint_still_present`), so the probe behind the confirmation has to be one that genuinely fails for an absent window.
-tmux target resolution was verified on 2026-09-02 with tmux 3.5a on Fedora/Bazzite Linux x86_64, on a private socket, killing the `fm-a` window while a live `fm-a-sibling` remained.
+tmux target resolution was verified on 2026-09-02 with tmux 3.5a on an ostree/atomic Fedora Linux variant, x86_64, on a private socket, killing the `fm-a` window while a live `fm-a-sibling` remained.
 
 ```sh
 tmux -L "$sock" new-session -d -s probe -n fm-a
@@ -212,7 +212,7 @@ rc 1
 
 The shared existence helper `fm_backend_target_exists` (`bin/fm-backend.sh`), used by the session-start fleet digest, fm-crew-state's pane-readable check, fm-send target validation, fm-control, wake-resident, busy classification, the fleet snapshot, and the away-mode supervisor-pane check, avoids `display-message` for the same CANFAIL reason and probes by the target shape callers pass: a bare pane id (`$TMUX_PANE`) or window id via `list-panes -t "$target"`, and a `session:window` endpoint via the exact `=ses:=win` form (window indices resolve under it too).
 Its contract treats an unreadable server as "does not exist", so it needs no `has-session` split; the single listing read carries every verdict.
-Verified 2026-09-03 with tmux 3.5a on Fedora/Bazzite Linux x86_64, on a private socket, driving the real `fm_backend_target_exists` while the session kept a surviving window so `display-message`'s CANFAIL fallback pane was present:
+Verified 2026-09-03 with tmux 3.5a on an ostree/atomic Fedora Linux variant, x86_64, on a private socket, driving the real `fm_backend_target_exists` while the session kept a surviving window so `display-message`'s CANFAIL fallback pane was present:
 
 ```text
 live pane id (%1):                          exists rc=0
@@ -611,15 +611,16 @@ Observed guarantee: a restored no-agent tab was replaced create-before-close, wh
 ### Boot autostart reality probe (Herdr 0.7.4, protocol 16)
 
 Measured read-only on the captain's host on 2026-07-20 against Herdr 0.7.4 protocol 16 on Fedora, during the first unattended boots driven by `bin/fm-autostart.sh` and `assets/systemd/firstmate-autostart.service`.
+Paths below are redacted to placeholders; dates, versions, and measured outputs are unchanged.
 
 After a machine reboot the server replays its persisted session layout (`~/.config/herdr/session.json`) into the metadata surface, so the metadata surface reports ghosts as live:
 
 ```
 $ herdr agent list          # 3 "idle" agents; the box held exactly 1 live claude process, outside herdr
 {"result":{"agents":[
-  {"agent":"claude","agent_status":"idle","cwd":"/var/home/marlon/firstmate","pane_id":"w1:p1",...},
-  {"agent":"claude","agent_status":"idle","cwd":"/var/home/marlon/firstmate","pane_id":"w1:pR",...},
-  {"agent":"claude","agent_status":"idle","cwd":"/var/home/marlon/challenges","pane_id":"w2:p1",...}]}}
+  {"agent":"claude","agent_status":"idle","cwd":"/var/home/you/firstmate","pane_id":"w1:p1",...},
+  {"agent":"claude","agent_status":"idle","cwd":"/var/home/you/firstmate","pane_id":"w1:pR",...},
+  {"agent":"claude","agent_status":"idle","cwd":"/var/home/you/other-project","pane_id":"w2:p1",...}]}}
 $ herdr pane get w1:p1        # answers in full
 $ herdr agent get w1:p1       # answers in full, agent_status "idle"
 $ herdr pane process-info --pane w1:p1
@@ -631,11 +632,11 @@ A genuinely live, registered, `agent start`-created firstmate reported `agent_st
 
 ```
 $ herdr agent get w1:p2R
-... "agent_status":"unknown","cwd":"/var/home/marlon/firstmate","name":"firstmate" ...
+... "agent_status":"unknown","cwd":"/var/home/you/firstmate","name":"firstmate" ...
 $ herdr pane process-info --pane w1:p2R
-... "foreground_processes":[{"argv":["/home/marlon/.local/share/claude/versions/2.1.215",
+... "foreground_processes":[{"argv":["/home/you/.local/share/claude/versions/2.1.215",
     "--dangerously-skip-permissions","--remote-control","--continue"],
-    "cwd":"/var/home/marlon/firstmate","name":"2.1.215","pid":1991}], "shell_pid":1991 ...
+    "cwd":"/var/home/you/firstmate","name":"2.1.215","pid":1991}], "shell_pid":1991 ...
 ```
 
 So `bin/fm-autostart.sh` consults `pane process-info` (`fm_backend_herdr_pane_process_state`, `fm_backend_herdr_pane_process_cwds`, and now `fm_backend_herdr_pane_foreground_harness`, or `fm_backend_herdr_pane_foreground_beyond_shell` when the launched argv is deliberately not a harness) and never `agent_status` for its duplicate-guard.
@@ -757,6 +758,7 @@ A session-targeting split between the destructive close and the process-info tha
 
 Measured read-only on the captain's host on 2026-08-28 against the installed Herdr 0.8.2.
 The defect: `[session] resume_agents_on_restore` resumes a Claude pane after a server restart on Herdr's own launch line, dropping firstmate's launch prefixes; a Claude resumed without `--dangerously-skip-permissions` freezes in manual permission mode.
+Paths below are redacted to placeholders; dates, versions, and measured outputs are unchanged.
 
 The `resume_agents_on_restore` key exists and is schema-valid on 0.8.2, and its documented default is `true`:
 
@@ -776,7 +778,7 @@ The healthy launch shape a real firstmate-managed Claude carries (read from a li
 
 ```
 $ tr '\0' ' ' < /proc/<pid>/cmdline
-/home/marlon/.local/share/claude/versions/<v> --dangerously-skip-permissions --model <m> --effort <e> ...
+/home/you/.local/share/claude/versions/<v> --dangerously-skip-permissions --model <m> --effort <e> ...
 $ grep -E '^(HERDR_ENV|CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION)=' /proc/<pid>/environ  # NUL-split
 HERDR_ENV=0
 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
@@ -968,7 +970,7 @@ Both refusals are informational and print NO removal command: the spared tab is 
 fm-spawn's abort-cleanup report mirrors the same predicate, so a guard-spared residue is reported as deliberate instead of getting `spawn_endpoint_remedy_line`'s `herdr pane close <pane>` - the exact close the guard refused.
 fm-teardown's completed-task and forced-child paths call `fm_backend_herdr_kill_serialized` directly, behind their own confirmed-gone gates, and deliberately keep deleting the emptied workspace focus-safely.
 
-Verified 2026-09-03 against the installed herdr on Fedora/Bazzite Linux x86_64, in an isolated throwaway lab session, driving the real `fm_backend_herdr_kill`:
+Verified 2026-09-03 against the installed herdr on an ostree/atomic Fedora Linux variant, x86_64, in an isolated throwaway lab session, driving the real `fm_backend_herdr_kill`:
 
 ```text
 multi-tab workspace:  has_spare_tab true;  kill closed the targeted pane, other tab untouched

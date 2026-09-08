@@ -3,7 +3,7 @@
 This document records the empirical path contract behind `bin/fm-teardown.sh`'s `treehouse_recorded_path`.
 It exists because the correct handling of a path depends on **who owns its spelling**, and firstmate needs both answers in the same codebase - one of them is the opposite of the other.
 
-Verified against treehouse v2.0.0 on Fedora/Bazzite (ostree), 2026-07-16.
+Verified against treehouse v2.0.0 on an ostree/atomic Fedora variant, 2026-07-16.
 
 ## The two rules
 
@@ -17,7 +17,7 @@ Before changing any path resolution, ask which of the two situations it is.
 
 ## Why the spellings differ
 
-On every ostree/atomic Fedora variant (Silverblue, Kinoite, Bazzite), `/home` is a symlink to `/var/home`.
+On every ostree/atomic Fedora variant (Silverblue, Kinoite, and similar atomic spins), `/home` is a symlink to `/var/home`.
 So `$HOME/x` and `/var/home/<user>/x` are the same inode spelled two ways, and a path's spelling depends on who produced it.
 
 ```
@@ -35,17 +35,17 @@ $ cat ~/.treehouse/<pool>/treehouse-state.json
   "worktrees": [
     {
       "name": "1",
-      "path": "/home/marlon/.treehouse/<pool>/1/<repo>",
+      "path": "/home/you/.treehouse/<pool>/1/<repo>",
       ...
 ```
 
 Back to back, on the very same worktree:
 
 ```
-$ treehouse return /home/marlon/.treehouse/<pool>/1/<repo>
+$ treehouse return /home/you/.treehouse/<pool>/1/<repo>
 Worktree returned to pool.
-$ treehouse return /var/home/marlon/.treehouse/<pool>/1/<repo>
-worktree /var/home/marlon/.treehouse/<pool>/1/<repo> is not managed by treehouse
+$ treehouse return /var/home/you/.treehouse/<pool>/1/<repo>
+worktree /var/home/you/.treehouse/<pool>/1/<repo> is not managed by treehouse
 ```
 
 `treehouse return [path]` takes a path and nothing else - there is no opaque worktree id to hand back instead, unlike `orca worktree rm --worktree "id:<id>"`.
@@ -58,7 +58,7 @@ But a **crew worktree** is acquired by typing `treehouse get` into the task's pa
 
 ```
 $ tmux list-panes -a -F '#{pane_current_path}'
-/var/home/marlon/.treehouse/<pool>/1/<repo>
+/var/home/you/.treehouse/<pool>/1/<repo>
 ```
 
 So there is no verbatim string to keep - the physical spelling is the only thing the pane can report.
@@ -114,13 +114,13 @@ End to end against the real tool, on the same lease, back to back:
 
 ```
 $ treehouse get --lease --lease-holder fm-e2e-test
-/home/marlon/.treehouse/proj-866a4b/1/proj      # treehouse's spelling
-$ cd /home/marlon/.treehouse/proj-866a4b/1/proj && pwd -P
-/var/home/marlon/.treehouse/proj-866a4b/1/proj  # what the pane reports, and what meta records
+/home/you/.treehouse/proj-866a4b/1/proj      # treehouse's spelling
+$ cd /home/you/.treehouse/proj-866a4b/1/proj && pwd -P
+/var/home/you/.treehouse/proj-866a4b/1/proj  # what the pane reports, and what meta records
 
 # before the fix
 $ bin/fm-teardown.sh e2e-x1 --force
-worktree /var/home/marlon/.treehouse/proj-866a4b/1/proj is not managed by treehouse
+worktree /var/home/you/.treehouse/proj-866a4b/1/proj is not managed by treehouse
 error: treehouse return failed for worktree /var/home/...; teardown aborted
 
 # after the fix, no hand-patched meta

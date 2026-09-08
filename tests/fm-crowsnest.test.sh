@@ -234,9 +234,9 @@ make_ctx_fixture() {
   fix="$home/ctx-fixture.json"
   cat > "$fix" <<'JSON'
 {"messages":[
-  {"name":"m3","sender":{"name":"users/cap","displayName":"Captain Marlon"},"text":"is the deploy green?","createTime":"2026-07-11T10:00:03Z"},
+  {"name":"m3","sender":{"name":"users/cap","displayName":"Captain Alex"},"text":"is the deploy green?","createTime":"2026-07-11T10:00:03Z"},
   {"name":"m2","sender":{"name":"users/bot","displayName":"firstmate"},"text":"Captain, the login PR is up: https://github.com/x/y/pull/9","createTime":"2026-07-11T10:00:02Z"},
-  {"name":"m1","sender":{"name":"users/cap","displayName":"Captain Marlon"},"text":"how is the login fix going?","createTime":"2026-07-11T10:00:01Z"}
+  {"name":"m1","sender":{"name":"users/cap","displayName":"Captain Alex"},"text":"how is the login fix going?","createTime":"2026-07-11T10:00:01Z"}
 ]}
 JSON
   printf '%s' "$fix"
@@ -253,7 +253,7 @@ test_context_reader_builds_enrichment() {
   jq_true "$out" '.thread_context | length == 2' || fail "reader must drop the just-sent echo and keep 2 prior msgs"
   jq_true "$out" '.thread_context[0].text == "how is the login fix going?"' || fail "thread_context must be oldest-first"
   jq_true "$out" '.reply_to.sender == "users/bot"' || fail "reply_to must be the most recent prior (firstmate) message"
-  jq_true "$out" '.sender_display_name == "Captain Marlon"' || fail "reader must harvest the captain's display name"
+  jq_true "$out" '.sender_display_name == "Captain Alex"' || fail "reader must harvest the captain's display name"
   pass "context reader dedups the echo, orders oldest-first, and extracts reply_to + display name"
 }
 
@@ -289,7 +289,7 @@ test_context_sh_merges_into_inbox() {
   env FM_HOME="$home" FMC_CONTEXT_FIXTURE="$fix" "$CTX_SH" "$id"
   assert_grep '"thread_context"' "$home/state/chat-inbox/$id.json" "context.sh must merge thread_context into the inbox entry"
   assert_grep '"reply_to"' "$home/state/chat-inbox/$id.json" "context.sh must merge reply_to"
-  assert_grep 'Captain Marlon' "$home/state/chat-inbox/$id.json" "context.sh must merge the captain display name"
+  assert_grep 'Captain Alex' "$home/state/chat-inbox/$id.json" "context.sh must merge the captain display name"
   # The original base fields survive the merge.
   assert_grep '"text":"is the deploy green?"' "$home/state/chat-inbox/$id.json" "merge must preserve the original message text"
   pass "context.sh merges thread context into the inbox entry without losing base fields"
@@ -359,7 +359,7 @@ test_relay_sync_enrichment_merges_context() {
   assert_contains "$out" "On it, captain" "relay must still return the instant ack with enrichment on"
   id=$(first_inbox_id "$home") || fail "relay must stash a base entry"
   assert_grep '"thread_context"' "$home/state/chat-inbox/$id.json" "relay must enrich the entry with thread context"
-  assert_grep 'Captain Marlon' "$home/state/chat-inbox/$id.json" "relay enrichment must include the display name"
+  assert_grep 'Captain Alex' "$home/state/chat-inbox/$id.json" "relay enrichment must include the display name"
   pass "relay enriches the inbox entry with thread context while still acking instantly"
 }
 
@@ -420,7 +420,7 @@ entry_jq() {
 }
 
 # A compact LOCAL_AGENTS_CONTEXT_JSON blob carrying a true inline quote.
-QUOTE_CTX_JSON='{"sender_display_name":"Captain Marlon","space_display_name":"Ops","quoted_message":{"name":"spaces/AAA/messages/M1","quote_type":"REPLY","snapshot":{"text":"the login PR is up","formatted_text":"the *login PR* is up","sender":"firstmate","create_time":"2026-07-13T10:00:00Z"}}}'
+QUOTE_CTX_JSON='{"sender_display_name":"Captain Alex","space_display_name":"Ops","quoted_message":{"name":"spaces/AAA/messages/M1","quote_type":"REPLY","snapshot":{"text":"the login PR is up","formatted_text":"the *login PR* is up","sender":"firstmate","create_time":"2026-07-13T10:00:00Z"}}}'
 
 test_relay_forwarded_quote_json_populates_entry() {
   local home
@@ -428,7 +428,7 @@ test_relay_forwarded_quote_json_populates_entry() {
   printf 'ship it' | env FM_HOME="$home" LOCAL_AGENTS_SPACE='spaces/AAA' \
     LOCAL_AGENTS_THREAD='spaces/AAA/threads/T1' LOCAL_AGENTS_SENDER='users/cap' \
     LOCAL_AGENTS_CONTEXT_JSON="$QUOTE_CTX_JSON" "$RELAY" >/dev/null
-  entry_jq "$home" '.sender_display_name == "Captain Marlon"' || fail "relay must set sender_display_name from the forwarded blob"
+  entry_jq "$home" '.sender_display_name == "Captain Alex"' || fail "relay must set sender_display_name from the forwarded blob"
   entry_jq "$home" '.quoted.snapshot.text == "the login PR is up"' || fail "relay must stash the true quoted message text"
   entry_jq "$home" '.quoted.quote_type == "REPLY"' || fail "relay must preserve the quote type"
   entry_jq "$home" '.reply_to.text == "the login PR is up"' || fail "relay must set reply_to from the true quote"
