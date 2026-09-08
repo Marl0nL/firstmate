@@ -9,9 +9,13 @@ We require this to reduce the maintainer's burden of reviewing and merging contr
 `no-mistakes` puts a local git proxy in front of your real remote.
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
-A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
-It evaluates every PR opening and body edit independently, so a later edit cannot replace an earlier pending compliance check.
-GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
+A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails unless the body carries one of two accepted attestations.
+The first is the deterministic signature plus the structured `no-mistakes-pipeline-attestation:v1` comment that no-mistakes writes.
+The second is a self-review attestation for work shipped as a direct PR after a careful review of the exact head commit: a visible `## Self-review` section saying what was checked, plus one HTML comment of the form `<!-- self-review-attestation:v1 {"head_sha":"<full 40-char sha>","reviewer":"<who/what reviewed>","evidence":"<one line: what was run>"} -->` with all three keys non-empty.
+The self-review attestation is bound to the head commit it names: its `head_sha` must equal the PR's current head sha, so any push after the review turns the check red until someone re-reviews the new head and updates the attestation.
+There is no label or other bypass beyond these two forms.
+It evaluates every PR opening, body edit, and push independently, so a later edit cannot replace an earlier pending compliance check.
+GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without either attestation will not be reviewed or merged.
 
 ## Workflow
 
@@ -113,7 +117,7 @@ The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (lint, all behavior shards, the Herdr lane, macOS snapshot compatibility, and the coverage guard) is expensive and runs on `workflow_dispatch` only: nothing there is auto-triggered by a push or a pull request.
 [`.github/workflows/repo-invariants.yml`](.github/workflows/repo-invariants.yml) stays auto-triggered because it is a single near-zero-cost job (a few seconds, no installs) that guards PR hygiene invariants an author could otherwise merge broken: the `AGENTS.md`/`CLAUDE.md` pointer, the `.claude/skills` symlink, and personal fleet paths staying untracked.
-[`.github/workflows/no-mistakes-required.yml`](.github/workflows/no-mistakes-required.yml) also stays auto-triggered; it enforces the delivery path above and runs in seconds.
+[`.github/workflows/no-mistakes-required.yml`](.github/workflows/no-mistakes-required.yml) also stays auto-triggered; it enforces the delivery path above in either accepted attestation form and runs in seconds.
 
 The intended flow for substantial changes:
 
