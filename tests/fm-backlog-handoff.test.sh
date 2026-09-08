@@ -759,16 +759,31 @@ assert_block_equals() {
 # half of a promised public reply - the typed obligation, its bound work, and
 # this home's registration - so a later handoff can be observed against a real
 # unresolved commitment rather than a stub.
+handoff_fixture_iso() {  # <epoch> -> ISO-8601 UTC
+  date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
+}
+
 seed_public_commitment() {
   local home=$1 obligation=$2 work_home=$3 work_id=$4
+  local now_epoch received_at followup_expires_at obligation_expires_at
   printf 'FMX_PAIRING_TOKEN=test-token\n' > "$home/.env"
   cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
-  jq -n '{request_id:"req-handoff", platform:"x",
+  # Run-relative thread window: the product compares followup_expires_at
+  # against real time, so a literal date here is a time bomb.
+  now_epoch=$(date -u +%s)
+  received_at=$(handoff_fixture_iso "$now_epoch")
+  followup_expires_at=$(handoff_fixture_iso $((now_epoch + 7 * 86400)))
+  obligation_expires_at=$(handoff_fixture_iso $((now_epoch + 60 * 86400)))
+  [ -n "$received_at" ] && [ -n "$followup_expires_at" ] && [ -n "$obligation_expires_at" ] \
+    || fail "could not compute run-relative thread-window fixtures"
+  jq -n --arg received "$received_at" --arg expires "$followup_expires_at" \
+         '{request_id:"req-handoff", platform:"x",
           context_binding:{version:"ctx1", value:"ctx1_req-handoff"},
           public_safe_summary:"looking into the sign-in redirect",
-          received_at:"2026-07-30T10:00:00Z",
-          followup_expires_at:"2026-08-06T10:00:00Z",
-          reservation_expires_at:"2026-08-06T10:00:00Z"}' > "$home/request.json"
+          received_at:$received,
+          followup_expires_at:$expires,
+          reservation_expires_at:$expires}' > "$home/request.json"
   jq -n '{type:"pr-merged", project:"alpha",
           required_deliverables:["pr_url"], completion_policy:"all-required"}' \
     > "$home/expected.json"
@@ -777,7 +792,7 @@ seed_public_commitment() {
       role:"fulfills", required:true, generation:1}' > "$home/relation.json"
   (cd "$home" && tasks-axi public-followup add "$obligation" \
     --request-context-file "$home/request.json" --purpose promised-final \
-    --expected-final-file "$home/expected.json" --expires-at 2026-10-01T00:00:00Z) >/dev/null \
+    --expected-final-file "$home/expected.json" --expires-at "$obligation_expires_at") >/dev/null \
     || fail "could not create the public commitment"
   (cd "$home" && tasks-axi public-followup bind-work "$obligation" \
     --relation-file "$home/relation.json") >/dev/null \

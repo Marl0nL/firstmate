@@ -235,26 +235,53 @@ C_RIGHT_NEIGHBOUR=$(printf '%s' "$C_ORDER" | tr ',' '\n' | grep -A1 -Fx "$C_DOOM
 C_SURVIVOR_ORDER=$(printf '%s' "$C_ORDER" | tr ',' '\n' | grep -v "^$C_DOOMED_WS\$" | paste -sd, -) \
   || fail 'could not capture the Part C survivor order'
 
+# The doomed pane was created a moment ago, so first wait (bounded: 100 samples
+# at 0.1s) until its shell is the lone foreground process. Text sent before the
+# shell is up is lost, and the child would then never appear.
+C_SHELL_READY=0
+C_READY_ATTEMPT=0
+while [ "$C_READY_ATTEMPT" -lt 100 ]; do
+  if lab pane process-info --pane "$C_DOOMED_PANE" 2>/dev/null | jq -e '
+    .result.process_info as $process
+    | ($process.foreground_processes | length == 1)
+      and ($process.foreground_processes[0].pid == $process.shell_pid)
+  ' >/dev/null 2>&1; then
+    C_SHELL_READY=1
+    break
+  fi
+  sleep 0.1
+  C_READY_ATTEMPT=$((C_READY_ATTEMPT + 1))
+done
+[ "$C_SHELL_READY" = 1 ] || fail 'the Part C doomed pane shell never became the lone foreground process'
+
 # One persistent background child of the pane's shell, started outside any
 # worktree so nothing reaps it, is enough to fail the proof on every sample.
-lab pane send-text "$C_DOOMED_PANE" 'cd / && sleep 3000 &' >/dev/null \
+# The subshell execs sleep so the backgrounded process IS the shell's direct
+# child under every shell: a plain `cd / && sleep 3000 &` list backgrounds a
+# subshell in bash, making sleep a grandchild the direct-child scan below never
+# sees, and only zsh's exec-last-command optimisation made that shape pass.
+lab pane send-text "$C_DOOMED_PANE" '(cd / && exec sleep 3000) &' >/dev/null \
   || fail 'could not send the Part C persistent-child command'
 lab pane send-keys "$C_DOOMED_PANE" enter >/dev/null \
   || fail 'could not submit the Part C persistent-child command'
+# Bounded: 100 samples at 0.1s, and the child must be seen on two consecutive
+# samples before Part C asserts on it.
 C_SHELL_PID=
 C_CHILD_ATTEMPT=0
 C_CHILD_STABLE=0
+C_CHILDREN_SEEN=
 while [ "$C_CHILD_ATTEMPT" -lt 100 ]; do
   C_SHELL_PID=$(lab pane process-info --pane "$C_DOOMED_PANE" 2>/dev/null \
     | jq -r '.result.process_info.shell_pid // empty' 2>/dev/null) || C_SHELL_PID=
-  if [ -n "$C_SHELL_PID" ] && ps -axo ppid=,comm= | awk -v parent="$C_SHELL_PID" '
-    $1 == parent {
-      command = $2
-      sub(/^.*\//, "", command)
-      if (command == "sleep") found = 1
-    }
-    END { exit(found ? 0 : 1) }
-  '; then
+  if [ -n "$C_SHELL_PID" ]; then
+    C_CHILDREN_SEEN=$(ps -axo ppid=,comm= | awk -v parent="$C_SHELL_PID" '
+      $1 == parent {
+        command = $2
+        sub(/^.*\//, "", command)
+        printf "%s ", command
+      }')
+  fi
+  if [ -n "$C_SHELL_PID" ] && printf '%s' "$C_CHILDREN_SEEN" | tr ' ' '\n' | grep -qx sleep; then
     C_CHILD_STABLE=$((C_CHILD_STABLE + 1))
     [ "$C_CHILD_STABLE" -ge 2 ] && break
   else
@@ -264,7 +291,8 @@ while [ "$C_CHILD_ATTEMPT" -lt 100 ]; do
   sleep 0.1
   C_CHILD_ATTEMPT=$((C_CHILD_ATTEMPT + 1))
 done
-[ "$C_CHILD_STABLE" -ge 2 ] || fail 'the Part C doomed pane never acquired a stable persistent sleep child process'
+[ "$C_CHILD_STABLE" -ge 2 ] \
+  || fail "the Part C doomed pane never acquired a stable persistent sleep child process within 100 samples (last direct children seen: '${C_CHILDREN_SEEN:-none}')"
 
 C_CALL_LOG="$TMP_ROOT/call-c.log"
 C_FOCUS_SAMPLES="$TMP_ROOT/focus-c.samples"

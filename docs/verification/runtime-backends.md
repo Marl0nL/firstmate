@@ -984,6 +984,18 @@ pane already gone (pane get -> pane_not_found): unresolvable, so the close is re
 The live guard is `tests/fm-backend-herdr-smoke.test.sh` (real herdr, self-skips when herdr is absent), which asserts the non-last-tab kill removes its pane while the workspace's last-tab kill is refused and reported as a reclaimable residue rather than something to delete; `tests/fm-backend-herdr.test.sh` pins the same boundary portably against the stateful fake herdr, including the fail-closed unreadable-read case and the proof that the guard's reads and the permitted close all run under one held presentation lock.
 Re-run both after a herdr upgrade.
 
+Whether Herdr itself accepts a last-tab `tab close` is release dependent, measured 2026-09-08 on Linux x86_64 in an isolated named lab through `bin/fm-herdr-lab.sh run`, against a single-tab workspace whose pane held a running foreground loop:
+
+```text
+herdr 0.7.4 (protocol 16): tab close <last-tab> -> exit 1,
+  {"error":{"code":"tab_close_failed","message":"cannot close the last tab in a workspace"}}
+  workspace and tab still listed afterwards; pane get still resolves; the loop keeps running
+herdr 0.8.2 (protocol 20): tab close <last-tab> -> exit 0, {"result":{"type":"ok"}}
+  workspace gone from workspace list; pane get -> pane_not_found; the loop stops
+```
+
+`workspace close <workspace_id>` removes the workspace on both releases, which is why `tests/fm-backend-herdr-prune-safety-e2e.test.sh` resets its adopted workspace that way; a test or operator that relies on a last-tab `tab close` to delete a workspace silently no-ops on the 0.7.4 CI pin.
+
 ### Presentation version floor
 
 Default-on presentation projection is floored at Herdr 0.8.0.

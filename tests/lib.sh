@@ -56,6 +56,21 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
+# fm_run_tests <test-function>...: print a TAP-style plan line "1..N" for the
+# N named test functions, then run them in order. Each test function emits
+# exactly one `ok -` line (or exits through fail). A consumer that counts
+# `ok -` lines, such as the stock macOS Bash job in .github/workflows/ci.yml,
+# compares the count against this plan instead of a hardcoded total, so adding
+# a test never needs a CI edit and a test that returns without reporting still
+# shows up as a plan mismatch.
+fm_run_tests() {
+  local test_fn
+  printf '1..%s\n' "$#"
+  for test_fn in "$@"; do
+    "$test_fn"
+  done
+}
+
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
