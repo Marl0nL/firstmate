@@ -71,11 +71,12 @@ stub_script() {
   chmod +x "$fake/bin/$name"
 }
 
-# stub_fleet_helpers <fake-root>: fm-guard.sh (teardown calls it with `|| true`)
-# and fm-fleet-sync.sh (called for non-scout/non-local-only teardowns) become
-# no-ops so no live tmux/treehouse/fleet state is touched, and
-# fm-tasks-axi-lib.sh reports no backend so backlog_refresh_reminder takes the
-# plain-message path; no tasks-axi here.
+# stub_fleet_helpers <fake-root>: fm-guard.sh (teardown calls it with `|| true`),
+# fm-fleet-sync.sh (called for non-scout/non-local-only teardowns), and
+# fm-remote-job-reap-orphans.sh (teardown's closing sweep, which inspects this
+# user's live remote-worker processes) become no-ops so no live tmux/treehouse/
+# fleet state is touched, and fm-tasks-axi-lib.sh reports no backend so
+# backlog_refresh_reminder takes the plain-message path; no tasks-axi here.
 stub_fleet_helpers() {
   local fake=$1
   stub_script "$fake" fm-guard.sh <<'SH'
@@ -83,6 +84,10 @@ stub_fleet_helpers() {
 exit 0
 SH
   stub_script "$fake" fm-fleet-sync.sh <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  stub_script "$fake" fm-remote-job-reap-orphans.sh <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
