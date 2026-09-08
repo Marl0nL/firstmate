@@ -54,14 +54,17 @@ jobs:
           # With a bound sha, a parseable candidate whose head_sha equals it
           # wins over an earlier parseable one: a quoted example with
           # placeholder values is valid JSON too, but it can never name the
-          # PR's current head. Without a match the first parseable candidate
-          # is kept so the diagnostic describes a genuinely stale attestation.
+          # PR's current head. Without a match, the first parseable candidate
+          # whose head_sha is a full 40-hex sha is kept (else the first
+          # parseable one) so the stale diagnostic names the genuinely stale
+          # attestation rather than a quoted placeholder.
           scan_attestation() {
             prefix=$1
             bound_sha=${2:-}
             json=''
             parse_ok=0
             fallback=''
+            fallback_is_sha=0
             scan="$body"
             while [ "$parse_ok" -ne 1 ]; do
               case "$scan" in
@@ -76,11 +79,17 @@ jobs:
                     if [ -z "$bound_sha" ]; then
                       json="$candidate"
                       parse_ok=1
-                    elif [ "$(printf '%s' "$candidate" | jq -r '.head_sha? | strings // empty' 2>/dev/null || true)" = "$bound_sha" ]; then
-                      json="$candidate"
-                      parse_ok=1
-                    elif [ -z "$fallback" ]; then
-                      fallback="$candidate"
+                    else
+                      candidate_sha=$(printf '%s' "$candidate" | jq -r '.head_sha? | strings // empty' 2>/dev/null || true)
+                      if [ "$candidate_sha" = "$bound_sha" ]; then
+                        json="$candidate"
+                        parse_ok=1
+                      elif [ "$fallback_is_sha" -ne 1 ] && printf '%s' "$candidate_sha" | grep -qE '^[0-9a-f]{40}$'; then
+                        fallback="$candidate"
+                        fallback_is_sha=1
+                      elif [ -z "$fallback" ]; then
+                        fallback="$candidate"
+                      fi
                     fi
                   fi
                   ;;

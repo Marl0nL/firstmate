@@ -220,7 +220,7 @@ case "$GATE_OUT" in
 esac
 pass "quoted self-review example with valid-JSON placeholders does not shadow the genuine head-bound attestation"
 
-# --- a quoted example plus a stale genuine attestation reports the stale one
+# --- a quoted example plus a stale genuine attestation names the stale sha ---
 
 run_gate "$QUOTED_SELF_REVIEW
 
@@ -229,10 +229,10 @@ $SELF_REVIEW_SECTION
 ${SELF_REVIEW_PREFIX}{\"head_sha\":\"${STALE_SHA}\",\"reviewer\":\"fmtest crewmate\",\"evidence\":\"lint and tests\"} -->"
 [ "$GATE_STATUS" -ne 0 ] || fail "gate accepted a stale attestation behind a quoted example"
 case "$GATE_OUT" in
-  *"bound to <full 40-char sha> but"*) ;;
-  *) fail "expected the stale diagnostic to describe the first parseable candidate, got: $GATE_OUT" ;;
+  *"bound to ${STALE_SHA} but the PR head is now ${HEAD_SHA}"*) ;;
+  *) fail "expected the stale diagnostic to name the genuine stale sha, not the quoted placeholder, got: $GATE_OUT" ;;
 esac
-pass "with no head-bound candidate the stale diagnostic describes the first parseable one"
+pass "with no head-bound candidate the stale diagnostic names the genuine stale attestation, not the quoted placeholder"
 
 # --- quoted self-review prefix alone is not an attestation ------------------
 
