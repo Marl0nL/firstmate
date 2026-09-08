@@ -65,7 +65,7 @@ Recovery and list-live still scan the first workspace matching the home label, b
 
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
 The per-home workspace is reused while it has task tabs.
-Closing its last tab can remove the workspace, and the next spawn recreates it.
+Closing its last tab can remove the workspace, and the next spawn recreates it; whether Herdr accepts that last-tab close is release dependent, so a deliberate workspace removal uses `workspace close` rather than a last-tab `tab close` ([`verification/runtime-backends.md`](verification/runtime-backends.md#last-tab-teardown-guard)).
 A failed spawn's abort cleanup and dead-endpoint reclamation before a relaunch therefore close a task pane only when its workspace is positively shown to still hold another tab, unlike `fm-teardown.sh`'s own completed-task and forced-child closes, which keep removing an emptied workspace focus-safely and erase durable records only once the exact pane is confirmed gone.
 Anything less certain, including an unreadable pane or tab list, leaves that tab in place as a reclaimable residue the next spawn of the same label reuses, and is reported without a manual-close command because closing that last tab is exactly what would delete the workspace; [`verification/runtime-backends.md`](verification/runtime-backends.md#last-tab-teardown-guard) owns the dated evidence.
 
