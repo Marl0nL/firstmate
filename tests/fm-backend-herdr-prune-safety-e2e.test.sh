@@ -24,7 +24,10 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+# fail exits and lets the EXIT trap run cleanup_all exactly once: calling it here
+# too made the trap re-run lab teardown, which then reported a missing
+# fleet-state tripwire as if cleanup had failed.
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
@@ -147,12 +150,28 @@ printf '%s' "$LIVE_TABS_AFTER" | jq -e --arg t "$LIVE_TAB_ID" '.result.tabs[] | 
 pass "fixed: the startup workspace's original live tab is still present in tab list after the spawn"
 
 fm_backend_herdr_kill "$SESSION:$NEW_PANE_ID"
-# fm_backend_herdr_kill now REFUSES to close a workspace's last tab (that would
-# delete this home's persistent workspace). The adopted startup workspace is down
-# to its single LIVE tab, so reset for the happy-path phase by closing that tab
-# directly - the last-tab close is what genuinely deletes the workspace so the
-# next container_ensure creates a fresh one.
-herdr tab close "$LIVE_TAB_ID" --session "$SESSION" >/dev/null 2>&1 || true
+# fm_backend_herdr_kill REFUSES to close a workspace's last tab (that would
+# delete this home's persistent workspace), and the adopted startup workspace is
+# now down to its single LIVE tab. Reset for the happy-path phase by closing the
+# whole workspace explicitly and proving it is gone, so the next
+# container_ensure has nothing labeled 'firstmate' left to ADOPT.
+# A last-tab `tab close` is not a portable reset: herdr 0.7.4 (the CI pin)
+# refuses it with tab_close_failed "cannot close the last tab in a workspace",
+# while 0.8.2 accepts it and deletes the workspace. Swallowing that refusal left
+# the label-colliding workspace alive, so the happy path adopted it and saw an
+# empty seeded tab id instead of a genuinely fresh workspace.
+fm_backend_herdr_cli "$SESSION" workspace close "$LIVE_WSID" >/dev/null 2>&1 \
+  || fail "reset: could not close the adopted startup workspace $LIVE_WSID"
+LIVE_WS_GONE=false
+for _ in $(seq 1 50); do
+  if [ "$(fm_backend_herdr_workspace_presence_state "$SESSION" "$LIVE_WSID")" = dead ]; then
+    LIVE_WS_GONE=true
+    break
+  fi
+  sleep 0.1
+done
+[ "$LIVE_WS_GONE" = true ] \
+  || fail "reset: the adopted startup workspace $LIVE_WSID is still present after workspace close, so the happy path would adopt it instead of creating a fresh workspace"
 
 # --- 4. happy path still works: a genuinely fresh workspace gets its seeded -
 # default tab pruned, leaving exactly one clean fm-<id> task tab -------------
