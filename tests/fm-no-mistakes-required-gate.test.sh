@@ -195,18 +195,44 @@ case "$GATE_OUT" in
 esac
 pass "self-review attestation with an empty key fails naming the key"
 
-# --- a quoted self-review prefix before the genuine comment is skipped ------
+# --- a quoted self-review example before the genuine comment is skipped -----
+# Regression origin: PR #69's own body quoted this gate's bare-body diagnostic,
+# whose self-review example carries placeholder values that are valid JSON.
+# A first-parseable scan picked the quoted example and reported a stale head.
+
+QUOTED_SELF_REVIEW=$(cat <<'EOF'
+    selfreview_prefix='<!-- self-review-attestation:v1 '
+    <!-- self-review-attestation:v1 {"head_sha":"<full 40-char sha>","reviewer":"<who/what reviewed>","evidence":"<one line: what was run>"} -->
+EOF
+)
 
 run_gate "## Evidence
 
-    selfreview_prefix='<!-- self-review-attestation:v1 '
-    echo '    <!-- self-review-attestation:v1 {\"head_sha\":\"<full 40-char sha>\",...} -->'
+$QUOTED_SELF_REVIEW
 
 $SELF_REVIEW_SECTION
 
 $SELF_REVIEW_ATTESTATION"
-[ "$GATE_STATUS" -eq 0 ] || fail "gate rejected a self-review body whose evidence quotes the marker before the genuine comment (exit=$GATE_STATUS): $GATE_OUT"
-pass "quoted self-review prefix in evidence does not shadow the genuine self-review attestation"
+[ "$GATE_STATUS" -eq 0 ] || fail "gate rejected a self-review body whose evidence quotes a valid-JSON example before the genuine comment (exit=$GATE_STATUS): $GATE_OUT"
+case "$GATE_OUT" in
+  *"bound to PR head ${HEAD_SHA}"*) ;;
+  *) fail "gate passed but did not bind to the genuine attestation: $GATE_OUT" ;;
+esac
+pass "quoted self-review example with valid-JSON placeholders does not shadow the genuine head-bound attestation"
+
+# --- a quoted example plus a stale genuine attestation reports the stale one
+
+run_gate "$QUOTED_SELF_REVIEW
+
+$SELF_REVIEW_SECTION
+
+${SELF_REVIEW_PREFIX}{\"head_sha\":\"${STALE_SHA}\",\"reviewer\":\"fmtest crewmate\",\"evidence\":\"lint and tests\"} -->"
+[ "$GATE_STATUS" -ne 0 ] || fail "gate accepted a stale attestation behind a quoted example"
+case "$GATE_OUT" in
+  *"bound to <full 40-char sha> but"*) ;;
+  *) fail "expected the stale diagnostic to describe the first parseable candidate, got: $GATE_OUT" ;;
+esac
+pass "with no head-bound candidate the stale diagnostic describes the first parseable one"
 
 # --- quoted self-review prefix alone is not an attestation ------------------
 

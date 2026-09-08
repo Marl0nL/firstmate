@@ -45,17 +45,23 @@ jobs:
               exit 1
             fi
           }
-          # scan_attestation <prefix>: set json and parse_ok from the body.
-          # The body may QUOTE an attestation prefix before the real comment
-          # (evidence excerpts or review findings citing this workflow's own
-          # source), so first-match extraction can land inside a quotation and
-          # reject a compliant PR. Scan every occurrence and accept the first
-          # whose payload parses as JSON - only the genuine emitted comment
-          # carries a valid JSON payload between prefix and suffix.
+          # scan_attestation <prefix> [<bound-sha>]: set json and parse_ok
+          # from the body. The body may QUOTE an attestation prefix before the
+          # real comment (evidence excerpts, review findings, or this check's
+          # own diagnostics citing the marker), so first-match extraction can
+          # land inside a quotation and reject a compliant PR. Scan every
+          # occurrence and accept the first whose payload parses as JSON.
+          # With a bound sha, a parseable candidate whose head_sha equals it
+          # wins over an earlier parseable one: a quoted example with
+          # placeholder values is valid JSON too, but it can never name the
+          # PR's current head. Without a match the first parseable candidate
+          # is kept so the diagnostic describes a genuinely stale attestation.
           scan_attestation() {
             prefix=$1
+            bound_sha=${2:-}
             json=''
             parse_ok=0
+            fallback=''
             scan="$body"
             while [ "$parse_ok" -ne 1 ]; do
               case "$scan" in
@@ -67,12 +73,23 @@ jobs:
                 *"$suffix"*)
                   candidate="${scan%%"$suffix"*}"
                   if printf '%s' "$candidate" | jq -e . >/dev/null 2>&1; then
-                    json="$candidate"
-                    parse_ok=1
+                    if [ -z "$bound_sha" ]; then
+                      json="$candidate"
+                      parse_ok=1
+                    elif [ "$(printf '%s' "$candidate" | jq -r '.head_sha? | strings // empty' 2>/dev/null || true)" = "$bound_sha" ]; then
+                      json="$candidate"
+                      parse_ok=1
+                    elif [ -z "$fallback" ]; then
+                      fallback="$candidate"
+                    fi
                   fi
                   ;;
               esac
             done
+            if [ "$parse_ok" -ne 1 ] && [ -n "$fallback" ]; then
+              json="$fallback"
+              parse_ok=1
+            fi
           }
           if printf '%s' "$body" | grep -qF -- "$marker"; then
             echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
@@ -131,7 +148,7 @@ jobs:
             *"$selfreview_prefix"*)
               echo "Found self-review attestation marker in PR #${PR_NUMBER} body."
               require_jq
-              scan_attestation "$selfreview_prefix"
+              scan_attestation "$selfreview_prefix" "${PR_HEAD_SHA:-}"
               if [ "$parse_ok" -ne 1 ]; then
                 {
                   echo "::error::Self-review attestation is unparseable: no '${selfreview_prefix}' occurrence carries a valid JSON payload before ' -->'."
