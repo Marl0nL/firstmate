@@ -341,6 +341,40 @@ case "$GATE_OUT" in
 esac
 pass "pretty-printed multi-line pipeline attestation is assembled and accepted"
 
+# the one boundary the pretty-printing allowance keeps: the closing ' -->' must
+# stay on the payload's last line. An attestation whose '-->' sits on its own
+# line has no ' -->' (space then arrow) to close the candidate, so the whole
+# remaining body is handed to jq and rejected as unparseable.
+
+run_gate "$SELF_REVIEW_SECTION
+
+<!-- self-review-attestation:v1 {
+  \"head_sha\": \"${HEAD_SHA}\",
+  \"reviewer\": \"fmtest crewmate\",
+  \"evidence\": \"closing arrow on its own line\"
+}
+-->"
+[ "$GATE_STATUS" -ne 0 ] || fail "gate accepted an attestation whose closing --> is on its own line"
+case "$GATE_OUT" in
+  *'Self-review attestation is unparseable'*) ;;
+  *) fail "expected the unparseable diagnostic for a closing --> on its own line, got: $GATE_OUT" ;;
+esac
+pass "an attestation whose closing --> is on its own line is rejected as unparseable"
+
+# a CRLF-terminated multi-line body (as pasted from a Windows editor or a
+# CRLF-normalising web form) reaches the same accepted verdict: CR is legal JSON
+# whitespace and the '## Self-review' heading grep tolerates a trailing CR.
+
+run_gate "$(printf '%s' "$SELF_REVIEW_SECTION
+
+$SELF_REVIEW_ATTESTATION_MULTILINE" | sed 's/$/\r/')"
+[ "$GATE_STATUS" -eq 0 ] || fail "gate rejected a CRLF-terminated multi-line self-review attestation (exit=$GATE_STATUS): $GATE_OUT"
+case "$GATE_OUT" in
+  *"Self-review attestation is valid and bound to PR head ${HEAD_SHA}"*) ;;
+  *) fail "gate passed but did not report a valid head-bound self-review for the CRLF multi-line payload: $GATE_OUT" ;;
+esac
+pass "a CRLF-terminated multi-line self-review attestation reaches the same accepted verdict"
+
 # --- a pipeline body is judged by the pipeline path, never the self-review --
 
 run_gate "$MARKER
