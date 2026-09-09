@@ -924,7 +924,7 @@ test_create_task_husk_replacement_creates_before_closing() {
 # "Boot autostart reality probe" recorded live. fm_harness_process_matches
 # identifies it via the argv[0] path component.
 herdr_pi_claude() {
-  printf '{"result":{"process_info":{"foreground_processes":[{"name":"2.1.245","argv":["/home/marlon/.local/share/claude/versions/2.1.245","--dangerously-skip-permissions"],"cwd":"/tmp/proj","pid":4242}]}}}\n'
+  printf '{"result":{"process_info":{"foreground_processes":[{"name":"2.1.245","argv":["/home/you/.local/share/claude/versions/2.1.245","--dangerously-skip-permissions"],"cwd":"/tmp/proj","pid":4242}]}}}\n'
 }
 # A herdr `pane process-info` body whose only foreground process is a bare shell.
 herdr_pi_shell() {

@@ -40,7 +40,7 @@ On start, the script:
 5. Only then starts one:
 
 ```
-herdr workspace create --cwd /var/home/marlon/firstmate --label firstmate --no-focus --session default
+herdr workspace create --cwd /var/home/you/firstmate --label firstmate --no-focus --session default
 herdr pane run PANE_ID \
   'claude --dangerously-skip-permissions --remote-control --continue || claude --dangerously-skip-permissions --remote-control' \
   --session default
@@ -137,12 +137,12 @@ The first boot this unit actually completed produced a firstmate that was alive 
 The session lock identifies the harness by walking the shell's process ancestry; on the integration trunk that ancestry walk and the harness-identity test are owned by `bin/fm-session-lock-lib.sh`, which both `bin/fm-lock.sh` and the Claude Stop watcher auto-arm (`bin/fm-claude-stop-autoarm.sh`) share, so both apply the exact same identity contract.
 This unit launches through `~/.local/bin/claude`, which on a shim-installed home is `bin/fm-claude-shim.sh`, and the shim `exec`s the real versioned binary under `~/.local/share/claude/versions/<version>` (see [claude-resume-shim.md](claude-resume-shim.md)).
 A process `exec`ed from that path reports the **version number** as its command name, so a walk that matched only the reported command name saw nothing it could name.
-Observed on the captain's host, 2026-07-20:
+Observed on the captain's host, 2026-07-20 (paths redacted to placeholders):
 
 ```
 7491 comm=bash     args=/bin/bash -c source ~/.claude/shell-snapshots/...
-2026 comm=2.1.215  args=/home/marlon/.local/share/claude/versions/2.1.215 --dangerously-skip-permissions --remote-control --continue
-1775 comm=herdr    args=/var/home/marlon/.local/bin/herdr server
+2026 comm=2.1.215  args=/home/you/.local/share/claude/versions/2.1.215 --dangerously-skip-permissions --remote-control --continue
+1775 comm=herdr    args=/var/home/you/.local/bin/herdr server
 1741 comm=systemd
 ```
 
@@ -179,25 +179,25 @@ Re-running the install over an existing unit is the intended upgrade path: re-re
 
 Every command below uses absolute literal paths on purpose.
 A step that depends on a shell variable silently produces a broken path when re-run in a fresh shell - that is exactly how the 2026-07-20 dangling-symlink outage happened (`data/learnings.md`).
-Substitute your own firstmate home if it is not `/var/home/marlon/firstmate`, but substitute a **literal path**, never a variable.
+Substitute your own firstmate home if it is not `/var/home/you/firstmate`, but substitute a **literal path**, never a variable.
 
 ```sh
 # 1. Render the template into the user unit directory, replacing the placeholder
 #    with the absolute firstmate home.
-mkdir -p /var/home/marlon/.config/systemd/user
-sed 's|__FM_ROOT__|/var/home/marlon/firstmate|g' \
-  /var/home/marlon/firstmate/assets/systemd/firstmate-autostart.service \
-  > /var/home/marlon/.config/systemd/user/firstmate-autostart.service
+mkdir -p /var/home/you/.config/systemd/user
+sed 's|__FM_ROOT__|/var/home/you/firstmate|g' \
+  /var/home/you/firstmate/assets/systemd/firstmate-autostart.service \
+  > /var/home/you/.config/systemd/user/firstmate-autostart.service
 
 # 2. Prove the rendered unit is valid and carries no leftover placeholder
 #    BEFORE enabling it.
-grep -n '^ExecStart=\|__FM_ROOT__' /var/home/marlon/.config/systemd/user/firstmate-autostart.service
-systemd-analyze --user verify /var/home/marlon/.config/systemd/user/firstmate-autostart.service
+grep -n '^ExecStart=\|__FM_ROOT__' /var/home/you/.config/systemd/user/firstmate-autostart.service
+systemd-analyze --user verify /var/home/you/.config/systemd/user/firstmate-autostart.service
 
 # 3. Dry-run the script itself against the live server. It starts nothing; it
 #    only reports what it would decide. Expect "already up" while a firstmate is
 #    running, or the exact command it would run if none is.
-/var/home/marlon/firstmate/bin/fm-autostart.sh --dry-run
+/var/home/you/firstmate/bin/fm-autostart.sh --dry-run
 
 # 4. Enable for boot, and run it once now.
 systemctl --user daemon-reload
@@ -217,7 +217,7 @@ That is the point - enabling mid-session must not disturb the live fleet.
 
 ```sh
 systemctl --user disable --now firstmate-autostart.service
-rm -f /var/home/marlon/.config/systemd/user/firstmate-autostart.service
+rm -f /var/home/you/.config/systemd/user/firstmate-autostart.service
 systemctl --user daemon-reload
 ```
 
