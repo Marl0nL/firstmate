@@ -12,6 +12,14 @@
 # (PR_HEAD_SHA) so a push after the review turns the check red again until
 # someone re-attests against the new head.
 #
+# Either attestation's JSON payload may be written on a single line or
+# pretty-printed across several lines: the gate assembles the comment from its
+# '<!--' to its ' -->' before parsing, so newlines inside the payload are not a
+# rejection. Regression origin: run 34176730965 raised the concern that a
+# multi-line payload might never be assembled. The multi-line cases below lock
+# the assembled behavior in and prove the head-sha binding and quoted-example
+# handling survive a pretty-printed payload.
+#
 # Regression origin: PR #48. The pipeline's own Testing evidence quoted this
 # workflow's source in the PR body - including the literal attestation prefix
 # line - BEFORE the genuine attestation comment in the ## Pipeline section.
@@ -245,6 +253,93 @@ case "$GATE_OUT" in
   *) fail "expected the unparseable self-review diagnostic, got: $GATE_OUT" ;;
 esac
 pass "quoted self-review prefix without a valid JSON payload fails as unparseable"
+
+# --- pretty-printed (multi-line) JSON payloads are assembled and accepted ----
+# The gate extracts the comment across newlines before jq parses it, so a
+# pretty-printed payload is valid. These cases prove the head-sha binding and
+# the quoted-example handling still hold when the JSON spans several lines.
+
+SELF_REVIEW_ATTESTATION_MULTILINE="<!-- self-review-attestation:v1 {
+  \"head_sha\": \"${HEAD_SHA}\",
+  \"reviewer\": \"fmtest crewmate\",
+  \"evidence\": \"pretty-printed attestation spanning multiple lines\"
+} -->"
+
+run_gate "Summary of the change.
+
+$SELF_REVIEW_SECTION
+
+$SELF_REVIEW_ATTESTATION_MULTILINE"
+[ "$GATE_STATUS" -eq 0 ] || fail "gate rejected a valid self-review attestation whose JSON is pretty-printed across lines (exit=$GATE_STATUS): $GATE_OUT"
+case "$GATE_OUT" in
+  *"Self-review attestation is valid and bound to PR head ${HEAD_SHA}"*) ;;
+  *) fail "gate passed but did not report a valid head-bound self-review for the multi-line payload: $GATE_OUT" ;;
+esac
+pass "pretty-printed multi-line self-review attestation is assembled and accepted"
+
+# a stale head on a multi-line payload still fails, so the binding is not
+# relaxed by pretty-printing (the brief's wrong-head-sha fixture, multi-line)
+
+run_gate "$SELF_REVIEW_SECTION
+
+<!-- self-review-attestation:v1 {
+  \"head_sha\": \"${STALE_SHA}\",
+  \"reviewer\": \"fmtest crewmate\",
+  \"evidence\": \"lint and tests\"
+} -->"
+[ "$GATE_STATUS" -ne 0 ] || fail "gate accepted a multi-line self-review attestation whose head_sha is not the PR head"
+case "$GATE_OUT" in
+  *"bound to ${STALE_SHA} but the PR head is now ${HEAD_SHA}"*) ;;
+  *) fail "multi-line stale diagnostic does not name both shas: $GATE_OUT" ;;
+esac
+pass "pretty-printed self-review attestation with a stale head_sha still fails on the head binding"
+
+# a quoted pretty-printed example before the genuine multi-line attestation is
+# skipped for the head-bound one (the brief's quoted-placeholder fixture,
+# multi-line)
+
+QUOTED_SELF_REVIEW_MULTILINE=$(cat <<'EOF'
+Example of the accepted form, pretty-printed:
+<!-- self-review-attestation:v1 {
+  "head_sha": "<full 40-char sha>",
+  "reviewer": "<who/what reviewed>",
+  "evidence": "<one line: what was run>"
+} -->
+EOF
+)
+
+run_gate "## Evidence
+
+$QUOTED_SELF_REVIEW_MULTILINE
+
+$SELF_REVIEW_SECTION
+
+$SELF_REVIEW_ATTESTATION_MULTILINE"
+[ "$GATE_STATUS" -eq 0 ] || fail "gate rejected a body whose evidence quotes a pretty-printed example before the genuine multi-line attestation (exit=$GATE_STATUS): $GATE_OUT"
+case "$GATE_OUT" in
+  *"bound to PR head ${HEAD_SHA}"*) ;;
+  *) fail "gate passed but did not bind to the genuine multi-line attestation: $GATE_OUT" ;;
+esac
+pass "a quoted pretty-printed example does not shadow the genuine multi-line head-bound attestation"
+
+# the no-mistakes pipeline attestation is likewise assembled when pretty-printed
+
+run_gate "$MARKER
+
+<!-- no-mistakes-pipeline-attestation:v1 {
+  \"head_sha\": \"a59cb2dd9184c27a647328aca0e126232788fbeb\",
+  \"steps\": [
+    {\"step\": \"review\", \"status\": \"completed\"},
+    {\"step\": \"test\", \"status\": \"completed\"},
+    {\"step\": \"document\", \"status\": \"completed\"}
+  ]
+} -->"
+[ "$GATE_STATUS" -eq 0 ] || fail "gate rejected a compliant pipeline attestation whose JSON is pretty-printed across lines (exit=$GATE_STATUS): $GATE_OUT"
+case "$GATE_OUT" in
+  *'Pipeline step attestation is valid'*) ;;
+  *) fail "gate passed but did not report a valid attestation for the multi-line pipeline payload: $GATE_OUT" ;;
+esac
+pass "pretty-printed multi-line pipeline attestation is assembled and accepted"
 
 # --- a pipeline body is judged by the pipeline path, never the self-review --
 

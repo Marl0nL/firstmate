@@ -12,6 +12,7 @@ Pushing through it runs an AI-driven review/test/lint pipeline in an isolated wo
 A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails unless the body carries one of two accepted attestations.
 The first is the deterministic signature plus the structured `no-mistakes-pipeline-attestation:v1` comment that no-mistakes writes.
 The second is a self-review attestation for work shipped as a direct PR after a careful review of the exact head commit: a visible `## Self-review` section saying what was checked, plus one HTML comment of the form `<!-- self-review-attestation:v1 {"head_sha":"<full 40-char sha>","reviewer":"<who/what reviewed>","evidence":"<one line: what was run>"} -->` with all three keys non-empty.
+Either attestation's JSON payload may be written on one line or pretty-printed across several lines; the check assembles the comment from its `<!--` to its ` -->` before parsing, so newlines inside the payload are fine.
 The self-review attestation is bound to the head commit it names: its `head_sha` must equal the PR's current head sha, so any push after the review turns the check red until someone re-reviews the new head and updates the attestation.
 There is no label or other bypass beyond these two forms.
 It evaluates every PR opening, body edit, and push independently, so a later edit cannot replace an earlier pending compliance check.
