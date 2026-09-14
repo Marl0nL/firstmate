@@ -6,10 +6,10 @@ name: CI
 # pre-merge check, not on every push/PR event. See CONTRIBUTING.md "Validation
 # and CI" for the local-gates-first flow and the exact trigger command.
 #
-# Runner split: the pure jobs (lint, coverage guard, timing aggregate) run on
-# the self-hosted haunt-dev runner; the stateful behavior/Herdr lanes stay on
-# ubuntu-latest on purpose, and the macOS snapshot is opt-in via macos_snapshot.
-# CONTRIBUTING.md "Where CI runs" owns why - patch it there, not here.
+# Runner split: the fast pure jobs (coverage guard, timing aggregate) run on the
+# self-hosted haunt-dev runner; lint and the stateful behavior/Herdr lanes stay
+# on ubuntu-latest on purpose, and the macOS snapshot is opt-in via
+# macos_snapshot. CONTRIBUTING.md "Where CI runs" owns why - patch it there.
 on:
   workflow_dispatch:
     inputs:
@@ -35,8 +35,13 @@ concurrency:
 jobs:
   lint:
     name: Lint
-    runs-on: [self-hosted, haunt-dev]
-    timeout-minutes: 10
+    # ubuntu-latest on purpose: fm-lint.sh runs ShellCheck extended analysis over
+    # the whole file set, which is too slow under the shared box's live-fleet load
+    # (it hit the 10-minute cap on the self-hosted runner). See CONTRIBUTING.md
+    # "Where CI runs". The fast pure jobs (coverage guard, timing aggregate) stay
+    # self-hosted.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
