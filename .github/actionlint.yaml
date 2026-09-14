@@ -1,0 +1,10 @@
+# actionlint configuration, auto-discovered by bin/fm-lint-workflows.sh.
+#
+# The Linux and Herdr CI jobs target a self-hosted runner selected by the custom
+# label "haunt-dev" (alongside the built-in "self-hosted"). actionlint does not
+# know custom labels, so declare it here or every `runs-on: [self-hosted,
+# haunt-dev]` is flagged as an unknown label. See CONTRIBUTING.md "Validation and
+# CI" for what that runner is.
+self-hosted-runner:
+  labels:
+    - haunt-dev

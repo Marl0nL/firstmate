@@ -1,10 +1,15 @@
 name: CI
 
 # Manually triggered only. The full suite (lint, all behavior shards, Herdr
-# behavior, macOS snapshot, coverage guard) is expensive; run it deliberately
-# once a branch or PR is locally validated and ready for a pre-merge check,
-# not on every push/PR event. See CONTRIBUTING.md "Validation and CI" for the
-# local-gates-first flow and the exact trigger command.
+# behavior, the opt-in macOS snapshot, coverage guard) is expensive; run it
+# deliberately once a branch or PR is locally validated and ready for a
+# pre-merge check, not on every push/PR event. See CONTRIBUTING.md "Validation
+# and CI" for the local-gates-first flow and the exact trigger command.
+#
+# Runner split: the fast pure jobs (coverage guard, timing aggregate) run on the
+# self-hosted haunt-dev runner; lint and the stateful behavior/Herdr lanes stay
+# on ubuntu-latest on purpose, and the macOS snapshot is opt-in via
+# macos_snapshot. CONTRIBUTING.md "Where CI runs" owns why - patch it there.
 on:
   workflow_dispatch:
     inputs:
@@ -12,16 +17,33 @@ on:
         description: "Branch, tag, or PR ref to run the full suite against (e.g. a branch name or refs/pull/<number>/head)"
         required: false
         type: string
+      macos_snapshot:
+        description: "Run the 10x-billed macOS stock-Bash snapshot job (default: skip to save hosted minutes; enable when shell files changed)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+# The self-hosted runner is serial: cancel a superseded dispatch so a re-run
+# does not queue behind the run it replaces.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     name: Lint
+    # ubuntu-latest on purpose: fm-lint.sh runs ShellCheck extended analysis over
+    # the whole file set, which is too slow under the shared box's live-fleet load
+    # (it hit the 10-minute cap on the self-hosted runner). See CONTRIBUTING.md
+    # "Where CI runs". The fast pure jobs (coverage guard, timing aggregate) stay
+    # self-hosted.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ inputs.ref }}
       - name: Install pinned ShellCheck
@@ -45,9 +67,10 @@ jobs:
   # and that the portable serial CI shards partition that serial lane exactly.
   test-coverage:
     name: Test coverage guard
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, haunt-dev]
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ inputs.ref }}
       - name: Prove complete regression partition
@@ -57,12 +80,13 @@ jobs:
   # set only. Composition owner: bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
   tests-portable-parallel-1:
     name: Behavior portable parallel 1
+    # ubuntu-latest on purpose: stateful E2E, see CONTRIBUTING.md "Where CI runs".
     runs-on: ubuntu-latest
     # Measured shard wall is ~1 min of serial sum on proven scripts; this cap is
     # a hang tripwire with margin, not the expected healthy end of the lane.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
@@ -89,7 +113,7 @@ jobs:
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
       - name: Upload shard 1 timing artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fm-test-timing-portable-parallel-1
           path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-parallel-1.json
@@ -97,10 +121,11 @@ jobs:
 
   tests-portable-parallel-2:
     name: Behavior portable parallel 2
+    # ubuntu-latest on purpose: stateful E2E, see CONTRIBUTING.md "Where CI runs".
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
@@ -127,7 +152,7 @@ jobs:
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json"
       - name: Upload shard 2 timing artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fm-test-timing-portable-parallel-2
           path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-parallel-2.json
@@ -141,6 +166,7 @@ jobs:
   # whose "ofN" disagrees with it (docs/fm-test-portable-shards.md).
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
+    # ubuntu-latest on purpose: stateful E2E, see CONTRIBUTING.md "Where CI runs".
     runs-on: ubuntu-latest
     # Measured whole remainder is ~42 min of serial work; the balanced shards
     # are ~10.6 min each. Cap is a hang tripwire with roughly 2x margin, not the
@@ -152,7 +178,7 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
@@ -193,7 +219,7 @@ jobs:
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json"
       - name: Upload portable serial shard ${{ matrix.shard }} timing artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fm-test-timing-portable-serial-${{ matrix.shard }}
           path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial-${{ matrix.shard }}.json
@@ -205,6 +231,7 @@ jobs:
   # the failure evidence and move the job to macOS rather than skip assertions.
   tests-herdr:
     name: Behavior tests (Herdr)
+    # ubuntu-latest on purpose: stateful E2E, see CONTRIBUTING.md "Where CI runs".
     runs-on: ubuntu-latest
     # Healthy runs finish around 7 minutes. This job cap is a last-resort hang
     # tripwire, not the expected end of the lane. The family-run step owns the
@@ -212,7 +239,7 @@ jobs:
     # timing artifacts still uploaded (docs/fm-test-portable-shards.md).
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
@@ -314,7 +341,7 @@ jobs:
           }
       - name: Upload Herdr timing and diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fm-test-timing-herdr
           path: |
@@ -326,7 +353,8 @@ jobs:
   # Aggregate per-lane timing into one summary artifact for critical-path review.
   tests-timing-aggregate:
     name: Behavior timing aggregate
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, haunt-dev]
+    timeout-minutes: 10
     needs:
       - tests-portable-parallel-1
       - tests-portable-parallel-2
@@ -334,11 +362,11 @@ jobs:
       - tests-herdr
     if: always()
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ inputs.ref }}
       - name: Download lane timing artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: fm-test-timing-*
           path: ${{ runner.temp }}/fm-test-aggregate
@@ -358,7 +386,7 @@ jobs:
             "${inputs[@]}"
       - name: Upload aggregate timing artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fm-test-timing-aggregate
           path: ${{ runner.temp }}/fm-test/fm-test-timing-aggregate.json
@@ -366,10 +394,13 @@ jobs:
 
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
+    # 10x-billed hosted minutes: opt-in only. Enable with -f macos_snapshot=true
+    # when shell files that affect stock macOS Bash 3.2 compatibility changed.
+    if: ${{ inputs.macos_snapshot }}
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ inputs.ref }}
       - name: Run snapshot consumers with stock Bash

@@ -106,7 +106,7 @@ Its header and `--help` own the flags, family labels, lanes, and changed-file ma
 Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.
 Local no-mistakes Test stays intent-targeted and must not wire `commands.test` to `--all` or a `tests/*.test.sh` walk.
 Family selection is the ordinary local path; `--all` is deliberate full regression only.
-CI owns broad regression across required portable parallel shards, the portable serial lane's separate-runner shards, the Herdr lane, lint, the coverage guard, and stock macOS Bash compatibility in [`.github/workflows/ci.yml`](.github/workflows/ci.yml); see "Validation and CI" below for how and when that workflow runs.
+CI owns broad regression across required portable parallel shards, the portable serial lane's separate-runner shards, the Herdr lane, lint, the coverage guard, and, on an opt-in dispatch, stock macOS Bash compatibility in [`.github/workflows/ci.yml`](.github/workflows/ci.yml); see "Validation and CI" below for how and when that workflow runs, including the opt-in macOS job.
 Use `bin/fm-test-run.sh --list-lanes` for exact lane names and `--help` for `--jobs` rules and required gate-skip flags when reproducing a lane locally.
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so pass one to `bin/fm-test-run.sh` to focus on a subject with canonical timing output.
 A fixture may shorten a production timeout to keep a failure path prompt, but never below what the real work inside that window costs on a loaded machine: a fork, an exec, a lock acquisition, a beacon publication, or a first-poll check.
@@ -116,9 +116,28 @@ The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the
 
 ## Validation and CI
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) (lint, all behavior shards, the Herdr lane, macOS snapshot compatibility, and the coverage guard) is expensive and runs on `workflow_dispatch` only: nothing there is auto-triggered by a push or a pull request.
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) (lint, all behavior shards, the Herdr lane, the opt-in macOS snapshot, and the coverage guard) is expensive and runs on `workflow_dispatch` only: nothing there is auto-triggered by a push or a pull request.
 [`.github/workflows/repo-invariants.yml`](.github/workflows/repo-invariants.yml) stays auto-triggered because it is a single near-zero-cost job (a few seconds, no installs) that guards PR hygiene invariants an author could otherwise merge broken: the `AGENTS.md`/`CLAUDE.md` pointer, the `.claude/skills` symlink, and personal fleet paths staying untracked.
 [`.github/workflows/no-mistakes-required.yml`](.github/workflows/no-mistakes-required.yml) also stays auto-triggered; it enforces the delivery path above in either accepted attestation form and runs in seconds.
+
+### Where CI runs
+
+CI is split across a self-hosted runner and GitHub-hosted images to save Actions minutes without sacrificing reliability.
+
+The self-hosted runner (labels `self-hosted, haunt-dev`) runs the recurring, low-cost, stateless work: both auto-triggered workflows ([`repo-invariants.yml`](.github/workflows/repo-invariants.yml) and [`no-mistakes-required.yml`](.github/workflows/no-mistakes-required.yml), which is where the recurring hosted-minute cost came from), plus the two fast pure jobs in [`ci.yml`](.github/workflows/ci.yml) (the coverage guard and the timing aggregate, each a few seconds there).
+That runner is an unprivileged user on a VM: CI installs the pinned ShellCheck and actionlint into the runner-provided per-job temp (`$RUNNER_TEMP`), which the next job's checkout clean wipes - never into the runner user's home, never system-wide, never with `sudo`.
+The pinned lint tools stay pinned there rather than using the box's system ShellCheck, because [`bin/fm-lint.sh`](bin/fm-lint.sh) refuses any other version; the custom `haunt-dev` label is declared for actionlint in [`.github/actionlint.yaml`](.github/actionlint.yaml).
+The runner is serial, so `ci.yml` and `repo-invariants.yml` carry a `concurrency` cancel-in-progress group and every job has a `timeout-minutes`.
+If the runner is offline, its jobs queue until it is back - there is no fallback to a GitHub-hosted image.
+
+This repository is public, and a self-hosted runner beside the live fleet must never execute a fork's code, so the two auto-triggered workflows select their runner by expression: a pull request from a fork runs on `ubuntu-latest`, and only an internal pull request or push runs on the self-hosted runner.
+As defence in depth, keep both auto-triggered workflows executing only inline `run:` steps (never invoking `bin/` or `tests/` scripts) so that even an internal PR never runs repository code that a fork PR could have proposed, and the repository's Actions setting must require approval to run workflows for outside collaborators.
+
+`ci.yml`'s lint job and its stateful behavior and Herdr lanes (the portable parallel/serial shards and the real-Herdr lane) stay on `ubuntu-latest` on purpose.
+The self-hosted runner shares the VM with the live firstmate fleet running as a different user, so the stateful end-to-end lanes collide on machine-global paths (for example `/tmp/firstmate-herdr-presentation`, whose lock namespace must be owned by the current user) and get starved or OOM-killed under the box's load; lint stays hosted for the same load reason - its full-file-set ShellCheck extended analysis overran the timeout on the contended box, while it finishes quickly on a fresh hosted VM.
+`ci.yml` is manual-dispatch only and must stay reliable, so it runs those lanes on fresh single-tenant hosted VMs; a dedicated runner host not shared with the fleet would let them move to self-hosted later.
+The macOS snapshot job (`macos-latest`) bills at 10x, so it is opt-in: pass `-f macos_snapshot=true` on the `ci.yml` dispatch when shell files that affect stock macOS Bash 3.2 compatibility changed.
+The manual Windows Herdr spike ([`windows-herdr-spike.yml`](.github/workflows/windows-herdr-spike.yml)) stays on `windows-latest`.
 
 The intended flow for substantial changes:
 

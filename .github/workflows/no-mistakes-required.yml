@@ -21,7 +21,13 @@ concurrency:
 jobs:
   check:
     name: PR must be raised via no-mistakes
-    runs-on: ubuntu-latest
+    # Public repo + self-hosted runner: a fork PR must never execute on the
+    # haunt-dev box (it sits beside the live fleet). A cross-repo (fork) PR runs
+    # on ubuntu-latest; internal PRs run on the self-hosted runner.
+    # NOTE: do not use head.repo.fork - this repo is itself a fork of upstream,
+    # so that flag is true for every PR. Compare the head repo to the base repo.
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","haunt-dev"]') }}
+    timeout-minutes: 10
     if: >-
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
