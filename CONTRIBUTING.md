@@ -122,12 +122,19 @@ The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the
 
 ### Where CI runs
 
-The Linux and Herdr jobs in all three workflows above run on a self-hosted runner (labels `self-hosted, haunt-dev`), not GitHub-hosted images, because the account is out of Actions minutes.
-That runner is an unprivileged user on a VM with the box's own toolchain: the jobs assert the system `node` and `python3` versions rather than using `actions/setup-*`, and everything else CI installs (the pinned ShellCheck and actionlint, Herdr, Treehouse, and `tasks-axi`) goes into the runner-provided per-job temp (`$RUNNER_TEMP`), which the next job's checkout clean wipes - never into the runner user's home, never system-wide, never with `sudo`.
+CI is split across a self-hosted runner and GitHub-hosted images to save Actions minutes without sacrificing reliability.
+
+The self-hosted runner (labels `self-hosted, haunt-dev`) runs the recurring, low-cost, stateless work: both auto-triggered workflows ([`repo-invariants.yml`](.github/workflows/repo-invariants.yml) and [`no-mistakes-required.yml`](.github/workflows/no-mistakes-required.yml), which is where the recurring hosted-minute cost came from), plus the pure jobs in [`ci.yml`](.github/workflows/ci.yml) (lint, the coverage guard, and the timing aggregate).
+That runner is an unprivileged user on a VM: CI installs the pinned ShellCheck and actionlint into the runner-provided per-job temp (`$RUNNER_TEMP`), which the next job's checkout clean wipes - never into the runner user's home, never system-wide, never with `sudo`.
 The pinned lint tools stay pinned there rather than using the box's system ShellCheck, because [`bin/fm-lint.sh`](bin/fm-lint.sh) refuses any other version; the custom `haunt-dev` label is declared for actionlint in [`.github/actionlint.yaml`](.github/actionlint.yaml).
-Jobs run one at a time on the single runner, each with a `timeout-minutes` and a `concurrency` cancel-in-progress group so one hang or a superseded run cannot wedge CI.
-If the runner is offline, jobs queue until it is back - there is no fallback to a GitHub-hosted image.
-The macOS snapshot job (`macos-latest`) and the manual Windows Herdr spike (`windows-latest`) stay on GitHub-hosted images.
+The runner is serial, so `ci.yml` and `repo-invariants.yml` carry a `concurrency` cancel-in-progress group and every job has a `timeout-minutes`.
+If the runner is offline, its jobs queue until it is back - there is no fallback to a GitHub-hosted image.
+
+The stateful behavior and Herdr lanes in `ci.yml` (the portable parallel/serial shards and the real-Herdr lane) stay on `ubuntu-latest` on purpose.
+The self-hosted runner shares the VM with the live firstmate fleet running as a different user, so these end-to-end lanes collide on machine-global paths (for example `/tmp/firstmate-herdr-presentation`, whose lock namespace must be owned by the current user) and get starved or OOM-killed under the box's load.
+`ci.yml` is manual-dispatch only and must stay reliable, so it runs those lanes on fresh single-tenant hosted VMs; a dedicated runner host not shared with the fleet would let them move to self-hosted later.
+The macOS snapshot job (`macos-latest`) bills at 10x, so it is opt-in: pass `-f macos_snapshot=true` on the `ci.yml` dispatch when shell files that affect stock macOS Bash 3.2 compatibility changed.
+The manual Windows Herdr spike ([`windows-herdr-spike.yml`](.github/workflows/windows-herdr-spike.yml)) stays on `windows-latest`.
 
 The intended flow for substantial changes:
 
