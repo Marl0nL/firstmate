@@ -23,10 +23,13 @@ concurrency:
 jobs:
   invariants:
     name: Repo invariants
-    runs-on: [self-hosted, haunt-dev]
+    # Public repo + self-hosted runner: a fork PR must never execute on the
+    # haunt-dev box (it sits beside the live fleet). Fork PRs run on
+    # ubuntu-latest; internal PRs and pushes run on the self-hosted runner.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","haunt-dev"]') }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Compatibility pointers must stay intact
         run: |
           set -eu
