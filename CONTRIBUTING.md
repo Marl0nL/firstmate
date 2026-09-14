@@ -120,6 +120,15 @@ The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the
 [`.github/workflows/repo-invariants.yml`](.github/workflows/repo-invariants.yml) stays auto-triggered because it is a single near-zero-cost job (a few seconds, no installs) that guards PR hygiene invariants an author could otherwise merge broken: the `AGENTS.md`/`CLAUDE.md` pointer, the `.claude/skills` symlink, and personal fleet paths staying untracked.
 [`.github/workflows/no-mistakes-required.yml`](.github/workflows/no-mistakes-required.yml) also stays auto-triggered; it enforces the delivery path above in either accepted attestation form and runs in seconds.
 
+### Where CI runs
+
+The Linux and Herdr jobs in all three workflows above run on a self-hosted runner (labels `self-hosted, haunt-dev`), not GitHub-hosted images, because the account is out of Actions minutes.
+That runner is an unprivileged user on a VM with the box's own toolchain: the jobs assert the system `node` and `python3` versions rather than using `actions/setup-*`, and everything else CI installs (the pinned ShellCheck and actionlint, Herdr, Treehouse, and `tasks-axi`) goes into the runner-provided per-job temp (`$RUNNER_TEMP`), which the next job's checkout clean wipes - never into the runner user's home, never system-wide, never with `sudo`.
+The pinned lint tools stay pinned there rather than using the box's system ShellCheck, because [`bin/fm-lint.sh`](bin/fm-lint.sh) refuses any other version; the custom `haunt-dev` label is declared for actionlint in [`.github/actionlint.yaml`](.github/actionlint.yaml).
+Jobs run one at a time on the single runner, each with a `timeout-minutes` and a `concurrency` cancel-in-progress group so one hang or a superseded run cannot wedge CI.
+If the runner is offline, jobs queue until it is back - there is no fallback to a GitHub-hosted image.
+The macOS snapshot job (`macos-latest`) and the manual Windows Herdr spike (`windows-latest`) stay on GitHub-hosted images.
+
 The intended flow for substantial changes:
 
 1. Validate locally first: `bin/fm-lint.sh`, then the relevant `bin/fm-test-run.sh` selection (a family, `--changed`, or `--all` for a deliberate full local walk), then drive the change through the `no-mistakes` pipeline as described above.

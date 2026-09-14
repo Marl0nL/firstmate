@@ -14,10 +14,17 @@ on:
 permissions:
   contents: read
 
+# One serial self-hosted runner: cancel a superseded run for the same PR or
+# branch so a fresh push does not queue behind the run it replaces.
+concurrency:
+  group: repo-invariants-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   invariants:
     name: Repo invariants
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, haunt-dev]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - name: Compatibility pointers must stay intact
