@@ -24,9 +24,11 @@ jobs:
   invariants:
     name: Repo invariants
     # Public repo + self-hosted runner: a fork PR must never execute on the
-    # haunt-dev box (it sits beside the live fleet). Fork PRs run on
-    # ubuntu-latest; internal PRs and pushes run on the self-hosted runner.
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","haunt-dev"]') }}
+    # haunt-dev box (it sits beside the live fleet). A cross-repo (fork) PR runs
+    # on ubuntu-latest; internal PRs and pushes run on the self-hosted runner.
+    # NOTE: do not use head.repo.fork - this repo is itself a fork of upstream,
+    # so that flag is true for every PR. Compare the head repo to the base repo.
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","haunt-dev"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
