@@ -14,9 +14,9 @@ on:
 permissions:
   contents: read
 
-# The single firstmate runner on the farm VM serves this repo's self-hosted
-# jobs serially, so cancel a superseded run for the same PR or branch so a
-# fresh push does not queue behind the run it replaces.
+# The operator's self-hosted runner serves this repo's self-hosted jobs
+# serially, so cancel a superseded run for the same PR or branch so a fresh
+# push does not queue behind the run it replaces.
 concurrency:
   group: repo-invariants-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -25,11 +25,11 @@ jobs:
   invariants:
     name: Repo invariants
     # Public repo + self-hosted runner: a fork PR must never execute on the
-    # self-hosted farm runner. A cross-repo (fork) PR runs on ubuntu-latest;
+    # operator's self-hosted runner. A cross-repo (fork) PR runs on ubuntu-latest;
     # internal PRs and pushes run on the self-hosted runner.
     # NOTE: do not use head.repo.fork - this repo is itself a fork of upstream,
     # so that flag is true for every PR. Compare the head repo to the base repo.
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","haunt-dev"]') }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","firstmate-ci"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
