@@ -7,7 +7,7 @@ name: CI
 # and CI" for the local-gates-first flow and the exact trigger command.
 #
 # Runner split: the fast pure jobs (coverage guard, timing aggregate) run on the
-# self-hosted haunt-dev runner; lint and the stateful behavior/Herdr lanes stay
+# self-hosted farm runner (haunt-ci-fm); lint and the stateful behavior/Herdr lanes stay
 # on ubuntu-latest on purpose, and the macOS snapshot is opt-in via
 # macos_snapshot. CONTRIBUTING.md "Where CI runs" owns why - patch it there.
 on:
@@ -26,8 +26,9 @@ on:
 permissions:
   contents: read
 
-# The self-hosted runner is serial: cancel a superseded dispatch so a re-run
-# does not queue behind the run it replaces.
+# The single firstmate runner serves this repo's self-hosted jobs serially:
+# cancel a superseded dispatch so a re-run does not queue behind the run it
+# replaces.
 concurrency:
   group: ci-${{ github.workflow }}-${{ inputs.ref || github.ref }}
   cancel-in-progress: true
@@ -36,8 +37,8 @@ jobs:
   lint:
     name: Lint
     # ubuntu-latest on purpose: fm-lint.sh runs ShellCheck extended analysis over
-    # the whole file set, which is too slow under the shared box's live-fleet load
-    # (it hit the 10-minute cap on the self-hosted runner). See CONTRIBUTING.md
+    # the whole file set, which is too slow under the shared farm VM's contended
+    # load (it hit the 10-minute cap on the self-hosted runner). See CONTRIBUTING.md
     # "Where CI runs". The fast pure jobs (coverage guard, timing aggregate) stay
     # self-hosted.
     runs-on: ubuntu-latest
