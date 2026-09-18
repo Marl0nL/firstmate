@@ -1991,7 +1991,7 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
 # `agent_session`, `cwd`, `pane_id` and an `agent_status` of "idle" - for
 # agents that are not running at all. Verified live on the captain's host
 # (2026-07-20, herdr 0.7.4, protocol 16): three "idle" agents were listed,
-# two of them claiming cwd=/var/home/marlon/firstmate, and `pane get` plus
+# two of them claiming cwd=/var/home/you/firstmate, and `pane get` plus
 # `agent get` answered for all three, while the machine held exactly ONE live
 # claude process. `pane process-info` on each of those panes answered
 # {"error":{"code":"pane_not_found"}}, and on the one genuinely live pane it

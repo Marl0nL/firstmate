@@ -35,7 +35,7 @@ The shim ships in this repo but is never installed automatically: swapping the c
 
 Every command below uses absolute literal paths on purpose, including inside step 4.
 A step that depends on a shell variable silently produces a broken path when re-run in a fresh shell - that is exactly how the 2026-07-20 dangling-symlink outage happened (`data/learnings.md`): step 4 ran alone, later, with the variable set here long since unset, and `ln -sfn` created a symlink to a path that does not exist with no error at all.
-Substitute your own firstmate home if it is not `/var/home/marlon/firstmate`, but substitute a **literal path** in every step, never a variable.
+Substitute your own firstmate home if it is not `/var/home/you/firstmate`, but substitute a **literal path** in every step, never a variable.
 
 Run these as the captain, in order, in one shell, without skipping ahead.
 **Step 4 is the point of no return**: it replaces the captain's only `claude` launcher.
@@ -48,7 +48,7 @@ If it is ever run on its own - a fresh shell, a later day, pasted from history -
 #    the commands below it would then run unintentionally.
 mkdir -p ~/.config/firstmate
 printf 'home=%s\nreal=%s\nversions_dir=%s\n' \
-  "/var/home/marlon/firstmate" \
+  "/var/home/you/firstmate" \
   "$HOME/.local/bin/claude-real" \
   "$HOME/.local/share/claude/versions" \
   > ~/.config/firstmate/claude-shim.conf
@@ -61,8 +61,8 @@ cp -P ~/.local/bin/claude ~/.local/bin/claude-real
 
 # 4. Swap in the shim. `ln -sfn` replaces the symlink in one step.
 #    The guard fails loudly on a bad path instead of linking to nothing.
-test -f /var/home/marlon/firstmate/bin/fm-claude-shim.sh && \
-  ln -sfn /var/home/marlon/firstmate/bin/fm-claude-shim.sh ~/.local/bin/claude
+test -f /var/home/you/firstmate/bin/fm-claude-shim.sh && \
+  ln -sfn /var/home/you/firstmate/bin/fm-claude-shim.sh ~/.local/bin/claude
 ```
 
 Do not run step 4 until step 3 prints a version.
@@ -91,7 +91,7 @@ To disable the shim without uninstalling it, set `FM_CLAUDE_SHIM_DISABLE=1` in t
 # 1. From the firstmate home: the shim is active, resolves a real binary, and
 #    would inject. Expect `primary: yes`, `decision: inject`, and a `real:`
 #    path under ~/.local/share/claude/versions.
-cd /var/home/marlon/firstmate && claude --fm-shim-explain
+cd /var/home/you/firstmate && claude --fm-shim-explain
 
 # 2. From anywhere else: expect `primary: no` and `decision: passthrough`.
 cd /tmp && claude --fm-shim-explain
