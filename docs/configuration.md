@@ -174,6 +174,15 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Operator-private denylist (config/public-denylist)
+
+`config/public-denylist` is an optional local, gitignored file listing operator-private strings that must never appear in tracked files - for example an operator's own host, machine, or account names in a repository that ships publicly.
+It holds one case-insensitive substring per line; blank lines and lines beginning with `#` are ignored.
+When the file is present, [`bin/fm-lint.sh`](../bin/fm-lint.sh) runs [`bin/fm-lint-denylist.sh`](../bin/fm-lint-denylist.sh) as part of its default (no-explicit-path) lint and fails when any tracked file contains one of those substrings, so a routine local lint or the pre-push gate catches a private string before it is pushed.
+The file never ships because it is gitignored, so on a fresh clone, in CI, or in any home that has not created it the check is a silent no-op; it exists only to protect an operator's own pushes.
+It is per home and is not inherited by secondmate homes.
+[`bin/fm-lint-denylist.sh`](../bin/fm-lint-denylist.sh) owns the exact matching mechanics and the file path.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.

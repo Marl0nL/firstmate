@@ -18,6 +18,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LINT="$ROOT/bin/fm-lint.sh"
+DENYLIST="$ROOT/bin/fm-lint-denylist.sh"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
@@ -994,6 +995,94 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
+# fm_denylist_scratch: create an isolated scratch git repo with one committed
+# tracked file that contains the marker string "Acme-Corp", and print its path.
+# bin/fm-lint-denylist.sh resolves its target repo and denylist from the current
+# working directory, so these tests run it from inside this throwaway repo and
+# never touch the real tree.
+fm_denylist_scratch() {
+  local dir
+  dir=$(fm_test_tmproot fm-lint-denylist)
+  git -C "$dir" init -q
+  git -C "$dir" config user.email test@example.com
+  git -C "$dir" config user.name test
+  mkdir -p "$dir/config"
+  printf 'contact: Acme-Corp operations\nother tracked content\n' > "$dir/tracked.txt"
+  git -C "$dir" add tracked.txt
+  git -C "$dir" commit -q -m init
+  printf '%s\n' "$dir"
+}
+
+test_denylist_absent_is_a_silent_noop() {
+  local dir out rc
+  dir=$(fm_denylist_scratch)
+  rc=0
+  out=$(cd "$dir" && "$DENYLIST" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "an absent denylist must exit 0, got $rc"$'\n'"$out"
+  [ -z "$out" ] || fail "an absent denylist must produce no output"$'\n'"$out"
+  pass "fm-lint-denylist.sh is a silent no-op when config/public-denylist is absent"
+}
+
+test_denylist_clean_tree_passes() {
+  local dir out rc
+  dir=$(fm_denylist_scratch)
+  printf 'zzz-not-present-token-9f3\n' > "$dir/config/public-denylist"
+  rc=0
+  out=$(cd "$dir" && "$DENYLIST" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a denylist with no tracked match must exit 0, got $rc"$'\n'"$out"
+  pass "fm-lint-denylist.sh passes when no tracked file matches the denylist"
+}
+
+test_denylist_matching_tracked_string_fails() {
+  local dir out rc
+  dir=$(fm_denylist_scratch)
+  printf 'Acme-Corp\n' > "$dir/config/public-denylist"
+  rc=0
+  out=$(cd "$dir" && "$DENYLIST" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "a denylisted string in a tracked file must exit 1, got $rc"$'\n'"$out"
+  assert_contains "$out" "Acme-Corp" "the failure did not name the matching pattern"
+  assert_contains "$out" "tracked.txt" "the failure did not name the offending tracked file"
+  pass "fm-lint-denylist.sh fails and names the file when a tracked file carries a denylisted string"
+}
+
+test_denylist_matching_is_case_insensitive() {
+  local dir out rc
+  dir=$(fm_denylist_scratch)
+  # The tracked file contains "Acme-Corp"; the denylist spells it differently.
+  printf 'ACME-CORP\n' > "$dir/config/public-denylist"
+  rc=0
+  out=$(cd "$dir" && "$DENYLIST" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "denylist matching must be case-insensitive, got exit $rc"$'\n'"$out"
+  pass "fm-lint-denylist.sh matches denylisted strings case-insensitively"
+}
+
+test_denylist_ignores_blank_lines() {
+  local dir out rc
+  dir=$(fm_denylist_scratch)
+  # A blank line must never become an empty fixed string, which would otherwise
+  # match every tracked file and fail spuriously.
+  printf '\n\nzzz-not-present-token-9f3\n\n' > "$dir/config/public-denylist"
+  rc=0
+  out=$(cd "$dir" && "$DENYLIST" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "blank denylist lines must not match every tracked file, got exit $rc"$'\n'"$out"
+  pass "fm-lint-denylist.sh ignores blank denylist lines instead of matching everything"
+}
+
+test_denylist_ignores_comment_lines() {
+  local dir out rc
+  dir=$(fm_denylist_scratch)
+  # A tracked file that literally contains the commented text, so honoring the
+  # comment (skip) passes, while treating the line as a pattern would match.
+  printf 'literal marker #Acme-Corp appears here\n' > "$dir/marker.txt"
+  git -C "$dir" add marker.txt
+  git -C "$dir" commit -q -m marker
+  printf '#Acme-Corp\n' > "$dir/config/public-denylist"
+  rc=0
+  out=$(cd "$dir" && "$DENYLIST" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a #-prefixed denylist line must be a comment, not a pattern, got exit $rc"$'\n'"$out"
+  pass "fm-lint-denylist.sh treats a #-prefixed denylist line as a comment"
+}
+
 test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
 test_fast_mode_disables_extended_analysis
@@ -1021,3 +1110,9 @@ test_main_branch_forces_full_lint
 test_explicit_path_bypasses_changed_logic
 test_zero_changed_files_exits_clean
 test_list_files_respects_changed_mode
+test_denylist_absent_is_a_silent_noop
+test_denylist_clean_tree_passes
+test_denylist_matching_tracked_string_fails
+test_denylist_matching_is_case_insensitive
+test_denylist_ignores_blank_lines
+test_denylist_ignores_comment_lines

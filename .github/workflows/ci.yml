@@ -7,7 +7,7 @@ name: CI
 # and CI" for the local-gates-first flow and the exact trigger command.
 #
 # Runner split: the fast pure jobs (coverage guard, timing aggregate) run on the
-# self-hosted farm runner (haunt-ci-fm); lint and the stateful behavior/Herdr lanes stay
+# operator's self-hosted runner; lint and the stateful behavior/Herdr lanes stay
 # on ubuntu-latest on purpose, and the macOS snapshot is opt-in via
 # macos_snapshot. CONTRIBUTING.md "Where CI runs" owns why - patch it there.
 on:
@@ -26,9 +26,9 @@ on:
 permissions:
   contents: read
 
-# The single firstmate runner serves this repo's self-hosted jobs serially:
-# cancel a superseded dispatch so a re-run does not queue behind the run it
-# replaces.
+# The operator's self-hosted runner serves this repo's self-hosted jobs
+# serially: cancel a superseded dispatch so a re-run does not queue behind the
+# run it replaces.
 concurrency:
   group: ci-${{ github.workflow }}-${{ inputs.ref || github.ref }}
   cancel-in-progress: true
@@ -37,8 +37,8 @@ jobs:
   lint:
     name: Lint
     # ubuntu-latest on purpose: fm-lint.sh runs ShellCheck extended analysis over
-    # the whole file set, which is too slow under the shared farm VM's contended
-    # load (it hit the 10-minute cap on the self-hosted runner). See CONTRIBUTING.md
+    # the whole file set, which is too slow on the operator's self-hosted runner
+    # under contended load (it hit the 10-minute cap there). See CONTRIBUTING.md
     # "Where CI runs". The fast pure jobs (coverage guard, timing aggregate) stay
     # self-hosted.
     runs-on: ubuntu-latest
@@ -68,7 +68,7 @@ jobs:
   # and that the portable serial CI shards partition that serial lane exactly.
   test-coverage:
     name: Test coverage guard
-    runs-on: [self-hosted, haunt-dev]
+    runs-on: [self-hosted, firstmate-ci]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -354,7 +354,7 @@ jobs:
   # Aggregate per-lane timing into one summary artifact for critical-path review.
   tests-timing-aggregate:
     name: Behavior timing aggregate
-    runs-on: [self-hosted, haunt-dev]
+    runs-on: [self-hosted, firstmate-ci]
     timeout-minutes: 10
     needs:
       - tests-portable-parallel-1
