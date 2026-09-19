@@ -1040,9 +1040,30 @@ test_denylist_matching_tracked_string_fails() {
   rc=0
   out=$(cd "$dir" && "$DENYLIST" 2>&1) || rc=$?
   [ "$rc" -eq 1 ] || fail "a denylisted string in a tracked file must exit 1, got $rc"$'\n'"$out"
-  assert_contains "$out" "Acme-Corp" "the failure did not name the matching pattern"
-  assert_contains "$out" "tracked.txt" "the failure did not name the offending tracked file"
-  pass "fm-lint-denylist.sh fails and names the file when a tracked file carries a denylisted string"
+  # The matched string must never appear in the output: this guard's output
+  # flows into no-mistakes logs and review agents, so echoing the string would
+  # be the exact leak the guard exists to prevent. It reports file:line and a
+  # count instead, and names the offending denylist entry by its line number.
+  assert_not_contains "$out" "Acme-Corp" "the failure output must not echo the matched string"
+  assert_contains "$out" "tracked.txt:1" "the failure did not name the offending file and line"
+  assert_contains "$out" "entry #1" "the failure did not identify the denylist entry by line number"
+  pass "fm-lint-denylist.sh fails with file:line and a count, never echoing the matched string"
+}
+
+# The offending denylist entry is identified by its 1-based line number in
+# config/public-denylist, so comment and blank lines still count toward the
+# reported entry number rather than shifting it.
+test_denylist_reports_entry_line_number() {
+  local dir out rc
+  dir=$(fm_denylist_scratch)
+  # Entry on line 3: a comment, a blank line, then the matching pattern.
+  printf '# operator strings\n\nAcme-Corp\n' > "$dir/config/public-denylist"
+  rc=0
+  out=$(cd "$dir" && "$DENYLIST" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "a matching entry must exit 1, got $rc"$'\n'"$out"
+  assert_not_contains "$out" "Acme-Corp" "the failure output must not echo the matched string"
+  assert_contains "$out" "entry #3" "the failure did not report the denylist entry's true line number"
+  pass "fm-lint-denylist.sh identifies the offending entry by its true denylist line number"
 }
 
 test_denylist_matching_is_case_insensitive() {
@@ -1083,6 +1104,115 @@ test_denylist_ignores_comment_lines() {
   pass "fm-lint-denylist.sh treats a #-prefixed denylist line as a comment"
 }
 
+# The guard must match TRACKED files only. An untracked (but not ignored) file
+# carrying a denylisted string must not fail the guard, or it would flag work
+# the operator has not committed. The scratch repo here gitignores config/ (as
+# the real repo does), so the denylist file itself is never an untracked
+# self-match either.
+test_denylist_ignores_untracked_files() {
+  local dir out rc
+  # A fresh repo whose only committed file is clean, so the sole occurrence of
+  # the denylisted string is in an untracked, non-ignored file.
+  dir=$(fm_test_tmproot fm-lint-denylist-untracked)
+  git -C "$dir" init -q
+  git -C "$dir" config user.email test@example.com
+  git -C "$dir" config user.name test
+  mkdir -p "$dir/config"
+  printf 'config/\n' > "$dir/.gitignore"
+  printf 'clean committed content\n' > "$dir/tracked.txt"
+  git -C "$dir" add .gitignore tracked.txt
+  git -C "$dir" commit -q -m init
+  # An untracked, non-ignored file that carries the denylisted string.
+  printf 'Acme-Corp lives only in an uncommitted scratch file\n' > "$dir/scratch.txt"
+  printf 'Acme-Corp\n' > "$dir/config/public-denylist"
+  rc=0
+  out=$(cd "$dir" && "$DENYLIST" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "an untracked file carrying a denylisted string must not fail the guard, got exit $rc"$'\n'"$out"
+  pass "fm-lint-denylist.sh ignores untracked files and only flags tracked ones"
+}
+
+# fm_lint_wiring_scratch: a real scratch git repo with config/ gitignored and a
+# committed tracked file carrying the marker string, for the fm-lint.sh wiring
+# tests below. The guard reads real git state, so these tests exercise the real
+# repo rather than a git stub.
+fm_lint_wiring_scratch() {
+  local dir
+  dir=$(fm_test_tmproot fm-lint-denylist-wiring)
+  git -C "$dir" init -q
+  git -C "$dir" config user.email test@example.com
+  git -C "$dir" config user.name test
+  mkdir -p "$dir/config"
+  printf 'config/\n' > "$dir/.gitignore"
+  printf 'contact: Acme-Corp operations\n' > "$dir/tracked.txt"
+  git -C "$dir" add .gitignore tracked.txt
+  git -C "$dir" commit -q -m init
+  printf '%s\n' "$dir"
+}
+
+# fm_lint_wiring_git_stub <fakebin-dir> <scratch-repo>: a git stub for the
+# wiring tests below. It answers the mode-selection subcommands fm-lint.sh
+# consults so the run reaches the changed-mode "no changed lint targets" early
+# exit (empty diff), and it points the denylist guard at the scratch repo:
+# fm-lint.sh cd's to its own repo root at startup, so `rev-parse --show-toplevel`
+# is answered with the scratch path, while `git -C <scratch> grep` (and any
+# other call) passes through to real git so the guard reads the scratch repo's
+# real, committed contents. fm-lint.sh never calls show-toplevel itself, so
+# overriding it steers only the guard.
+fm_lint_wiring_git_stub() {
+  local fakebin=$1 scratch=$2 realgit
+  realgit=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  "rev-parse --is-inside-work-tree") printf 'true\n'; exit 0 ;;
+  "rev-parse --abbrev-ref HEAD") printf 'feature\n'; exit 0 ;;
+  "rev-parse --verify -q origin/main") exit 0 ;;
+  "rev-parse --verify -q main") exit 0 ;;
+  "rev-parse --show-toplevel") printf '%s\n' "$scratch"; exit 0 ;;
+  "merge-base "*) printf 'fakebase123\n'; exit 0 ;;
+  "diff --name-only --diff-filter=ACMR -z "*) exit 0 ;;
+  *) exec "$realgit" "\$@" ;;
+esac
+SH
+  chmod +x "$fakebin/git"
+}
+
+# Kills the M1b mutant: a fm_lint_run_denylist body that returns 0 without ever
+# calling the guard. Nothing else proves fm-lint.sh's default run actually wires
+# the guard in, so without this test the wiring can silently rot.
+test_lint_default_run_invokes_the_denylist_guard() {
+  local dir fakebin out rc
+  dir=$(fm_lint_wiring_scratch)
+  fakebin=$(fm_fakebin "$dir")
+  fm_lint_wiring_git_stub "$fakebin" "$dir"
+  printf 'Acme-Corp\n' > "$dir/config/public-denylist"
+  rc=0
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' "$LINT" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "fm-lint.sh's default run must fail when a tracked file carries a denylisted string; the guard is not wired in"$'\n'"$out"
+  assert_contains "$out" "public-denylist" "the failing run did not surface the denylist guard"
+  assert_not_contains "$out" "Acme-Corp" "fm-lint.sh leaked the matched string through the denylist guard"
+  pass "fm-lint.sh's default run invokes the denylist guard"
+}
+
+# The complementary half: with no denylist file, the wired guard is inert and
+# the same default run is clean, so the wiring test above is failing on the
+# denylist match and not on some unrelated scratch-repo condition.
+test_lint_default_run_is_inert_without_a_denylist() {
+  local dir fakebin out rc
+  dir=$(fm_lint_wiring_scratch)
+  fakebin=$(fm_fakebin "$dir")
+  fm_lint_wiring_git_stub "$fakebin" "$dir"
+  # No config/public-denylist present.
+  rc=0
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "fm-lint.sh's default run must be clean when no denylist exists, got $rc"$'\n'"$out"
+  assert_contains "$out" "no changed lint targets" \
+    "the run did not reach the early-exit path that invokes the denylist guard"
+  pass "fm-lint.sh's default run leaves the denylist guard inert when no denylist exists"
+}
+
 test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
 test_fast_mode_disables_extended_analysis
@@ -1113,6 +1243,10 @@ test_list_files_respects_changed_mode
 test_denylist_absent_is_a_silent_noop
 test_denylist_clean_tree_passes
 test_denylist_matching_tracked_string_fails
+test_denylist_reports_entry_line_number
 test_denylist_matching_is_case_insensitive
 test_denylist_ignores_blank_lines
 test_denylist_ignores_comment_lines
+test_denylist_ignores_untracked_files
+test_lint_default_run_invokes_the_denylist_guard
+test_lint_default_run_is_inert_without_a_denylist
