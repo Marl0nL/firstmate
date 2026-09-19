@@ -38,7 +38,9 @@ denylist="$top/config/public-denylist"
 [ -f "$denylist" ] || exit 0
 
 rc=0
+lineno=0
 while IFS= read -r pattern || [ -n "$pattern" ]; do
+  lineno=$((lineno + 1))
   case "$pattern" in
     ''|'#'*) continue ;;
   esac
@@ -49,14 +51,23 @@ while IFS= read -r pattern || [ -n "$pattern" ]; do
     *) continue ;;
   esac
   # git grep searches tracked files in the working tree. -I skips binary files,
-  # -l lists matching paths, -i is case-insensitive, -F is a fixed substring,
-  # and -e protects a pattern that begins with a dash.
-  if hits=$(git -C "$top" grep -I -l -i -F -e "$pattern" 2>/dev/null) && [ -n "$hits" ]; then
+  # -n reports each hit as path:linenumber:content, -i is case-insensitive, -F
+  # is a fixed substring, and -e protects a pattern that begins with a dash.
+  #
+  # The report deliberately keeps only path:linenumber and a count. It never
+  # echoes the matched string or the matched line, because this guard's output
+  # flows into the no-mistakes pre-push gate's logs and review agents, and from
+  # there potentially into public PR text - which is the exact leak this guard
+  # exists to prevent. It identifies the offending denylist entry by its line
+  # number in config/public-denylist rather than by its content.
+  if raw=$(git -C "$top" grep -I -n -i -F -e "$pattern" 2>/dev/null) && [ -n "$raw" ]; then
+    locations=$(printf '%s\n' "$raw" | awk -F: '{ print $1 ":" $2 }')
+    count=$(printf '%s\n' "$locations" | wc -l | tr -d '[:space:]')
     if [ "$rc" -eq 0 ]; then
-      printf 'fm-lint-denylist.sh: strings from config/public-denylist appear in tracked files:\n' >&2
+      printf 'fm-lint-denylist.sh: entries from config/public-denylist appear in tracked files (matched strings withheld):\n' >&2
     fi
-    printf '  pattern %s:\n' "$pattern" >&2
-    printf '%s\n' "$hits" | sed 's/^/    /' >&2
+    printf '  denylist entry #%d: %s match(es)\n' "$lineno" "$count" >&2
+    printf '%s\n' "$locations" | sed 's/^/    /' >&2
     rc=1
   fi
 done < "$denylist"
