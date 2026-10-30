@@ -236,10 +236,14 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
-# A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent still surfaces once; a
-# secondmate earns the cadence on its declaration alone, because its endpoint
-# liveness is deliberately never read (pause_state_class owns that split).
+# A `paused:` declaration maps to a confident current-state `paused` verdict, so it
+# takes this bounded cadence whether its agent is live or exited - matching how away
+# mode already treats it.
+# A `captain-held` transfer has no current-state mapping (it reads as `none`), so
+# there the split applies: a confidently exited agent recovers the cadence while a
+# live or ambiguously read agent still surfaces once; a secondmate earns the cadence
+# on its declaration alone, because its endpoint liveness is deliberately never read
+# (pause_state_class owns that split).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -850,9 +854,20 @@ clear_pause_tracking() {  # <window-key>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# After fm-crew-state has fallen back to stopped or unknown, paused classification is
-# recovered only for a confidently dead ordinary crew, or for a secondmate, whose
-# endpoint liveness this function deliberately never reads.
+# A `paused:` declaration maps to a confident crew-state `paused` verdict
+# (fm-crew-state folds run-step/pane/status-log into one state), so it IS the
+# declared wait itself and takes the bounded re-surface cadence whether its agent is
+# live or exited - exactly as the away-mode daemon already treats it.
+# The liveness split below exists only for the RECOVERY case: a captain-held
+# transfer has no current-state mapping and arrives as `none`, so a confidently dead
+# ordinary crew (which cannot contradict the held line) or a secondmate (whose
+# endpoint liveness is deliberately never read) recovers the bounded cadence, while a
+# LIVE ordinary crew there is surfaced once - it may be at a decision the held line
+# cannot express, or wedged behind a stale line.
+# The captain's priority holds throughout: a false alarm on a legitimately-stopped
+# crew is acceptable but a missed one is not, so neither a terminal verb nor a
+# confirmed-dead agent is ever silenced, and the bounded cadence is finite, never a
+# silence.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive kind
   key=$(window_key "$win")
@@ -863,10 +878,16 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
-  # Read once past the declared-wait gate and reused by both liveness gates below,
-  # so a mate's stale poll costs one metadata scan rather than one per gate, and the
-  # far more common no-declaration path above still costs none.
+  # Read once past the declared-wait gate and reused below, so a declared-wait stale
+  # poll costs one metadata scan rather than one per gate, and the far more common
+  # no-declaration path above still costs none.
   kind=$(window_kind "$win")
+  # Fast path for a recently RECOVERED hold - the only case that writes the recheck
+  # marker below. Re-verify liveness cheaply instead of re-reading crew state: a dead
+  # ordinary crew or a secondmate stays on the bounded cadence, while a recovered
+  # ordinary crew whose agent came back alive is surfaced so its resumed-but-
+  # unclassified state is seen. A confident `paused` verdict never writes the marker,
+  # so it always falls through to the authoritative read below.
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$kind" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
@@ -885,6 +906,21 @@ pause_state_class() {  # <window> <task>
     printf 'working'
     return
   fi
+  if [ "$class" = paused ]; then
+    # Authoritative crew state confidently names the declared wait, so honor it on
+    # the bounded cadence directly, live or dead. No liveness recheck shortcut is
+    # owed (crew state keeps reporting it), so leave the recheck marker unset - it
+    # belongs only to the recovery branch below.
+    rm -f "$recheck_file"
+    printf 'paused'
+    return
+  fi
+  # class is `none`: authoritative crew state could not name a state, yet a
+  # paused:/held: line stands. Recover the bounded cadence ONLY where no live
+  # decision gate is being silenced - a confidently dead ordinary crew, or a
+  # secondmate whose endpoint liveness is deliberately never read. A LIVE ordinary
+  # crew here is surfaced instead, because without this a mate's captain hold would
+  # be silenced by every caller and a forgotten hold would rot invisibly.
   if [ "$kind" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
@@ -893,20 +929,10 @@ pause_state_class() {  # <window> <task>
       return
     fi
   fi
-  # Recover paused classification for a declared wait that authoritative crew state
-  # could not name. Reaching here already proves the only two admissible cases: an
-  # ordinary crew whose agent the gate above confirmed dead, so no live decision gate
-  # is being silenced, or a secondmate, whose endpoint liveness is deliberately never
-  # read and so cannot supply that confirmation. Without the mate case a mate's
-  # captain hold - which has no current-state mapping and so arrives as `none` -
-  # would be silenced by every caller rather than taking the bounded re-surface
-  # cadence, and a forgotten hold would rot invisibly.
-  [ "$class" = none ] && class=paused
-  case "$class" in
-    paused) date +%s > "$recheck_file" ;;
-    *) rm -f "$recheck_file" ;;
-  esac
-  printf '%s' "$class"
+  # Recovered hold: record the recheck marker so the fast path above can re-verify
+  # liveness cheaply on the next poll without re-reading crew state.
+  date +%s > "$recheck_file"
+  printf 'paused'
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
