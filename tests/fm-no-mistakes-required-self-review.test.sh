@@ -7,7 +7,8 @@
 # exercise. The second form is a self-review attestation whose head_sha must
 # equal the PR's current head sha plus a visible "## Self-review" section; the
 # workflow's "self-review" step judges it with inline shell that consumes only
-# PR_BODY/PR_AUTHOR/PR_NUMBER/PR_HEAD_SHA and writes accepted=true|false to
+# PR_BODY/PR_AUTHOR/PR_NUMBER/PR_HEAD_SHA plus the PR's head repository,
+# base repository and author association, and writes accepted=true|false to
 # GITHUB_OUTPUT. A valid attestation skips the action; a body carrying the
 # no-mistakes signature or no self-review marker defers to it; a present but
 # invalid attestation fails the step. These tests extract that step's script
@@ -21,6 +22,9 @@
 # placeholder example (valid JSON) before the genuine comment once made a
 # first-match scan reject a compliant PR, so the scan prefers the candidate
 # bound to the PR head.
+# The self-review form is honored only for a PR from the base repository or by
+# an OWNER, MEMBER, or COLLABORATOR; any other PR defers to the action even
+# with a valid or invalid attestation, so an outside author cannot self-attest.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -71,10 +75,15 @@ EOF
 # run_gate <body>: execute the extracted step as the runner does. Sets
 # GATE_OUT (combined output), GATE_STATUS (exit code), and GATE_VERDICT (the
 # accepted= value written to GITHUB_OUTPUT, empty when none was written).
+# The PR comes from the base repository unless GATE_HEAD_REPO or
+# GATE_ASSOCIATION say otherwise.
+BASE_REPO='fmtest/firstmate'
 run_gate() {
   local out_file="$TMP/github-output"
   : > "$out_file"
   GATE_OUT=$(PR_BODY="$1" PR_AUTHOR=fmtest PR_NUMBER=48 PR_HEAD_SHA="$HEAD_SHA" \
+    PR_HEAD_REPO="${GATE_HEAD_REPO-$BASE_REPO}" PR_BASE_REPO="$BASE_REPO" \
+    PR_AUTHOR_ASSOCIATION="${GATE_ASSOCIATION-NONE}" \
     GITHUB_OUTPUT="$out_file" bash "$GATE" 2>&1)
   GATE_STATUS=$?
   GATE_VERDICT=$(sed -n 's/^accepted=//p' "$out_file" | tail -1)
@@ -243,7 +252,58 @@ $MULTILINE_ATTESTATION" | sed 's/$/\r/')"
   pass "a CRLF-terminated multi-line self-review attestation reaches the same accepted verdict"
 }
 
+test_outside_pr_attestation_defers_to_the_action() {
+  local assoc
+  for assoc in NONE CONTRIBUTOR FIRST_TIME_CONTRIBUTOR ''; do
+    GATE_HEAD_REPO='outsider/firstmate' GATE_ASSOCIATION="$assoc" run_gate "$SECTION
+
+$ATTESTATION"
+    expect_deferred "a valid attestation on an outside PR (association '${assoc}')"
+    assert_contains "$GATE_OUT" "honored only for a PR from this repository" \
+      "the outside-PR deferral does not say why the attestation was ignored"
+    GATE_HEAD_REPO='outsider/firstmate' GATE_ASSOCIATION="$assoc" run_gate "$SECTION
+
+$STALE_ATTESTATION"
+    expect_deferred "a stale attestation on an outside PR (association '${assoc}')"
+  done
+  # A deleted head repository arrives as an empty name and is never trusted.
+  GATE_HEAD_REPO='' run_gate "$SECTION
+
+$ATTESTATION"
+  expect_deferred "a valid attestation whose head repository is unknown"
+  pass "an outside PR's self-review attestation is ignored and the no-mistakes action judges it"
+}
+
+test_trusted_association_on_an_outside_pr_is_accepted() {
+  local assoc
+  for assoc in OWNER MEMBER COLLABORATOR; do
+    GATE_HEAD_REPO='outsider/firstmate' GATE_ASSOCIATION="$assoc" run_gate "$SECTION
+
+$ATTESTATION"
+    expect_accepted "a valid attestation from a cross-repository ${assoc}"
+  done
+  pass "an owner, member, or collaborator's cross-repository PR may use the self-review form"
+}
+
+# N5: a body-supplied head_sha carrying a newline must not start a new
+# workflow-command line when the stale diagnostic prints it.
+test_stale_diagnostic_strips_line_breaks() {
+  run_gate "$SECTION
+
+${PREFIX}{\"head_sha\":\"${STALE_SHA}\\n::warning::injected\\r\",\"reviewer\":\"r\",\"evidence\":\"e\"} -->"
+  expect_rejected "a head_sha carrying CR/LF" "Self-review attestation is stale"
+  if printf '%s\n' "$GATE_OUT" | grep -q '^::warning::'; then
+    fail "a head_sha carrying a newline injected a workflow-command line: $GATE_OUT"
+  fi
+  assert_contains "$GATE_OUT" "bound to ${STALE_SHA}::warning::injected but" \
+    "the stale diagnostic did not print the head_sha with its line breaks removed"
+  pass "the stale diagnostic prints a body-supplied head_sha without CR/LF"
+}
+
 fm_test_run \
+  test_outside_pr_attestation_defers_to_the_action \
+  test_trusted_association_on_an_outside_pr_is_accepted \
+  test_stale_diagnostic_strips_line_breaks \
   test_head_bound_attestation_is_accepted \
   test_bare_body_defers_and_names_the_self_review_form \
   test_pipeline_body_is_judged_by_the_action_alone \

@@ -16,6 +16,7 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
 
 This fork's check also accepts a second form for work shipped as a direct PR after a careful review of the exact head commit: a visible `## Self-review` section saying what was checked, plus one HTML comment of the form `<!-- self-review-attestation:v1 {"head_sha":"<full 40-char sha>","reviewer":"<who/what reviewed>","evidence":"<one line: what was run>"} -->` with all three keys non-empty.
 Its `head_sha` must equal the PR's current head sha, so any push after the review turns the check red until someone re-reviews the new head and updates the attestation.
+The self-review form is honored only for a PR from this repository or by an owner, member, or collaborator; any other PR falls through to the pipeline attestation even when it carries one, because whoever edits the body could otherwise attest their own work.
 The JSON payload may be single-line or pretty-printed, as long as the closing ` -->` stays on the same line as the payload's last character.
 A body carrying the no-mistakes signature is judged by the pipeline attestation alone, a body without the self-review marker falls through to it, and a present but invalid self-review attestation fails; there is no label or other bypass beyond these two forms.
 

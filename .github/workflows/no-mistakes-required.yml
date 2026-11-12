@@ -35,6 +35,9 @@ jobs:
     steps:
       # A second accepted form for direct PRs: a self-review attestation bound
       # to the PR's current head sha plus a visible "## Self-review" section.
+      # It is honored only for a PR from this repository or by an OWNER,
+      # MEMBER, or COLLABORATOR; anyone else's PR defers to the no-mistakes
+      # action, since whoever edits the body could otherwise self-attest.
       # A valid one satisfies this check on its own and skips the no-mistakes
       # action below. A body carrying the no-mistakes signature, or no
       # self-review marker at all, defers to that action unchanged; a present
@@ -49,6 +52,9 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_REPO: ${{ github.repository }}
+          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
         run: |
           set -eu
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
@@ -87,6 +93,18 @@ jobs:
               exit 0
               ;;
           esac
+          trusted=0
+          if [ -n "${PR_HEAD_REPO:-}" ] && [ "${PR_HEAD_REPO:-}" = "${PR_BASE_REPO:-}" ]; then
+            trusted=1
+          fi
+          case "${PR_AUTHOR_ASSOCIATION:-}" in
+            OWNER|MEMBER|COLLABORATOR) trusted=1 ;;
+          esac
+          if [ "$trusted" -ne 1 ]; then
+            echo "::notice::PR #${PR_NUMBER} carries a self-review attestation, but that form is honored only for a PR from this repository or by an owner, member, or collaborator, so the no-mistakes pipeline attestation check judges it."
+            verdict false
+            exit 0
+          fi
           echo "Found self-review attestation marker in PR #${PR_NUMBER} body."
           command -v jq >/dev/null 2>&1 \
             || reject "This check requires jq to parse the self-review attestation, but jq was not found on the runner."
@@ -152,7 +170,10 @@ jobs:
           fi
           attested_sha=$(printf '%s' "$json" | jq -r '.head_sha')
           if [ "$attested_sha" != "$PR_HEAD_SHA" ]; then
-            reject "Self-review attestation is stale: the PR head moved. The attestation is bound to ${attested_sha} but the PR head is now ${PR_HEAD_SHA}." \
+            # Printed without CR/LF so a body-supplied value cannot start a
+            # new workflow-command line in the log.
+            shown_sha=$(printf '%s' "$attested_sha" | tr -d '\r\n')
+            reject "Self-review attestation is stale: the PR head moved. The attestation is bound to ${shown_sha} but the PR head is now ${PR_HEAD_SHA}." \
               "" "A self-review covers exactly the commit it names. Commits pushed after" \
               "the review are unreviewed until someone re-reviews the new head and" \
               "updates the attestation's head_sha to ${PR_HEAD_SHA}."
