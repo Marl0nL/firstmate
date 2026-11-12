@@ -2165,6 +2165,61 @@ test_denylist_ignores_untracked_files() {
   pass "fm-lint-denylist.sh ignores untracked files and only flags tracked ones"
 }
 
+# The denylist lives only in the operating home's checkout, while pushes
+# happen from linked task worktrees, so a linked worktree falls back to the
+# main worktree's config/public-denylist.
+test_denylist_linked_worktree_reads_the_main_worktree_file() {
+  local dir wt out rc
+  dir=$(fm_test_tmproot fm-lint-denylist-main)
+  git -C "$dir" init -q
+  git -C "$dir" config user.email test@example.com
+  git -C "$dir" config user.name test
+  mkdir -p "$dir/config"
+  printf 'config/\n' > "$dir/.gitignore"
+  printf 'contact: Acme-Corp operations\n' > "$dir/tracked.txt"
+  git -C "$dir" add .gitignore tracked.txt
+  git -C "$dir" commit -q -m init
+  printf 'Acme-Corp\n' > "$dir/config/public-denylist"
+  wt="$(fm_test_tmproot fm-lint-denylist-linked)/wt"
+  git -C "$dir" worktree add -q --detach "$wt" HEAD
+  [ ! -e "$wt/config/public-denylist" ] || fail "the linked worktree must not carry its own denylist for this test"
+  rc=0
+  out=$(cd "$wt" && FM_HOME='' "$DENYLIST" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "a linked worktree must use the main worktree's denylist, got exit $rc"$'\n'"$out"
+  assert_not_contains "$out" "Acme-Corp" "the failure output must not echo the matched string"
+  assert_contains "$out" "tracked.txt:1" "the failure did not name the offending file and line"
+  pass "fm-lint-denylist.sh in a linked worktree falls back to the main worktree's denylist"
+}
+
+test_denylist_falls_back_to_fm_home() {
+  local dir home out rc
+  dir=$(fm_denylist_scratch)
+  home=$(fm_test_tmproot fm-lint-denylist-home)
+  mkdir -p "$home/config"
+  printf 'Acme-Corp\n' > "$home/config/public-denylist"
+  rc=0
+  out=$(cd "$dir" && FM_HOME="$home" "$DENYLIST" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "with no repository denylist the guard must read \$FM_HOME's, got exit $rc"$'\n'"$out"
+  assert_not_contains "$out" "Acme-Corp" "the failure output must not echo the matched string"
+  # The repository's own file wins over FM_HOME's.
+  printf 'zzz-not-present-token-9f3\n' > "$dir/config/public-denylist"
+  rc=0
+  out=$(cd "$dir" && FM_HOME="$home" "$DENYLIST" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the repository's own denylist must win over \$FM_HOME's, got exit $rc"$'\n'"$out"
+  pass "fm-lint-denylist.sh falls back to \$FM_HOME/config/public-denylist, after the repository's own file"
+}
+
+test_denylist_ignores_carriage_returns() {
+  local dir out rc
+  dir=$(fm_denylist_scratch)
+  printf '# operator strings\r\nAcme-Corp\r\n' > "$dir/config/public-denylist"
+  rc=0
+  out=$(cd "$dir" && "$DENYLIST" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "a CRLF denylist entry must still match, got exit $rc"$'\n'"$out"
+  assert_contains "$out" "entry #2" "the CRLF entry was not reported by its line number"
+  pass "fm-lint-denylist.sh strips a trailing CR from CRLF denylist entries"
+}
+
 # fm_lint_wiring_scratch: a real scratch git repo with config/ gitignored and a
 # committed tracked file carrying the marker string, for the fm-lint.sh wiring
 # tests below. The guard reads real git state, so these tests exercise the real
@@ -2304,5 +2359,8 @@ test_denylist_matching_is_case_insensitive
 test_denylist_ignores_blank_lines
 test_denylist_ignores_comment_lines
 test_denylist_ignores_untracked_files
+test_denylist_linked_worktree_reads_the_main_worktree_file
+test_denylist_falls_back_to_fm_home
+test_denylist_ignores_carriage_returns
 test_lint_default_run_invokes_the_denylist_guard
 test_lint_default_run_is_inert_without_a_denylist

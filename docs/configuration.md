@@ -91,6 +91,7 @@ A bot signal's text is third-party content for the owning home to triage, never 
 
 `config/public-denylist` is an optional local, gitignored file listing operator-private strings that must never appear in tracked files, for example an operator's own host, machine, or account names in a repository that ships publicly.
 When the file is present, [`bin/fm-lint.sh`](../bin/fm-lint.sh) runs [`bin/fm-lint-denylist.sh`](../bin/fm-lint-denylist.sh) as part of its default (no-explicit-path) lint and fails when any tracked file contains one of those substrings, so a routine local lint or the pre-push gate catches a private string before it is pushed.
+A linked task worktree has no `config/` of its own, so the guard falls back to the main worktree's file and then to `$FM_HOME/config/public-denylist`; the first file found is used.
 A failure reports only each offending `file:line` and the offending entry's line number in the denylist, never the matched string, because lint output can reach review logs and PR text.
 The file never ships, so in CI, fresh clones, and homes without it the guard is a silent no-op; it is not inherited by secondmate homes.
 [`bin/fm-lint-denylist.sh`](../bin/fm-lint-denylist.sh) owns the exact matching mechanics and the file format.
