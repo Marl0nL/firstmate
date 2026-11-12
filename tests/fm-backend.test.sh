@@ -829,6 +829,24 @@ SH
   [ "$(grep -c 'default hc backend unavailable' "$errfile")" -eq 1 ] \
     || fail "the fallback must print exactly one hc default notice"$'\n'"$(cat "$errfile")"
 
+  # A hung binary is bounded: the default probe gives up after
+  # FM_BACKEND_HC_PROBE_TIMEOUT seconds and falls back with a notice instead
+  # of stalling every spawn and session start.
+  local hung="$dir/hungbin" started elapsed
+  mkdir -p "$hung"
+  printf '#!/bin/sh\nsleep 30\n' > "$hung/herdr-core"
+  chmod +x "$hung/herdr-core"
+  : > "$errfile"
+  started=$(date +%s)
+  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; TMUX='fake,1,0' \
+    FM_BACKEND_HC_DEFAULT=1 FM_BACKEND_HC_PROBE_TIMEOUT=1 FM_HC_BIN="$hung/herdr-core" FM_BACKEND='' \
+    FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  elapsed=$(( $(date +%s) - started ))
+  [ "$out" = tmux ] || fail "a hung hc must fall back to tmux auto-detection, got '$out'"
+  [ "$elapsed" -lt 15 ] || fail "a hung hc stalled backend resolution for ${elapsed}s despite the 1s probe bound"
+  grep -q "default hc backend unavailable (.*did not answer within 1s)" "$errfile" \
+    || fail "a hung hc must print a notice naming the timed-out probe"$'\n'"$(cat "$errfile")"
+
   # A secondmate spawn kind and the test suite's off switch keep the older
   # order, silently, even with a usable hc.
   : > "$errfile"
@@ -840,7 +858,7 @@ SH
     FM_BACKEND_HC_DEFAULT=0 FM_HC_BIN="$fb/herdr-core" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>>"$errfile")
   [ "$out" = tmux ] || fail "FM_BACKEND_HC_DEFAULT=0 must restore the older order, got '$out'"
   [ ! -s "$errfile" ] || fail "a skipped hc default must stay silent"$'\n'"$(cat "$errfile")"
-  pass "fm_backend_name: a usable hc is the default ahead of tmux and Herdr markers; explicit settings, secondmates, and the off switch keep the older order"
+  pass "fm_backend_name: a usable hc is the default ahead of tmux and Herdr markers; a hung or unusable hc falls back with a notice; explicit settings, secondmates, and the off switch keep the older order"
 }
 
 # fm_backend_name notices and explicit precedence for the Herdr app signal:

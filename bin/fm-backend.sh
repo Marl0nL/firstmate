@@ -448,9 +448,12 @@ fm_backend_explicit_name() {
 # herdr-core/hc on PATH reporting `hc x.y.z` at or above the verified minimum)
 # plus jq. It only runs `<bin> --version`, which never contacts or starts a
 # core; the spawn's own container ensure is the first core contact, exactly
-# as for an explicitly selected hc.
+# as for an explicitly selected hc. Because this runs on every spawn and
+# session start, a first `--version` probe is bounded by fm_run_timed
+# (FM_BACKEND_HC_PROBE_TIMEOUT seconds, default 5), so a hung binary makes hc
+# unusable instead of stalling the caller.
 fm_backend_hc_unusable_reason() {
-  local err
+  local err bin rc=0
   if ! command -v jq >/dev/null 2>&1; then
     printf "'jq' is not installed"
     return 0
@@ -458,6 +461,20 @@ fm_backend_hc_unusable_reason() {
   if ! fm_backend_source hc >/dev/null 2>&1; then
     printf 'the hc adapter could not be loaded'
     return 0
+  fi
+  if bin=$(fm_backend_hc_bin); then
+    if ! command -v fm_run_timed >/dev/null 2>&1; then
+      # shellcheck source=bin/fm-timeout-lib.sh
+      . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh" 2>/dev/null || {
+        printf 'the timeout helper could not be loaded'
+        return 0
+      }
+    fi
+    fm_run_timed "${FM_BACKEND_HC_PROBE_TIMEOUT:-5}" "$bin" --version </dev/null >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -eq 124 ]; then
+      printf "'%s --version' did not answer within %ss" "$bin" "${FM_BACKEND_HC_PROBE_TIMEOUT:-5}"
+      return 0
+    fi
   fi
   err=$(fm_backend_hc_version_check 2>&1 >/dev/null) && return 1
   err=$(printf '%s\n' "$err" | head -n 1)

@@ -29,9 +29,10 @@ The Herdr app shows the terminals of the session it bound at launch, `default` u
 
 After `--backend`, `FM_BACKEND`, and `config/backend`, a ship or scout spawn selects hc whenever a usable hc toolchain resolves, ahead of every runtime marker including `$TMUX` and `HERDR_ENV=1`.
 Usable means the adapter's own spawn-time binary gate passes (an executable `FM_HC_BIN`, or `herdr-core`/`hc` on `PATH` reporting `hc x.y.z` at or above the verified minimum) plus `jq`.
-The check only runs `<bin> --version`, which never contacts or starts a core; the spawn's container ensure is the first core contact, exactly as for an explicit hc spawn.
+The check only runs `<bin> --version`, bounded to `FM_BACKEND_HC_PROBE_TIMEOUT` seconds (default 5), which never contacts or starts a core; the spawn's container ensure is the first core contact, exactly as for an explicit hc spawn.
 When hc is unusable, one stderr notice names the reason and the older order below (runtime auto-detection, then tmux) picks the backend.
-A `--secondmate` spawn skips the default and resolves through that older order, because hc refuses secondmates; the away-mode supervisor backend comes from the captain's own terminal, not from this order.
+A `--secondmate` spawn skips the default and resolves through that older order, because hc refuses secondmates, so a home that runs second mates still needs tmux or Herdr installed even though session-start tool checks follow the hc default; the away-mode supervisor backend comes from the captain's own terminal, not from this order.
+Usable is a binary and version check only: when herdr-core is installed but its core cannot start or is unhealthy, ship and scout spawns fail at the hc step rather than silently switching, and local `config/backend` containing `tmux` is the escape hatch until hc is repaired.
 
 ## Runtime auto-detection
 
