@@ -18,13 +18,24 @@ Prerequisites:
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 
+In this fork hc is the default backend once its toolchain is installed; see "Default backend" below.
 Select hc explicitly with local `config/backend` containing `hc`, `FM_BACKEND=hc` for one launch, or an explicit request to Firstmate.
-An explicit setting always wins; see "Runtime auto-detection" below for when hc is also selected automatically.
+An explicit setting of any backend always wins over the default.
 
 The core a task lands on is the one `HC_SESSION` names when the task is spawned, or hc's `default` session when it is unset.
 The Herdr app shows the terminals of the session it bound at launch, `default` unless the app was started with a different `HC_SESSION`.
 
+## Default backend
+
+After `--backend`, `FM_BACKEND`, and `config/backend`, a ship or scout spawn selects hc whenever a usable hc toolchain resolves, ahead of every runtime marker including `$TMUX` and `HERDR_ENV=1`.
+Usable means the adapter's own spawn-time binary gate passes (an executable `FM_HC_BIN`, or `herdr-core`/`hc` on `PATH` reporting `hc x.y.z` at or above the verified minimum) plus `jq`.
+The check only runs `<bin> --version`, which never contacts or starts a core; the spawn's container ensure is the first core contact, exactly as for an explicit hc spawn.
+When hc is unusable, one stderr notice names the reason and the older order below (runtime auto-detection, then tmux) picks the backend.
+A `--secondmate` spawn skips the default and resolves through that older order, because hc refuses secondmates; the away-mode supervisor backend comes from the captain's own terminal, not from this order.
+
 ## Runtime auto-detection
+
+Auto-detection applies only when no explicit setting exists and the default above did not select hc.
 
 hc is auto-detected only on the Herdr app's terminal-level signal, never on bare `HC_TERMINAL_*` markers: hc stamps them into every process an hc terminal starts, and an app-created terminal's env is deliberately identical to any other hc terminal's - the app sends `TERM_PROGRAM=herdr` in its `terminal.run` call, but the core's `child_env` normalizes that to `ghostty` for every child, app-created or not.
 What marks a terminal as the app's is its core-side record: the app stamps `herdr.space`/`herdr.tab` labels on every terminal it creates, and a non-empty `herdr.space` is the exact condition under which the app projects a terminal into its window.
@@ -80,7 +91,7 @@ hc_session=<session>
 hc_terminal=<address>
 ```
 
-`backend_detect=` is `app-terminal` only when that signal automatically selected hc; an explicitly selected hc writes no `backend_detect=` line.
+`backend_detect=` is `default` when the default backend selected hc and `app-terminal` when that signal automatically selected hc; an explicitly selected hc writes no `backend_detect=` line.
 
 `<address>` is hc's terminal address such as `t7`.
 Every adapter call sets exactly the recorded `HC_SESSION` and drops any inherited `HC_SOCKET`, which hc would otherwise prefer, so a task keeps reaching its own core even when the caller's environment names another one.

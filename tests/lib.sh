@@ -81,6 +81,12 @@ unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH 
   FM_BACKEND FM_HOME FM_ROOT FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE \
   FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
 
+# Turn off this fork's hc default backend (bin/fm-backend.sh fm_backend_resolve)
+# so a suite resolves backends exactly as CI does whether or not the host has
+# herdr-core on PATH. A case that exercises the hc default sets
+# FM_BACKEND_HC_DEFAULT=1 itself.
+export FM_BACKEND_HC_DEFAULT=0
+
 # Clear the tasks-axi env overrides. An operator shell exports TASKS_AXI_FILE
 # (and may export TASKS_AXI_BACKEND) at its real home's backlog, and tasks-axi
 # resolves that env AHEAD of the .tasks.toml a fixture copies, so a suite that

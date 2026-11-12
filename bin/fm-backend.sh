@@ -441,11 +441,43 @@ fm_backend_explicit_name() {
   return 1
 }
 
+# fm_backend_hc_unusable_reason: succeed and print one short reason when the
+# hc default cannot select hc here; fail silently when it can. Usable means
+# the adapter's own spawn-time binary gate passes, the same check
+# fm_backend_detect_hc_usable makes (an executable FM_HC_BIN, or
+# herdr-core/hc on PATH reporting `hc x.y.z` at or above the verified minimum)
+# plus jq. It only runs `<bin> --version`, which never contacts or starts a
+# core; the spawn's own container ensure is the first core contact, exactly
+# as for an explicitly selected hc.
+fm_backend_hc_unusable_reason() {
+  local err
+  if ! command -v jq >/dev/null 2>&1; then
+    printf "'jq' is not installed"
+    return 0
+  fi
+  if ! fm_backend_source hc >/dev/null 2>&1; then
+    printf 'the hc adapter could not be loaded'
+    return 0
+  fi
+  err=$(fm_backend_hc_version_check 2>&1 >/dev/null) && return 1
+  err=$(printf '%s\n' "$err" | head -n 1)
+  err=${err#error: }
+  err=${err#backend=hc selected but }
+  printf '%s' "${err:-the herdr-core version check failed}"
+}
+
 # fm_backend_resolve: resolve the ACTIVE backend for a NEW spawn into
 # FM_BACKEND_RESOLVED, absent an explicit per-task override. Precedence:
 # FM_BACKEND env, then config/backend (a single word on its first non-empty
-# line, mirroring config/crew-harness), then runtime auto-detection
-# (fm_backend_detect), then default tmux. A per-task `--backend` flag is
+# line, mirroring config/crew-harness), then this fork's hc default, then
+# runtime auto-detection (fm_backend_detect), then default tmux.
+# The hc default selects hc whenever a usable hc toolchain resolves
+# (fm_backend_hc_unusable_reason), ahead of every runtime marker including
+# $TMUX and HERDR_ENV, and records FM_BACKEND_DETECT_SIGNAL=default. It does
+# not apply to a `secondmate` spawn kind (hc refuses --secondmate), which
+# resolves exactly as below, nor when FM_BACKEND_HC_DEFAULT=0 (the test
+# suite's hermetic setting). When hc is unusable, one stderr notice names the
+# reason before the older order picks the backend. A per-task `--backend` flag is
 # parsed by the caller (fm-spawn.sh) and takes precedence over this
 # resolution entirely; it is not read here. Auto-detect fires only when
 # nothing was explicitly configured, so an explicit setting always wins and
@@ -462,11 +494,18 @@ fm_backend_explicit_name() {
 # the missing piece instead of switching.
 # Paseo and tern are never auto-detected, so they only ever come out of this
 # function from FM_BACKEND or config/backend.
-fm_backend_resolve() {
-  local marker toolchain
+fm_backend_resolve() {  # [<spawn-kind>]
+  local kind=${1:-} marker toolchain hc_reason=""
   FM_BACKEND_DETECTED=""
   FM_BACKEND_DETECT_SIGNAL=""
   FM_BACKEND_RESOLVED=$(fm_backend_explicit_name) && return 0
+  if [ "$kind" != secondmate ] && [ "${FM_BACKEND_HC_DEFAULT:-1}" != 0 ]; then
+    if ! hc_reason=$(fm_backend_hc_unusable_reason); then
+      FM_BACKEND_RESOLVED=hc
+      FM_BACKEND_DETECT_SIGNAL=default
+      return 0
+    fi
+  fi
   if fm_backend_detect >/dev/null; then
     FM_BACKEND_RESOLVED=$FM_BACKEND_DETECTED
     case "$FM_BACKEND_RESOLVED" in
@@ -486,15 +525,25 @@ fm_backend_resolve() {
         echo "NOTICE: auto-detected $marker - spawning into the EXPERIMENTAL hc backend with Herdr app presentation (herdr.space/herdr.tab labels). Set config/backend or pass --backend <name> to opt out." >&2
         ;;
     esac
+    fm_backend_hc_default_notice "$hc_reason" "$FM_BACKEND_RESOLVED"
     return 0
   fi
   toolchain="no usable hc toolchain (an executable FM_HC_BIN, or herdr-core/hc on PATH reporting 'hc x.y.z' at or above the verified minimum ${FM_BACKEND_HC_MIN_VERSION:-version}, and jq)"
   case "$FM_BACKEND_DETECT_SIGNAL" in
     app-terminal-unusable)
-      echo "NOTICE: running in a live hc terminal (${HC_SESSION:-default}:${HC_TERMINAL_ID:-?}) but $toolchain can verify a Herdr app projection; staying on the default backend. See docs/hc-backend.md." >&2
+      [ -n "$hc_reason" ] \
+        || echo "NOTICE: running in a live hc terminal (${HC_SESSION:-default}:${HC_TERMINAL_ID:-?}) but $toolchain can verify a Herdr app projection; staying on the default backend. See docs/hc-backend.md." >&2
       ;;
   esac
   FM_BACKEND_RESOLVED=tmux
+  fm_backend_hc_default_notice "$hc_reason" "$FM_BACKEND_RESOLVED"
+}
+
+# fm_backend_hc_default_notice: the one stderr line saying why the hc default
+# did not select hc. Silent when the default was not consulted (empty reason).
+fm_backend_hc_default_notice() {  # <reason> <chosen-backend>
+  [ -n "$1" ] || return 0
+  echo "NOTICE: default hc backend unavailable ($1); using $2. Install herdr-core (docs/hc-backend.md) or set config/backend to choose explicitly." >&2
 }
 
 # fm_backend_name: fm_backend_resolve for callers that only need the name.

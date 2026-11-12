@@ -752,6 +752,97 @@ SH
   pass "fm_backend_detect: app-terminal (live spawn core + herdr.space label) selects hc; a live herdr-app.sock or open window is never a signal for a marker-less process; another core, a stopped core, dead/stale/missing evidence, and unusable toolchains never switch"
 }
 
+# This fork's hc default (bin/fm-backend.sh fm_backend_resolve): after
+# FM_BACKEND and config/backend, a usable hc toolchain selects hc ahead of
+# every runtime marker, $TMUX and HERDR_ENV included, touching the binary only
+# through `--version`; an unusable one falls back to the older order with one
+# notice naming why; a secondmate spawn kind and FM_BACKEND_HC_DEFAULT=0 keep
+# the older order silently.
+test_backend_name_hc_default() {
+  local dir fb old cfg cfg_tmux log out errfile
+  command -v jq >/dev/null 2>&1 || { pass "skip: jq absent; the hc toolchain check needs it"; return; }
+  dir="$TMP_ROOT/hc-default"; fb="$dir/fakebin"; old="$dir/oldbin"
+  cfg="$dir/config-empty"; cfg_tmux="$dir/config-tmux"
+  mkdir -p "$fb" "$old" "$cfg" "$cfg_tmux"; printf 'tmux\n' > "$cfg_tmux/backend"
+  log="$dir/hc.log"; errfile="$dir/err.txt"
+  cat > "$fb/herdr-core" <<SH
+#!/bin/sh
+printf '%s\n' "\$*" >> '$log'
+case "\${1:-}" in
+  --version) printf 'hc 9.9.9\n' ;;
+  *) exit 3 ;;
+esac
+SH
+  sed 's/hc 9.9.9/hc 0.0.1/' "$fb/herdr-core" > "$old/herdr-core"
+  chmod +x "$fb/herdr-core" "$old/herdr-core"
+
+  # Usable hc beats $TMUX, HERDR_ENV, and both nested, silently, and the
+  # binary is only asked for its version: detection never starts a core.
+  for markers in "TMUX=fake,1,0" "HERDR_ENV=1" "TMUX=fake,1,0 HERDR_ENV=1" ""; do
+    : > "$errfile"; : > "$log"
+    # shellcheck disable=SC2086,SC2016  # each row is a deliberate assignment list; the inner shell expands "$1"/"$2"
+    out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; \
+      env $markers FM_BACKEND_HC_DEFAULT=1 FM_HC_BIN="$fb/herdr-core" FM_BACKEND='' \
+      bash -c '. "$1/bin/fm-backend.sh"; FM_BACKEND_CONFIG_DIR=$2 fm_backend_name' _ "$ROOT" "$cfg" 2>"$errfile")
+    [ "$out" = hc ] || fail "a usable hc must be the default under markers '${markers:-none}', got '$out'"$'\n'"$(cat "$errfile")"
+    [ ! -s "$errfile" ] || fail "the hc default must resolve silently under '${markers:-none}'"$'\n'"$(cat "$errfile")"
+    [ "$(sort -u "$log")" = --version ] \
+      || fail "selecting the hc default may only run '--version', ran:"$'\n'"$(cat "$log")"
+  done
+
+  # The provenance signal is recorded for the spawn's task record.
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; \
+    FM_BACKEND_HC_DEFAULT=1 FM_HC_BIN="$fb/herdr-core" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" \
+    bash -c '. "$1/bin/fm-backend.sh"; FM_BACKEND_CONFIG_DIR=$2; fm_backend_resolve; printf "%s:%s" "$FM_BACKEND_RESOLVED" "$FM_BACKEND_DETECT_SIGNAL"' _ "$ROOT" "$cfg" 2>/dev/null)
+  [ "$out" = hc:default ] || fail "the hc default must record its default signal, got '$out'"
+
+  # Explicit settings still win, silently.
+  : > "$errfile"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; FM_BACKEND_HC_DEFAULT=1 FM_HC_BIN="$fb/herdr-core" \
+    FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg_tmux" fm_backend_name 2>"$errfile")
+  [ "$out" = tmux ] || fail "config/backend must win over the hc default, got '$out'"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; FM_BACKEND_HC_DEFAULT=1 FM_HC_BIN="$fb/herdr-core" \
+    FM_BACKEND=herdr FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>>"$errfile")
+  [ "$out" = herdr ] || fail "FM_BACKEND must win over the hc default, got '$out'"
+  [ ! -s "$errfile" ] || fail "an explicit backend must not print the hc default notice"$'\n'"$(cat "$errfile")"
+
+  # An unusable hc (too old, or absent) falls back to the older order, with
+  # one notice naming why.
+  : > "$errfile"
+  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; TMUX='fake,1,0' \
+    FM_BACKEND_HC_DEFAULT=1 FM_HC_BIN="$old/herdr-core" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = tmux ] || fail "an outdated hc must fall back to tmux auto-detection, got '$out'"
+  if [ "$(grep -c 'default hc backend unavailable' "$errfile")" -ne 1 ] || ! grep -q '0.0.1' "$errfile"; then
+    fail "an outdated hc must print one notice naming the old version"$'\n'"$(cat "$errfile")"
+  fi
+  : > "$errfile"
+  out=$(unset TMUX CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; HERDR_ENV=1 \
+    FM_BACKEND_HC_DEFAULT=1 FM_HC_BIN=/nonexistent/hc FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = herdr ] || fail "an absent hc must fall back to Herdr auto-detection, got '$out'"
+  grep -q "default hc backend unavailable (no 'herdr-core' or 'hc' binary" "$errfile" \
+    || fail "an absent hc must print a notice naming the missing binary"$'\n'"$(cat "$errfile")"
+  : > "$errfile"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; \
+    PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND_HC_DEFAULT=1 FM_HC_BIN=/nonexistent/hc FM_BACKEND='' \
+    FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = tmux ] || fail "an absent hc with no markers must fall back to tmux, got '$out'"
+  [ "$(grep -c 'default hc backend unavailable' "$errfile")" -eq 1 ] \
+    || fail "the fallback must print exactly one hc default notice"$'\n'"$(cat "$errfile")"
+
+  # A secondmate spawn kind and the test suite's off switch keep the older
+  # order, silently, even with a usable hc.
+  : > "$errfile"
+  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; TMUX='fake,1,0' \
+    FM_BACKEND_HC_DEFAULT=1 FM_HC_BIN="$fb/herdr-core" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" \
+    bash -c '. "$1/bin/fm-backend.sh"; FM_BACKEND_CONFIG_DIR=$2; fm_backend_resolve secondmate; printf "%s" "$FM_BACKEND_RESOLVED"' _ "$ROOT" "$cfg" 2>"$errfile")
+  [ "$out" = tmux ] || fail "a secondmate spawn must skip the hc default, got '$out'"
+  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; TMUX='fake,1,0' \
+    FM_BACKEND_HC_DEFAULT=0 FM_HC_BIN="$fb/herdr-core" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>>"$errfile")
+  [ "$out" = tmux ] || fail "FM_BACKEND_HC_DEFAULT=0 must restore the older order, got '$out'"
+  [ ! -s "$errfile" ] || fail "a skipped hc default must stay silent"$'\n'"$(cat "$errfile")"
+  pass "fm_backend_name: a usable hc is the default ahead of tmux and Herdr markers; explicit settings, secondmates, and the off switch keep the older order"
+}
+
 # fm_backend_name notices and explicit precedence for the Herdr app signal:
 # an auto-selected hc names its signal and the opt-out, while a live app
 # window that cannot identify this process as an app terminal resolves the
@@ -1760,6 +1851,7 @@ test_backend_paseo_is_never_autodetected
 test_backend_rex_autodetect
 test_backend_detect_herdr_app
 test_backend_name_herdr_app
+test_backend_name_hc_default
 test_backend_tern_is_never_autodetected
 test_backend_dispatch_tables_include_tern
 test_backend_name_explicit_beats_detection

@@ -581,8 +581,11 @@ New spawns choose the backend in this order:
    A later task cannot inherit that authority by analogy.
 2. `FM_BACKEND`.
 3. The first non-empty line of local, gitignored `config/backend`.
-4. Runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, `TERM_PROGRAM=rex` with `REX_BLOCK`, cmux runtime signals, or the Herdr app signal.
-5. Default `tmux`.
+4. This fork's default, `hc`, for ship and scout spawns whenever a usable hc toolchain resolves, even under `$TMUX` or `HERDR_ENV=1`; [`docs/hc-backend.md`](hc-backend.md#default-backend) owns what usable means and the fallback notice.
+5. Runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, `TERM_PROGRAM=rex` with `REX_BLOCK`, cmux runtime signals, or the Herdr app signal.
+6. Fallback `tmux`.
+
+tmux and Herdr are therefore fallbacks when hc is unusable, or explicit choices through steps 1-3.
 
 If more than one runtime marker is present, detection resolves innermost-first: `$TMUX` is checked before `HERDR_ENV=1`, which is checked before Rex's `TERM_PROGRAM=rex` with `REX_BLOCK`, which is checked before cmux's primary `CMUX_WORKSPACE_ID` marker and its documented fallback signals - tmux, herdr, or Rex started from inside a cmux terminal is the innermost, currently-executing layer, while cmux itself (a terminal application, not a nestable multiplexer) is checked after those nested runtimes.
 The Herdr app signal is checked after cmux; contradictory marker sets keep the earlier surface's verdict instead of switching.
@@ -2328,7 +2331,7 @@ Lavish is a presentation-only dependency for visual decisions and reports; nonvi
 
 **Backend requirements**
 
-The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
+The per-backend delta is required only for the backend resolved by the [backend selection order](#backend-selection-order), so a home is never told to install a tool an inactive backend or feature would need.
 `fm_backend_required_tools` in `bin/fm-backend.sh` owns the backend additions:
 
 | Resolved backend | Additional tools |

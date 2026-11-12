@@ -115,9 +115,11 @@ git clone --quiet --bare "$PROJ" "$PROJ.origin.git"
 git -C "$PROJ" remote add origin "file://$PROJ.origin.git"
 
 # --- spawn with NO explicit backend config; HERDR_ENV=1 is the only marker --
+# FM_BACKEND_HC_DEFAULT=0 turns off this fork's hc default, which would
+# otherwise win over HERDR_ENV on a host with herdr-core installed.
 
 OUT_FILE="$TMP_ROOT/spawn.out"; ERR_FILE="$TMP_ROOT/spawn.err"
-env -u TMUX -u FM_BACKEND PATH="$PATH" HERDR_ENV=1 \
+env -u TMUX -u FM_BACKEND PATH="$PATH" HERDR_ENV=1 FM_BACKEND_HC_DEFAULT=0 \
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
   FM_CONFIG_OVERRIDE="$CONFIG" FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
   FM_SPAWN_NO_GUARD=1 \
