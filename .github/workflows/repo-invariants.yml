@@ -1,0 +1,55 @@
+name: Repo invariants
+
+# Kept auto-triggered (unlike the manual-only ci.yml) because this check is
+# near-zero-cost (a single job, no installs, seconds to run) and load-bearing
+# for PR hygiene: it is the only automated guard against a broken AGENTS.md
+# pointer, a broken .claude/skills symlink, or an accidental commit of
+# gitignored personal fleet paths. See CONTRIBUTING.md "Validation and CI".
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# The operator's self-hosted runner serves this repo's self-hosted jobs
+# serially, so cancel a superseded run for the same PR or branch so a fresh
+# push does not queue behind the run it replaces.
+concurrency:
+  group: repo-invariants-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  invariants:
+    name: Repo invariants
+    # Public repo + self-hosted runner: a fork PR must never execute on the
+    # operator's self-hosted runner. A cross-repo (fork) PR runs on ubuntu-latest;
+    # internal PRs and pushes run on the self-hosted runner.
+    # NOTE: do not use head.repo.fork - this repo is itself a fork of upstream,
+    # so that flag is true for every PR. Compare the head repo to the base repo.
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","firstmate-ci"]') }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Compatibility pointers must stay intact
+        run: |
+          set -eu
+          [ ! -L CLAUDE.md ] || { echo "::error::CLAUDE.md must be a real @AGENTS.md pointer file, not a symlink"; exit 1; }
+          tmp=$(mktemp)
+          trap 'rm -f "$tmp"' EXIT
+          printf '%s\n' \
+            '<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->' \
+            '@AGENTS.md' >"$tmp"
+          cmp -s CLAUDE.md "$tmp" || { echo "::error::CLAUDE.md must be the canonical @AGENTS.md pointer"; exit 1; }
+          [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
+      - name: Personal fleet paths must not be tracked
+        run: |
+          set -eu
+          tracked=$(git ls-files -- data state config projects .no-mistakes)
+          if [ -n "$tracked" ]; then
+            echo "::error::Personal fleet paths are tracked in git:"
+            printf '%s\n' "$tracked"
+            exit 1
+          fi

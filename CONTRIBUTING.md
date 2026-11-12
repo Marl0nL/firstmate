@@ -37,6 +37,8 @@ A body carrying the no-mistakes signature is judged by the pipeline attestation 
 
 ### The `full-ci` label
 
+In this fork `CI` runs on manual dispatch only (see [Validation and CI](#validation-and-ci)), so this label gate is dormant; it is kept as upstream wrote it so syncs stay small.
+
 CI on a pull request from an author without write access runs only the quick checks at first: `Test coverage guard`, `Repo invariants`, and the no-mistakes body check.
 Lint and the behavior suites wait for a maintainer, or the maintainer's fleet, to add the `full-ci` label when the pull request is picked up for review.
 Until then the `Full suite` check fails with a message naming the label; that is expected and needs no action from you.
@@ -58,7 +60,8 @@ Add required status checks with `strict_required_status_checks_policy: false`; a
 Bind the checks to the GitHub Actions app already producing them, rather than accepting the same context from any integration.
 No new app installation or manual runner setup is needed for that setting.
 
-Require the actual job contexts: `Full suite`, `Lint 1`, `Lint 2`, `Test coverage guard`, `Repo invariants`, `Stock macOS Bash snapshot compatibility`, `Behavior portable parallel 1`, `Behavior portable parallel 2`, `Behavior portable serial 1` through `Behavior portable serial 10`, `Behavior tests (Herdr)`, `Behavior timing aggregate`, and `PR must be raised via no-mistakes`.
+In this fork `CI` never runs on pull request events, so its jobs cannot be required checks; require only `Repo invariants` (from [`repo-invariants.yml`](.github/workflows/repo-invariants.yml)) and `PR must be raised via no-mistakes`.
+Upstream requires the actual job contexts: `Full suite`, `Lint 1`, `Lint 2`, `Test coverage guard`, `Repo invariants`, `Stock macOS Bash snapshot compatibility`, `Behavior portable parallel 1`, `Behavior portable parallel 2`, `Behavior portable serial 1` through `Behavior portable serial 10`, `Behavior tests (Herdr)`, `Behavior timing aggregate`, and `PR must be raised via no-mistakes`.
 The last name is the compliance job context, not its workflow title; its existing automation exceptions remain unchanged.
 The timing aggregate is not a substitute for individual jobs because it can succeed while collecting evidence from a failed run.
 The individual lanes skip on an outside pull request until it has the `full-ci` label, and a skipped job satisfies a required check, so `Full suite` must be required too: it fails until the label is on and whenever a lane failed or was cancelled.
@@ -149,7 +152,7 @@ Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.
 `bin/fm-test-linux.sh` is optional and never part of CI: on macOS, run it before publishing a branch whose tests depend on `stat`, `date`, or process behavior, because BSD and GNU tools differ.
 Its header owns selection, runtime detection, and exit codes.
 Family selection is the ordinary local path; `--all` is deliberate full regression only.
-CI owns broad regression across required portable parallel shards, the portable serial lane's separate-runner shards, the Herdr lane, lint, invariants, the coverage guard, and stock macOS Bash compatibility in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+CI owns broad regression across required portable parallel shards, the portable serial lane's separate-runner shards, the Herdr and herdr-core lanes, lint, the coverage guard, and, on an opt-in dispatch, stock macOS Bash compatibility in [`.github/workflows/ci.yml`](.github/workflows/ci.yml); the repository invariants run in [`.github/workflows/repo-invariants.yml`](.github/workflows/repo-invariants.yml), and [Validation and CI](#validation-and-ci) owns how and when each runs in this fork.
 Pushing a new head to a pull request cancels that pull request's still-running CI so only the current head is validated, and a newer push to `main` cancels the older `main` run so only the newest merge's run finishes; the workflow owns that contract, the `full-ci` gate described under [The `full-ci` label](#the-full-ci-label), and their rationale.
 A fork can set the repository variable `FM_CI_SKIP_PUSH` to `1` to skip the push run of `CI`, and `FM_CI_SKIP_MACOS` to `1` to skip the stock macOS Bash job, without a tracked edit that drifts from upstream.
 Each skip is a job-level condition, so a skipped job reports success rather than leaving the pull request pending, and with neither variable set every job runs on upstream and on every fork exactly as before.
@@ -169,6 +172,49 @@ Tests that need a real optional backend or an explicit opt-in (real herdr/zellij
 The complete [`tests/fm-watch-triage-pause.test.sh`](tests/fm-watch-triage-pause.test.sh) suite requires compatible `tasks-axi` on `PATH`, as specified in [Backlog backend](docs/configuration.md#backlog-backend-taskstoml--configbacklog-backend).
 [`tests/rex-test-safety.sh`](tests/rex-test-safety.sh) owns the real-Rex suites' private-server isolation and capability gates.
 The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the lane's isolation boundary, while [runtime backend verification](docs/verification/runtime-backends.md#herdr) owns active empirical evidence; live harness credential tests remain opt-in.
+
+## Validation and CI
+
+In this fork [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (lint, every behavior lane, the opt-in macOS snapshot, the coverage guard, and the `Full suite` verdict) runs on `workflow_dispatch` only: nothing there is triggered by a push or a pull request.
+[`.github/workflows/repo-invariants.yml`](.github/workflows/repo-invariants.yml) stays automatic because it is one seconds-long job that guards PR hygiene an author could otherwise merge broken: the `AGENTS.md`/`CLAUDE.md` pointer, the `.claude/skills` symlink, and personal fleet paths staying untracked.
+[`.github/workflows/no-mistakes-required.yml`](.github/workflows/no-mistakes-required.yml) also stays automatic; it enforces the delivery path above in either accepted form and runs in seconds.
+
+For substantial changes, validate locally first with `bin/fm-lint.sh` and the relevant `bin/fm-test-run.sh` selection, build one comprehensive PR when the work is naturally one unit, and then dispatch the full suite against the branch or PR head as a last pre-merge check:
+
+```sh
+gh workflow run ci.yml --ref <your-branch>
+# or check a PR's exact head while the workflow definition runs from main:
+gh workflow run ci.yml --ref main -f ref=refs/pull/<PR-number>/head
+# add -f macos_snapshot=true when shell files that affect stock macOS Bash 3.2 changed
+```
+
+A new dispatch for the same ref cancels the older one still running.
+
+### Where CI runs
+
+CI is split between an operator-provided self-hosted runner and GitHub-hosted images to save Actions minutes without sacrificing reliability.
+The self-hosted jobs select their runner by the custom label `firstmate-ci` (alongside the built-in `self-hosted`): both automatic workflows ([`repo-invariants.yml`](.github/workflows/repo-invariants.yml) and [`no-mistakes-required.yml`](.github/workflows/no-mistakes-required.yml), the recurring hosted-minute cost) plus the fast pure jobs in [`ci.yml`](.github/workflows/ci.yml): the coverage guard, the timing aggregate, and the `Full suite` verdict.
+The custom label is declared for actionlint in [`.github/actionlint.yaml`](.github/actionlint.yaml).
+An operator who self-hosts is expected to run the runner as its own unprivileged user; CI installs its pinned tools into the runner-provided per-job temp (`$RUNNER_TEMP`), never into the runner user's home, system-wide, or with `sudo`.
+Every job carries a `timeout-minutes`, and the dispatch concurrency group keeps a superseded run from queueing behind its replacement on a single serial runner.
+
+To self-host, add the `firstmate-ci` label to the registered runner once:
+
+```sh
+gh api repos/<owner>/<repo>/actions/runners            # find the runner's numeric <id>
+gh api -X POST repos/<owner>/<repo>/actions/runners/<id>/labels -f 'labels[]=firstmate-ci'
+```
+
+Self-hosting is optional, but with no runner carrying the label the self-hosted jobs queue rather than fall back to a hosted image; point their `runs-on` at `ubuntu-latest` instead if you do not run one.
+
+This repository is public, and a self-hosted runner must never execute a fork's code, so the two automatic workflows select their runner by expression: a pull request from another repository runs on `ubuntu-latest`, and only an internal pull request or push runs on the self-hosted runner.
+The expression compares the head repository to this one rather than reading `head.repo.fork`, because this repository is itself a fork of upstream, so that flag is true for every pull request.
+As defence in depth, both automatic workflows run only inline `run:` steps and pinned actions, never repository scripts, and the repository's Actions setting must require approval before running workflows for outside collaborators.
+Actions in the workflows that reach the self-hosted runner are pinned to full commit shas.
+
+`ci.yml`'s lint job and its stateful lanes (the portable parallel and serial shards, the real-Herdr lane, and the real herdr-core lane) stay on hosted runners on purpose.
+On a shared or contended self-hosted machine the stateful end-to-end lanes risk colliding on machine-global paths and being starved or OOM-killed, and the full-set ShellCheck analysis overran its timeout under contention, while both finish reliably on fresh hosted VMs.
+The macOS snapshot job (`macos-latest`) bills at 10x, so a dispatch runs it only with `-f macos_snapshot=true`, and the manual Windows Herdr spike ([`windows-herdr-spike.yml`](.github/workflows/windows-herdr-spike.yml)) stays on `windows-latest`.
 
 ## Questions
 

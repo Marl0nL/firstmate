@@ -20,6 +20,14 @@
 # FM_CI_SKIP_MACOS let a fork skip the push run and the macOS job through a
 # job-level condition, while with neither set every job runs exactly as before.
 #
+# This fork triggers ci.yml on manual dispatch only (CONTRIBUTING.md
+# "Validation and CI"): a dispatch is a trusted run of every job, the macOS
+# snapshot joins it only through the macos_snapshot input, and a dispatch
+# supersedes only an earlier dispatch for the same ref. The push, pull
+# request, and label cases below keep pinning the upstream gate logic the
+# workflow still carries dormant, so restoring upstream's triggers restores
+# upstream's behavior unchanged.
+#
 # The workflow is parsed as YAML and its concurrency and job-level `if`
 # expressions are resolved against simulated pull_request and push contexts,
 # so the assertions describe what GitHub would do, not how the file happens
@@ -172,6 +180,7 @@ end
 # fork variables unset, and needed jobs successful. Short keys: event, action,
 # label (the label an event adds), labels (comma-separated labels on the PR),
 # association, head (head repository), number, run_id, skip_push, skip_macos,
+# ref (github.ref), input_ref and macos_snapshot (the dispatch inputs),
 # needs (success, failure, or cancelled: the needed jobs' results that job
 # conditions and the Full suite verdict read), outcome (how every job that runs
 # concludes, read only by published_checks). A push event clears the PR fields,
@@ -184,8 +193,9 @@ def simulated_context(workflow_name, overrides)
     "labels" => "", "association" => "NONE", "head" => "contributor/firstmate",
     "number" => "108", "run_id" => "900001", "skip_push" => "", "skip_macos" => "",
     "needs" => "success", "outcome" => "success",
+    "ref" => "refs/heads/main", "input_ref" => "", "macos_snapshot" => "false",
   }
-  if overrides.any? { |pair| pair == "event=push" }
+  if overrides.any? { |pair| pair == "event=push" || pair == "event=workflow_dispatch" }
     o.merge!("action" => "", "association" => "", "head" => "", "number" => "")
   end
   overrides.each do |pair|
@@ -204,6 +214,9 @@ def simulated_context(workflow_name, overrides)
     "github.event.pull_request.head.repo.full_name" => o["head"],
     "github.event.pull_request.number" => o["number"],
     "github.run_id" => o["run_id"],
+    "github.ref" => o["ref"],
+    "inputs.ref" => o["input_ref"],
+    "inputs.macos_snapshot" => o["macos_snapshot"] == "true",
     "vars.FM_CI_SKIP_PUSH" => o["skip_push"],
     "vars.FM_CI_SKIP_MACOS" => o["skip_macos"],
     "needs.status" => o["needs"],
@@ -215,11 +228,19 @@ end
 # Whether the workflow triggers start a run for this simulated event at all:
 # a pull_request action outside on.pull_request.types (the GitHub default when
 # absent is opened, synchronize, reopened) starts no run and publishes nothing.
-# Psych reads the bare key `on` as true.
+# Psych reads the bare key `on` as true. This fork declares no pull_request
+# trigger, so its dormant upstream gate logic is evaluated under the types
+# upstream triggers on (opened, synchronize, reopened, labeled); a declared
+# pull_request trigger is honored as written.
 def triggered?(doc, context)
   return true unless context["github.event_name"] == "pull_request"
   triggers = doc[true] || doc["on"]
-  types = triggers.fetch("pull_request", nil).to_h.fetch("types", %w[opened synchronize reopened])
+  declared = triggers.is_a?(Hash) ? triggers.fetch("pull_request", nil) : nil
+  types = if declared.nil? && !(triggers.is_a?(Hash) && triggers.key?("pull_request"))
+    %w[opened synchronize reopened labeled]
+  else
+    declared.to_h.fetch("types", %w[opened synchronize reopened])
+  end
   types.include?(context["github.event.action"])
 end
 
@@ -330,7 +351,7 @@ puts YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("timeout-minutes
 # Tier membership is the executable inventory of the timeout policy: a new job
 # must join a tier, and a job-level value outside these tiers is exactly the
 # one-off number the policy removed.
-FAST_TIER_JOBS='test-coverage invariants tests-timing-aggregate full-suite'
+FAST_TIER_JOBS='test-coverage tests-timing-aggregate full-suite'
 NORMAL_TIER_JOBS='lint tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial macos-stock-bash'
 HEAVY_TIER_JOBS='tests-herdr tests-hc'
 
@@ -415,7 +436,7 @@ test_only_the_full_ci_label_joins_the_pr_group() {
   pass "only the full-ci label joins and supersedes the PR's group; other labels cancel nothing"
 }
 
-QUICK_JOBS='test-coverage invariants full-suite'
+QUICK_JOBS='test-coverage full-suite'
 
 # DOP-167 direction A: an outside PR without the label runs only the quick
 # checks and the Full suite verdict, which fails naming the label.
@@ -519,7 +540,7 @@ test_unrelated_label_never_masks_an_earlier_failure() {
       case "$expect:$name" in
         all-failed:*) want=failure ;;
         waiting:'Full suite') want=failure ;;
-        waiting:'Test coverage guard'|waiting:'Repo invariants') want=success ;;
+        waiting:'Test coverage guard') want=success ;;
         waiting:*) want=skipped ;;
       esac
       [ "$conclusion" = "$want" ] \
@@ -723,6 +744,64 @@ RUBY
   pass "CI matrices cover every executable serial lane and canonical lint root exactly once"
 }
 
+# This fork: ci.yml has no automatic trigger at all, only workflow_dispatch.
+test_ci_runs_only_on_manual_dispatch() {
+  local triggers
+  triggers=$(ruby -ryaml -e '
+doc = YAML.load_file(ARGV[0])
+triggers = doc[true] || doc["on"]
+puts(triggers.is_a?(Hash) ? triggers.keys.sort.join(" ") : Array(triggers).sort.join(" "))
+' "$CI_WORKFLOW") || fail "could not read ci.yml triggers"
+  [ "$triggers" = workflow_dispatch ] \
+    || fail "ci.yml must trigger on workflow_dispatch only, got: $triggers"
+  pass "ci.yml runs only on manual dispatch"
+}
+
+# A dispatch is a trusted run: every job except the opt-in macOS snapshot
+# runs, macos_snapshot=true adds it, and the Full suite verdict follows the
+# lanes.
+test_dispatch_runs_the_suite_with_macos_opt_in() {
+  local all without_macos actual out
+  all=$(workflow_jobs | tr '\n' ' ') || fail "could not list ci.yml jobs"
+  without_macos=$(workflow_jobs | grep -vx macos-stock-bash | tr '\n' ' ')
+  actual=$(jobs_running_under event=workflow_dispatch | tr '\n' ' ') \
+    || fail "could not resolve dispatch jobs"
+  [ "$actual" = "$without_macos" ] \
+    || fail "a default dispatch must run every job but the macOS snapshot, ran: $actual"
+  actual=$(jobs_running_under event=workflow_dispatch macos_snapshot=true | tr '\n' ' ') \
+    || fail "could not resolve dispatch jobs with macos_snapshot"
+  [ "$actual" = "$all" ] || fail "a dispatch with macos_snapshot=true must run every job, ran: $actual"
+  out=$(run_full_suite_verdict event=workflow_dispatch) \
+    || fail "the Full suite verdict must pass on a dispatch whose lanes passed:"$'\n'"$out"
+  if out=$(run_full_suite_verdict event=workflow_dispatch needs=failure); then
+    fail "the Full suite verdict must fail on a dispatch whose lane failed:"$'\n'"$out"
+  fi
+  pass "a dispatch runs the whole suite, with the macOS snapshot only on request"
+}
+
+# A dispatch supersedes an earlier dispatch for the same ref, never one for
+# another ref, and the ref input wins over the ref the workflow ran from.
+test_dispatches_supersede_per_ref() {
+  local one two other input
+  one=$(resolve_concurrency event=workflow_dispatch ref=refs/heads/fm/a run_id=900030) \
+    || fail "could not resolve dispatch concurrency"
+  two=$(resolve_concurrency event=workflow_dispatch ref=refs/heads/fm/a run_id=900031) \
+    || fail "could not resolve dispatch concurrency"
+  other=$(resolve_concurrency event=workflow_dispatch ref=refs/heads/fm/b run_id=900032) \
+    || fail "could not resolve dispatch concurrency"
+  input=$(resolve_concurrency event=workflow_dispatch ref=refs/heads/main input_ref=refs/pull/7/head run_id=900033) \
+    || fail "could not resolve dispatch concurrency"
+  [ "$(group_of "$one")" = "$(group_of "$two")" ] && [ "$(cancel_of "$one")" = true ] \
+    || fail "two dispatches for one ref must share a cancelling group, got $one and $two"
+  [ "$(group_of "$one")" != "$(group_of "$other")" ] \
+    || fail "dispatches for different refs must not share a group ($(group_of "$one"))"
+  case "$(group_of "$input")" in
+    *refs/pull/7/head) ;;
+    *) fail "the ref input must select the dispatch group, got $(group_of "$input")" ;;
+  esac
+  pass "a dispatch supersedes only an earlier dispatch for the same ref"
+}
+
 test_ci_matrices_match_executable_partitions
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
@@ -741,3 +820,6 @@ test_every_job_belongs_to_exactly_one_timeout_tier
 test_fast_tier_shares_one_short_tripwire
 test_normal_tier_shares_one_budget
 test_heavy_tier_keeps_a_step_tripwire_under_a_job_backstop
+test_ci_runs_only_on_manual_dispatch
+test_dispatch_runs_the_suite_with_macos_opt_in
+test_dispatches_supersede_per_ref
