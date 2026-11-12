@@ -6,15 +6,15 @@ name: CI
 # stay automatic in repo-invariants.yml. The push, pull request, and full-ci
 # label logic below is kept as upstream wrote it so syncs stay small, and a
 # dispatch is treated as a trusted run. CONTRIBUTING.md "Validation and CI"
-# owns the flow, and "Where CI runs" owns the runner split: the fast pure jobs
-# (coverage guard, timing aggregate, Full suite verdict) run on the operator's
-# self-hosted runner, while lint, the stateful behavior, Herdr, and herdr-core
-# lanes, and the opt-in macOS snapshot stay on hosted runners.
+# owns the flow, and "Where CI runs" owns the runner split: only the Full suite
+# verdict, which checks nothing out, runs on the operator's self-hosted runner;
+# every job that checks out the dispatched ref runs hosted, because that ref
+# may be an outside PR's code.
 on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Branch, tag, or PR ref to run the full suite against (e.g. a branch name or refs/pull/<number>/head)"
+        description: "Branch, tag, or PR ref to run the full suite against (e.g. a branch name or refs/pull/<number>/head); its code runs only on hosted runners"
         required: false
         type: string
       macos_snapshot:
@@ -125,9 +125,10 @@ jobs:
   # and that the portable serial CI shards partition that serial lane exactly.
   test-coverage:
     name: ${{ (github.event.action == 'labeled' && github.event.label.name != 'full-ci') && 'Not run for label - ' || '' }}Test coverage guard
-    # Fast pure job on the operator's self-hosted runner; CONTRIBUTING.md
-    # "Where CI runs" owns the split.
-    runs-on: [self-hosted, firstmate-ci]
+    # Hosted on purpose: it checks out and runs the dispatched ref, which may be
+    # an outside PR's code, so it must never reach the self-hosted runner;
+    # CONTRIBUTING.md "Where CI runs" owns the split.
+    runs-on: ubuntu-24.04
     if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') && !(github.event.action == 'labeled' && github.event.label.name != 'full-ci') }}
     # Fast tier: the coverage guard is a seconds-long local computation.
     timeout-minutes: 5
@@ -523,9 +524,10 @@ jobs:
   # Aggregate per-lane timing into one summary artifact for critical-path review.
   tests-timing-aggregate:
     name: ${{ (github.event.action == 'labeled' && github.event.label.name != 'full-ci') && 'Not run for label - ' || '' }}Behavior timing aggregate
-    # Fast pure job on the operator's self-hosted runner; CONTRIBUTING.md
-    # "Where CI runs" owns the split.
-    runs-on: [self-hosted, firstmate-ci]
+    # Hosted on purpose: it checks out the dispatched ref, which may be an
+    # outside PR's code, so it must never reach the self-hosted runner;
+    # CONTRIBUTING.md "Where CI runs" owns the split.
+    runs-on: ubuntu-24.04
     # Fast tier: aggregation is seconds of work over lane artifacts.
     timeout-minutes: 5
     needs:
@@ -637,8 +639,9 @@ jobs:
   # from its older event could finish after, and mask, a later full-ci pass.
   full-suite:
     name: ${{ (github.event.action == 'labeled' && github.event.label.name != 'full-ci') && 'Not run for label - ' || '' }}Full suite
-    # Fast pure job on the operator's self-hosted runner; CONTRIBUTING.md
-    # "Where CI runs" owns the split.
+    # The only self-hosted job: it checks nothing out and reads only its needed
+    # jobs' results, so no dispatched ref's code reaches the runner;
+    # CONTRIBUTING.md "Where CI runs" owns the split.
     runs-on: [self-hosted, firstmate-ci]
     # Fast tier: the verdict reads its needed jobs' results.
     timeout-minutes: 5

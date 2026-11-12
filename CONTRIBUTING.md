@@ -189,11 +189,13 @@ gh workflow run ci.yml --ref main -f ref=refs/pull/<PR-number>/head
 ```
 
 A new dispatch for the same ref cancels the older one still running.
+The dispatched ref's code runs only on hosted runners (see "Where CI runs"), so pointing `ref` at an outside pull request never executes it on a self-hosted machine.
 
 ### Where CI runs
 
 CI is split between an operator-provided self-hosted runner and GitHub-hosted images to save Actions minutes without sacrificing reliability.
-The self-hosted jobs select their runner by the custom label `firstmate-ci` (alongside the built-in `self-hosted`): both automatic workflows ([`repo-invariants.yml`](.github/workflows/repo-invariants.yml) and [`no-mistakes-required.yml`](.github/workflows/no-mistakes-required.yml), the recurring hosted-minute cost) plus the fast pure jobs in [`ci.yml`](.github/workflows/ci.yml): the coverage guard, the timing aggregate, and the `Full suite` verdict.
+The self-hosted jobs select their runner by the custom label `firstmate-ci` (alongside the built-in `self-hosted`): both automatic workflows ([`repo-invariants.yml`](.github/workflows/repo-invariants.yml) and [`no-mistakes-required.yml`](.github/workflows/no-mistakes-required.yml), the recurring hosted-minute cost) plus [`ci.yml`](.github/workflows/ci.yml)'s `Full suite` verdict, which checks nothing out and only reads its needed jobs' results.
+Every `ci.yml` job that checks out the dispatched `ref` runs hosted, because a dispatch may point that ref at an outside pull request's code; no self-hosted job may check out the dispatched ref or pull request code.
 The custom label is declared for actionlint in [`.github/actionlint.yaml`](.github/actionlint.yaml).
 An operator who self-hosts is expected to run the runner as its own unprivileged user; CI installs its pinned tools into the runner-provided per-job temp (`$RUNNER_TEMP`), never into the runner user's home, system-wide, or with `sudo`.
 Every job carries a `timeout-minutes`, and the dispatch concurrency group keeps a superseded run from queueing behind its replacement on a single serial runner.
@@ -209,10 +211,12 @@ Self-hosting is optional, but with no runner carrying the label the self-hosted 
 
 This repository is public, and a self-hosted runner must never execute a fork's code, so the two automatic workflows select their runner by expression: a pull request from another repository runs on `ubuntu-latest`, and only an internal pull request or push runs on the self-hosted runner.
 The expression compares the head repository to this one rather than reading `head.repo.fork`, because this repository is itself a fork of upstream, so that flag is true for every pull request.
-As defence in depth, both automatic workflows run only inline `run:` steps and pinned actions, never repository scripts, and the repository's Actions setting must require approval before running workflows for outside collaborators.
+That expression is not the security boundary: on a `pull_request` event GitHub reads the workflow file from the pull request itself, so a fork pull request can rewrite `runs-on` or add steps.
+The primary control is the repository's Actions setting requiring approval before running workflows for outside contributors, and a fork pull request that touches anything under `.github/` must never be approved to run.
+Both automatic workflows also run only inline `run:` steps and pinned actions, never repository scripts.
 Actions in the workflows that reach the self-hosted runner are pinned to full commit shas.
 
-`ci.yml`'s lint job and its stateful lanes (the portable parallel and serial shards, the real-Herdr lane, and the real herdr-core lane) stay on hosted runners on purpose.
+`ci.yml`'s lint job and its stateful lanes (the portable parallel and serial shards, the real-Herdr lane, and the real herdr-core lane) also stay on hosted runners on purpose.
 On a shared or contended self-hosted machine the stateful end-to-end lanes risk colliding on machine-global paths and being starved or OOM-killed, and the full-set ShellCheck analysis overran its timeout under contention, while both finish reliably on fresh hosted VMs.
 The macOS snapshot job (`macos-latest`) bills at 10x, so a dispatch runs it only with `-f macos_snapshot=true`, and the manual Windows Herdr spike ([`windows-herdr-spike.yml`](.github/workflows/windows-herdr-spike.yml)) stays on `windows-latest`.
 

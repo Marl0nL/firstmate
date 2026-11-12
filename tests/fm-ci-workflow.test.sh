@@ -745,6 +745,9 @@ RUBY
 }
 
 # This fork: ci.yml has no automatic trigger at all, only workflow_dispatch.
+# Several jobs keep upstream's dormant pull request conditions (the coverage
+# guard has none), so restoring a pull_request or pull_request_target trigger
+# would run outside code without the dispatch-only gate this pins.
 test_ci_runs_only_on_manual_dispatch() {
   local triggers
   triggers=$(ruby -ryaml -e '
@@ -755,6 +758,27 @@ puts(triggers.is_a?(Hash) ? triggers.keys.sort.join(" ") : Array(triggers).sort.
   [ "$triggers" = workflow_dispatch ] \
     || fail "ci.yml must trigger on workflow_dispatch only, got: $triggers"
   pass "ci.yml runs only on manual dispatch"
+}
+
+# A dispatch's ref may name an outside pull request's code (CONTRIBUTING.md
+# "Where CI runs"), so a job that can land on the self-hosted runner must
+# never check anything out: any runs-on that names self-hosted, directly or
+# inside an expression, forbids an actions/checkout step in that job.
+test_no_self_hosted_job_checks_out_code() {
+  local offenders
+  offenders=$(ruby -ryaml -e '
+doc = YAML.load_file(ARGV[0])
+bad = doc.fetch("jobs").select do |_, job|
+  Array(job["runs-on"]).join(" ").include?("self-hosted") &&
+    Array(job["steps"]).any? { |step| step["uses"].to_s.start_with?("actions/checkout") }
+end
+puts bad.keys.sort
+' "$CI_WORKFLOW") || fail "could not read ci.yml jobs"
+  [ -z "$offenders" ] \
+    || fail "a self-hosted ci.yml job must not check out the dispatched ref or PR code: ${offenders//$'\n'/ }"
+  grep -q 'self-hosted' "$CI_WORKFLOW" \
+    || fail "expected at least one self-hosted job (the Full suite verdict) for this assertion to bind"
+  pass "no self-hosted ci.yml job checks out the dispatched ref or PR code"
 }
 
 # A dispatch is a trusted run: every job except the opt-in macOS snapshot
@@ -821,5 +845,6 @@ test_fast_tier_shares_one_short_tripwire
 test_normal_tier_shares_one_budget
 test_heavy_tier_keeps_a_step_tripwire_under_a_job_backstop
 test_ci_runs_only_on_manual_dispatch
+test_no_self_hosted_job_checks_out_code
 test_dispatch_runs_the_suite_with_macos_opt_in
 test_dispatches_supersede_per_ref
