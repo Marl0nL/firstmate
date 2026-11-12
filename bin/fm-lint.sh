@@ -19,6 +19,10 @@
 # The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
 # malformed GitHub workflow, including a self-broken ci.yml, fails locally
 # before merge instead of only failing to run as CI.
+# The default path also runs bin/fm-lint-denylist.sh, a LOCAL operator guard
+# against tracked files containing a string listed in the gitignored
+# config/public-denylist. That file is absent by default, so the guard is a
+# silent no-op in CI and fresh clones.
 #
 # With no explicit paths, the file set and source-following posture depend
 # on context:
@@ -474,6 +478,16 @@ fm_lint_usage() {
 fm_lint_run_workflows() {
   [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
   "$SELF_DIR/fm-lint-workflows.sh"
+}
+
+# The default no-args lint also runs the LOCAL operator denylist guard. Explicit
+# paths stay a ShellCheck-only override, matching fm_lint_run_workflows above.
+# A standalone copy of this script without its sibling guard (a test fixture
+# repo) has no denylist to enforce, so it skips rather than failing to exec.
+fm_lint_run_denylist() {
+  [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
+  [ -f "$SELF_DIR/fm-lint-denylist.sh" ] || return 0
+  "$SELF_DIR/fm-lint-denylist.sh"
 }
 
 # Backend adapters belong behind tasks-axi. Keep direct Beads CLI invocations
@@ -939,6 +953,7 @@ if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
   overall_rc=0
   fm_lint_run_backend_purity || overall_rc=$?
   fm_lint_run_workflows || overall_rc=$?
+  fm_lint_run_denylist || overall_rc=$?
   exit "$overall_rc"
 fi
 
@@ -1274,8 +1289,10 @@ fi
 
 if [ "$overall_rc" -eq 0 ]; then
   fm_lint_run_workflows || overall_rc=$?
+  fm_lint_run_denylist || overall_rc=$?
 else
   fm_lint_run_workflows || true
+  fm_lint_run_denylist || true
 fi
 
 if [ -n "$TELEMETRY" ]; then
