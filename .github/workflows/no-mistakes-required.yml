@@ -27,7 +27,140 @@ jobs:
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
+      # A second accepted form for direct PRs: a self-review attestation bound
+      # to the PR's current head sha plus a visible "## Self-review" section.
+      # A valid one satisfies this check on its own and skips the no-mistakes
+      # action below. A body carrying the no-mistakes signature, or no
+      # self-review marker at all, defers to that action unchanged; a present
+      # but invalid self-review attestation fails here. This step runs only
+      # inline shell, never repository scripts, because it may run on the
+      # self-hosted runner. CONTRIBUTING.md documents both forms, and
+      # tests/fm-no-mistakes-required-self-review.test.sh executes this script.
+      - name: Accept a head-bound self-review attestation
+        id: self-review
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+          prefix='<!-- self-review-attestation:v1 '
+          suffix=' -->'
+          form='    <!-- self-review-attestation:v1 {"head_sha":"<full 40-char sha>","reviewer":"<who/what reviewed>","evidence":"<one line: what was run>"} -->'
+          body="${PR_BODY:-}"
+          verdict() {
+            printf 'accepted=%s\n' "$1" >> "$GITHUB_OUTPUT"
+          }
+          reject() {
+            {
+              echo "::error::$1"
+              shift
+              for line in "$@"; do
+                echo "$line"
+              done
+              echo
+              echo "See CONTRIBUTING.md for the self-review path."
+              echo
+              echo "PR author: ${PR_AUTHOR}"
+            } >&2
+            exit 1
+          }
+          if printf '%s' "$body" | grep -qF -- "$marker"; then
+            echo "Found the no-mistakes signature in PR #${PR_NUMBER} body; the pipeline attestation check judges this PR."
+            verdict false
+            exit 0
+          fi
+          case "$body" in
+            *"$prefix"*) ;;
+            *)
+              echo "::notice::PR #${PR_NUMBER} carries no self-review attestation, so the no-mistakes pipeline attestation check judges it. A direct PR may instead carry a visible '## Self-review' section plus this comment bound to the PR head:"
+              echo "$form"
+              verdict false
+              exit 0
+              ;;
+          esac
+          echo "Found self-review attestation marker in PR #${PR_NUMBER} body."
+          command -v jq >/dev/null 2>&1 \
+            || reject "This check requires jq to parse the self-review attestation, but jq was not found on the runner."
+          # The body may QUOTE the attestation prefix before the real comment
+          # (evidence excerpts, review findings, or this check's own
+          # diagnostics), so first-match extraction can land inside a
+          # quotation. Scan every occurrence: a parseable candidate whose
+          # head_sha equals the PR head wins, because a quoted example with
+          # placeholder values is valid JSON too but can never name the
+          # current head. Without a match, the first parseable candidate whose
+          # head_sha is a full 40-hex sha is kept (else the first parseable
+          # one) so the stale diagnostic names the genuinely stale attestation.
+          json=''
+          parse_ok=0
+          fallback=''
+          fallback_is_sha=0
+          scan="$body"
+          while [ "$parse_ok" -ne 1 ]; do
+            case "$scan" in
+              *"$prefix"*) ;;
+              *) break ;;
+            esac
+            scan="${scan#*"$prefix"}"
+            case "$scan" in
+              *"$suffix"*)
+                candidate="${scan%%"$suffix"*}"
+                if printf '%s' "$candidate" | jq -e . >/dev/null 2>&1; then
+                  candidate_sha=$(printf '%s' "$candidate" | jq -r '.head_sha? | strings // empty' 2>/dev/null || true)
+                  if [ -n "${PR_HEAD_SHA:-}" ] && [ "$candidate_sha" = "$PR_HEAD_SHA" ]; then
+                    json="$candidate"
+                    parse_ok=1
+                  elif [ "$fallback_is_sha" -ne 1 ] && printf '%s' "$candidate_sha" | grep -qE '^[0-9a-f]{40}$'; then
+                    fallback="$candidate"
+                    fallback_is_sha=1
+                  elif [ -z "$fallback" ]; then
+                    fallback="$candidate"
+                  fi
+                fi
+                ;;
+            esac
+          done
+          if [ "$parse_ok" -ne 1 ] && [ -n "$fallback" ]; then
+            json="$fallback"
+            parse_ok=1
+          fi
+          if [ "$parse_ok" -ne 1 ]; then
+            reject "Self-review attestation is unparseable: no '${prefix}' occurrence carries a valid JSON payload before ' -->'." \
+              "" "The accepted form is one HTML comment in the PR body:" "" "$form"
+          fi
+          missing=''
+          for key in head_sha reviewer evidence; do
+            value=$(printf '%s' "$json" | jq -r --arg key "$key" '.[$key] | strings // empty' 2>/dev/null || true)
+            if [ -z "$value" ]; then
+              missing="${missing:+${missing}, }${key}"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            reject "Self-review attestation is incomplete: missing or empty key(s): ${missing}." \
+              "" "All three keys must be non-empty strings:" "" "$form"
+          fi
+          if [ -z "${PR_HEAD_SHA:-}" ]; then
+            reject "This check could not read the PR head sha from the event payload, so the self-review attestation cannot be bound to a commit."
+          fi
+          attested_sha=$(printf '%s' "$json" | jq -r '.head_sha')
+          if [ "$attested_sha" != "$PR_HEAD_SHA" ]; then
+            reject "Self-review attestation is stale: the PR head moved. The attestation is bound to ${attested_sha} but the PR head is now ${PR_HEAD_SHA}." \
+              "" "A self-review covers exactly the commit it names. Commits pushed after" \
+              "the review are unreviewed until someone re-reviews the new head and" \
+              "updates the attestation's head_sha to ${PR_HEAD_SHA}."
+          fi
+          if ! printf '%s\n' "$body" | grep -qE '^## Self-review[[:space:]]*$'; then
+            reject "Self-review attestation is present but the visible '## Self-review' section is missing from the PR body." \
+              "" "The machine-checkable comment attests the review; a '## Self-review'" \
+              "heading with what was checked is required so a human reviewer can" \
+              "read it too."
+          fi
+          echo "Self-review attestation is valid and bound to PR head ${PR_HEAD_SHA}."
+          verdict true
       - name: Verify no-mistakes signature and pipeline attestation
+        if: steps.self-review.outputs.accepted != 'true'
         uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@f6441c96c352a18b9cadcaef6b6c7017e9ac3970 # v1.80.1
         with:
           exempt-authors: kunchenguid

@@ -14,6 +14,11 @@ The attestation must bind to the current PR head commit and report the review, t
 It evaluates every PR opening and body edit independently, reruns after head synchronization or reopening, and prevents a later edit from replacing an earlier pending compliance check.
 GitHub Actions and Dependabot are exempt so their automation keeps working, but other contributor PRs that do not satisfy the attestation contract will not be reviewed or merged.
 
+This fork's check also accepts a second form for work shipped as a direct PR after a careful review of the exact head commit: a visible `## Self-review` section saying what was checked, plus one HTML comment of the form `<!-- self-review-attestation:v1 {"head_sha":"<full 40-char sha>","reviewer":"<who/what reviewed>","evidence":"<one line: what was run>"} -->` with all three keys non-empty.
+Its `head_sha` must equal the PR's current head sha, so any push after the review turns the check red until someone re-reviews the new head and updates the attestation.
+The JSON payload may be single-line or pretty-printed, as long as the closing ` -->` stays on the same line as the payload's last character.
+A body carrying the no-mistakes signature is judged by the pipeline attestation alone, a body without the self-review marker falls through to it, and a present but invalid self-review attestation fails; there is no label or other bypass beyond these two forms.
+
 ## Workflow
 
 1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent (`git@github.com:kunchenguid/firstmate.git`).
