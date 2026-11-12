@@ -22,7 +22,7 @@
 #
 # Safety (2026-07-02 incident): every test-owned Herdr operation goes through
 # bin/fm-herdr-lab.sh, which appends the named session flag and verifies the
-# default fleet session is unchanged after teardown. Never replace the helper
+# configured fleet session is unchanged after teardown. Never replace the helper
 # with an ambient HERDR_SESSION-only command.
 set -u
 
@@ -36,19 +36,18 @@ assert_contains_local() {  # <haystack> <needle> <msg>
     *) fail "$3"$'\n'"--- got ---"$'\n'"$1" ;;
   esac
 }
+assert_not_contains_local() {  # <haystack> <needle> <msg>
+  case "$1" in
+    *"$2"*) fail "$3"$'\n'"--- got ---"$'\n'"$1" ;;
+    *) : ;;
+  esac
+}
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
 
 export FM_GATE_REFUSE_BYPASS=1
-
-# Every spawn below launches a deliberate non-agent stand-in command, so
-# fm-spawn.sh's post-launch agent-start confirmation could never observe a
-# registered agent and would fail the spawn after two full poll windows.
-# Disable it exactly as tests/lib.sh does for fake panes; the confirmation has
-# its own dedicated coverage in tests/fm-spawn-agent-confirm.test.sh.
-export FM_SPAWN_CONFIRM=0
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
@@ -97,7 +96,14 @@ mkdir -p "$STATE" "$DATA/$ID" "$CONFIG"
 # Backend auto-detection is what is under test here, so opt out of the default-on
 # presentation projection and keep the assertions on the flat per-home workspace.
 printf 'off\n' > "$CONFIG/herdr-presentation-spaces"
-printf 'trivial autodetect-smoke brief: nothing to do.\n' > "$DATA/$ID/brief.md"
+cat > "$DATA/$ID/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise Herdr backend auto-detection.
+
+## Firstmate spec
+Verify the real spawn path selects Herdr.
+EOF
 
 PROJ="$TMP_ROOT/scratch-project"
 mkdir -p "$PROJ"
@@ -109,9 +115,11 @@ git clone --quiet --bare "$PROJ" "$PROJ.origin.git"
 git -C "$PROJ" remote add origin "file://$PROJ.origin.git"
 
 # --- spawn with NO explicit backend config; HERDR_ENV=1 is the only marker --
+# FM_BACKEND_HC_DEFAULT=0 turns off this fork's hc default, which would
+# otherwise win over HERDR_ENV on a host with herdr-core installed.
 
 OUT_FILE="$TMP_ROOT/spawn.out"; ERR_FILE="$TMP_ROOT/spawn.err"
-env -u TMUX -u FM_BACKEND PATH="$PATH" HERDR_ENV=1 \
+env -u TMUX -u FM_BACKEND PATH="$PATH" HERDR_ENV=1 FM_BACKEND_HC_DEFAULT=0 \
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
   FM_CONFIG_OVERRIDE="$CONFIG" FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
   FM_SPAWN_NO_GUARD=1 \
@@ -120,11 +128,11 @@ env -u TMUX -u FM_BACKEND PATH="$PATH" HERDR_ENV=1 \
 status=$?
 [ "$status" -eq 0 ] || fail "fm-spawn.sh did not succeed auto-detecting herdr"$'\n'"--- stdout ---"$'\n'"$(cat "$OUT_FILE")"$'\n'"--- stderr ---"$'\n'"$(cat "$ERR_FILE")"
 
-assert_contains_local "$(cat "$ERR_FILE")" "NOTICE" \
-  "fm-spawn.sh did not print the auto-detect notice to stderr when selecting herdr"
-assert_contains_local "$(cat "$ERR_FILE")" "EXPERIMENTAL herdr backend" \
-  "fm-spawn.sh's auto-detect notice did not flag herdr as experimental"
-pass "real herdr: fm-spawn.sh auto-detects herdr from HERDR_ENV=1 (no explicit config) and prints the loud notice"
+assert_not_contains_local "$(cat "$ERR_FILE")" "EXPERIMENTAL" \
+  "fm-spawn.sh's Herdr auto-detection retained the obsolete experimental label"
+assert_not_contains_local "$(cat "$ERR_FILE")" "--backend tmux to opt out" \
+  "fm-spawn.sh's Herdr auto-detection retained the obsolete tmux opt-out steer"
+pass "real herdr: fm-spawn.sh auto-detects verified herdr from HERDR_ENV=1 (no explicit config) without an opt-out steer"
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || fail "fm-spawn.sh did not write a meta file for $ID"
@@ -177,7 +185,7 @@ pass "real herdr: teardown completes the auto-detected spawn/teardown cycle (met
 
 if ! cleanup_all; then
   trap - EXIT
-  fail "isolated Herdr lab teardown failed or the default fleet session changed"
+  fail "isolated Herdr lab teardown failed or the configured fleet session changed"
 fi
 trap - EXIT
-pass "real herdr: isolated lab session removed and default fleet session unchanged"
+pass "real herdr: isolated lab session removed and configured fleet session unchanged"

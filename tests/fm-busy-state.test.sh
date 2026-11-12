@@ -165,6 +165,112 @@ SH
   pass "the writer breaks a stale lock instead of dying on GNU stat output"
 }
 
+# A writer killed inside its critical section leaves a FRESH orphan lock behind;
+# teardown kills a worker whose exit hook may be mid-write and then retires the
+# busy state moments later. The writer must outwait the stale bound and break
+# that lock on the first retire, rather than give up while the lock is still
+# young and leave cleanup to fail until some later retry.
+test_fresh_orphan_lock_is_broken_on_the_first_retire() {
+  local state gen out status started elapsed
+  state=$(new_state_dir fresh-orphan)
+  gen=$("$EV" arm "$state" t1)
+  mkdir "$state/t1.busy-state.lock"
+  started=$SECONDS
+  out=$(env -u FM_BUSY_LOCK_STALE_SECS "$EV" retire "$state" t1 --gen "$gen" 2>&1) && status=0 || status=$?
+  elapsed=$((SECONDS - started))
+  [ "$status" = 0 ] || fail "the first retire over a fresh orphan lock was refused: $out"
+  [ ! -e "$state/t1.busy-state" ] || fail "retire left the record behind"
+  [ ! -e "$state/t1.busy-gen" ] || fail "retire left the gen sidecar behind"
+  [ ! -e "$state/t1.busy-state.lock" ] || fail "retire left the orphan lock behind"
+  # Non-vacuity: with the default five-second bound a fresh lock cannot read as
+  # stale for about four seconds, so a quick success means something other than
+  # the stale window removed it.
+  [ "$elapsed" -ge 3 ] \
+    || fail "retire succeeded after ${elapsed}s, before a fresh lock could reach the stale bound"
+  [ "$elapsed" -le 8 ] || fail "retire took ${elapsed}s to break a fresh orphan lock"
+  pass "the first retire outwaits the stale bound and breaks a fresh orphan lock"
+}
+
+# The longer wait must not turn into breaking a live writer's lock: a holder
+# that releases inside the stale bound is waited for, never broken, and the
+# waiter then applies its change.
+test_live_writer_lock_is_waited_for_not_broken() {
+  local state gen retire_pid
+  state=$(new_state_dir live-writer)
+  gen=$("$EV" arm "$state" t1)
+  mkdir "$state/t1.busy-state.lock"
+  : > "$state/t1.busy-state.lock/holder"
+  env -u FM_BUSY_LOCK_STALE_SECS "$EV" retire "$state" t1 --gen "$gen" >/dev/null 2>&1 &
+  retire_pid=$!
+  sleep 1
+  kill -0 "$retire_pid" 2>/dev/null || fail "retire did not wait for a live writer's lock"
+  [ -e "$state/t1.busy-state.lock/holder" ] || fail "retire broke a live writer's lock"
+  [ -e "$state/t1.busy-state" ] || fail "retire bypassed a live writer's lock"
+  rm -f "$state/t1.busy-state.lock/holder"
+  rmdir "$state/t1.busy-state.lock"
+  wait "$retire_pid" || fail "retire failed after the live writer released its lock"
+  [ ! -e "$state/t1.busy-state" ] || fail "retire left the record behind"
+  pass "a live writer's lock is waited for and never broken"
+}
+
+# Digit-only stale settings retain decimal meaning, including 08.
+test_leading_zero_stale_setting_waits_for_live_writer() {
+  local state gen retire_pid
+  state=$(new_state_dir leading-zero-stale)
+  gen=$("$EV" arm "$state" t1)
+  mkdir "$state/t1.busy-state.lock"
+  : > "$state/t1.busy-state.lock/holder"
+  env FM_BUSY_LOCK_STALE_SECS=08 "$EV" retire "$state" t1 --gen "$gen" >/dev/null 2>&1 &
+  retire_pid=$!
+  sleep 1
+  kill -0 "$retire_pid" 2>/dev/null || fail "retire did not wait for a live writer's lock"
+  [ -e "$state/t1.busy-state.lock/holder" ] || fail "retire broke a live writer's lock"
+  [ -e "$state/t1.busy-state" ] || fail "retire bypassed a live writer's lock"
+  rm -f "$state/t1.busy-state.lock/holder"
+  rmdir "$state/t1.busy-state.lock"
+  wait "$retire_pid" || fail "retire failed after the live writer released its lock"
+  [ ! -e "$state/t1.busy-state" ] || fail "retire left the record behind"
+  pass "a decimal leading-zero stale setting waits for a live writer and completes retirement"
+}
+
+# The wait stays bounded: a lock that never ages past the stale bound - live
+# writers re-taking it back to back - still ends in a lock-timeout refusal that
+# leaves the record untouched.
+test_lock_that_stays_young_is_refused_within_a_bound() {
+  local state gen stop out status started elapsed toucher i
+  state=$(new_state_dir young-lock)
+  gen=$("$EV" arm "$state" t1)
+  stop="$state/../toucher-running"
+  mkdir "$state/t1.busy-state.lock"
+  : > "$stop"
+  (
+    i=0
+    while [ -e "$stop" ] && [ "$i" -lt 100 ]; do
+      touch "$state/t1.busy-state.lock" 2>/dev/null || true
+      sleep 0.2
+      i=$((i + 1))
+    done
+  ) &
+  toucher=$!
+  started=$SECONDS
+  out=$(FM_BUSY_LOCK_STALE_SECS=2 "$EV" retire "$state" t1 --gen "$gen" 2>&1) && status=0 || status=$?
+  elapsed=$((SECONDS - started))
+  rm -f "$stop"
+  wait "$toucher" 2>/dev/null || true
+  [ "$status" = 1 ] || fail "retire over a lock that never went stale returned $status: $out"
+  case "$out" in
+    *'busy-state lock timeout for t1'*) : ;;
+    *) fail "the bounded refusal did not name the lock timeout: $out" ;;
+  esac
+  [ -e "$state/t1.busy-state" ] || fail "a refused retire removed the record"
+  [ "$elapsed" -ge 2 ] || fail "retire gave up after ${elapsed}s, inside the stale bound"
+  [ "$elapsed" -le 6 ] || fail "retire waited ${elapsed}s, past its bound"
+  rmdir "$state/t1.busy-state.lock"
+  FM_BUSY_LOCK_STALE_SECS=2 "$EV" retire "$state" t1 --gen "$gen" \
+    || fail "retire failed once the lock was released"
+  pass "a lock that stays younger than the stale bound is refused within a bound"
+}
+
 test_retire_missing_sidecar_is_idempotent() {
   local state gen
   state=$(new_state_dir retire-missing)
@@ -289,6 +395,141 @@ Ctrl+c:cancel'
   pass "converted adapters never classify busy from rendered footer text"
 }
 
+# --- launch-prompt backstop (a launch pinned at fm-spawn, parked on a
+# recognized interactive prompt, must classify unknown rather than busy) ------
+
+test_launch_prompt_claude_trust_dialog() {
+  local state out
+  state=$(new_state_dir launch-prompt-claude)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" 'Accessing workspace: /tmp/wt-a
+Quick safety check: Is this a project you created or one you trust?
+Claude Code'"'"'ll be able to read, edit, and execute files here.
+> No, exit
+  Yes, I trust this folder
+Enter to confirm . Esc to cancel')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a launch pinned at fm-spawn parked on Claude's trust dialog must classify unknown launch-prompt, got '$out'"
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" 'Allow external CLAUDE.md file imports?
+This project'"'"'s CLAUDE.md imports files outside the current working directory.
+> No, disable external imports
+  Yes, allow external imports')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a launch pinned at fm-spawn parked on Claude's external-imports dialog must classify unknown launch-prompt, got '$out'"
+  pass "a Claude launch parked on its trust or external-imports dialog classifies unknown launch-prompt"
+}
+
+test_launch_prompt_pi_trust_dialog() {
+  local state out h
+  for h in pi pi-signed omp; do
+    state=$(new_state_dir "launch-prompt-$h")
+    "$EV" arm "$state" t1 >/dev/null
+    out=$(fm_busy_classify tmux w1 "$h" t1 "$state" ' Trust project folder?
+ /tmp/fm-pi-trust-check/wt
+
+ This allows pi to load .pi settings and resources, install missing project packages, and execute project extensions.
+
+ > Trust
+   Trust parent folder (/tmp/fm-pi-trust-check)
+   Trust (this session only)
+   Do not trust
+   Do not trust (this session only)
+
+ up/down navigate  enter select  escape/ctrl+c cancel')
+    [ "$out" = "unknown launch-prompt" ] \
+      || fail "a $h launch pinned at fm-spawn parked on the project-trust dialog must classify unknown launch-prompt, got '$out'"
+  done
+  pass "a Pi-family launch (pi, pi-signed, omp) parked on the project-trust dialog classifies unknown launch-prompt"
+}
+
+test_launch_prompt_pi_requires_both_markers() {
+  local state out
+  state=$(new_state_dir launch-prompt-pi-partial)
+  "$EV" arm "$state" t1 >/dev/null
+  # "trust" alone, with neither the dialog heading nor its decline option, must
+  # not be read as the dialog - it is an ordinary word a worker's own output
+  # could easily contain.
+  out=$(fm_busy_classify tmux w1 pi t1 "$state" 'I trust this approach and will proceed.')
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "ordinary prose containing 'trust' must not classify as a parked launch, got '$out'"
+  pass "the Pi signature requires both the dialog heading and its decline option, not the bare word trust"
+}
+
+test_launch_prompt_gemini_dialogs() {
+  local state out
+  state=$(new_state_dir launch-prompt-gemini-trust)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 gemini t1 "$state" 'Do you trust the files in this folder?
+● 1. Trust folder (worktree)
+  2. Trust parent folder (project)
+  3. Don'"'"'t trust')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a Gemini launch parked on the workspace-trust dialog must classify unknown launch-prompt, got '$out'"
+
+  state=$(new_state_dir launch-prompt-gemini-auth)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 gemini t1 "$state" 'How would you like to authenticate for this project?
+● 2. Use Gemini API Key')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a Gemini launch parked on the auth-method picker must classify unknown launch-prompt, got '$out'"
+
+  state=$(new_state_dir launch-prompt-gemini-apikey)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 gemini t1 "$state" 'Enter Gemini API Key
+> ')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a Gemini launch parked on the API-key entry dialog must classify unknown launch-prompt, got '$out'"
+  pass "a Gemini launch parked on its trust, auth-picker, or API-key dialog classifies unknown launch-prompt"
+}
+
+test_launch_prompt_never_shortens_a_working_launch() {
+  local state out
+  state=$(new_state_dir launch-prompt-working)
+  "$EV" arm "$state" t1 >/dev/null
+  # A genuinely working launch (Claude's ordinary busy footer, rendered before
+  # its own hook has posted a single event yet) must keep the normal busy
+  # bound rather than being shortened by this backstop.
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" '• Working (6s • esc to interrupt)')
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "a genuinely busy launch must not be reclassified, got '$out'"
+  pass "the launch-prompt backstop never reclassifies a genuinely working launch"
+}
+
+test_launch_prompt_scoped_to_armed_harnesses() {
+  local state out
+  # opencode ships no trust dialog (fm-busy-lib.sh header), so it has no
+  # signature at all: even Claude's own dialog text must not reclassify it.
+  state=$(new_state_dir launch-prompt-opencode)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 opencode t1 "$state" \
+    'Quick safety check: Is this a project you created or one you trust?')
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "opencode has no launch-prompt signature and must stay busy fm-spawn, got '$out'"
+  pass "the launch-prompt backstop is scoped to harnesses with a verified signature"
+}
+
+test_launch_prompt_never_reclassifies_an_advanced_record() {
+  local state gen out
+  state=$(new_state_dir launch-prompt-advanced)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source claude-hook --event user-prompt-submit
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" \
+    'Quick safety check: Is this a project you created or one you trust?')
+  [ "$out" = "busy claude-hook" ] \
+    || fail "a record that has advanced past fm-spawn must never be reclassified by pane text, got '$out'"
+  pass "the launch-prompt backstop only ever touches the untouched fm-spawn seed"
+}
+
+test_launch_prompt_requires_a_captured_tail() {
+  local state out
+  state=$(new_state_dir launch-prompt-no-tail)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 claude t1 "$state")
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "with no captured tail the record's own state must stand, got '$out'"
+  pass "the launch-prompt backstop never runs without a captured tail"
+}
+
 test_grok_regex_isolated() {
   local state out
   state=$(new_state_dir grok-arm)
@@ -328,6 +569,18 @@ test_kimi_unverified_gate() {
   out=$(fm_busy_classify tmux w1 kimi t1 "$state" '🌒 · thinking')
   [ "$out" = "unknown kimi-unverified" ] || fail "kimi must not classify from footer text, got '$out'"
   pass "standalone kimi classifies unknown until the live verification gate opens"
+}
+
+test_pi_stream_version_floor_accepts_verified_rejects_unverified() {
+  local version
+  version=1.2.0
+  fm_busy_pi_stream_version_supported "$version" \
+    || fail "Pi $version must pass the verified stream gate"
+  for version in '' 1.1.9 0.82.0 1.2 1.2.1 1.3.0 1.10.0 2.0.0 1.4.0 1.x.0 1.2.0.1 1.2.0-beta.3 1.2.0+build .1.2.0 1.2.0. 1000000000.0.0 'pi 1.4.0'; do
+    fm_busy_pi_stream_version_supported "$version" \
+      && fail "Pi '${version:-<empty>}' must not pass the verified stream gate"
+  done
+  pass "Pi stream gate accepts only the verified release, rejects newer, older, prerelease, and malformed"
 }
 
 test_cursor_ignores_rendered_and_native_signals() {
@@ -376,88 +629,48 @@ test_dead_endpoint_overrides() {
 }
 
 test_herdr_native_busy_only() {
-  # pi is a harness herdr registers itself, so its native agent_status is an
-  # independent signal (unlike claude - see test_herdr_native_busy_not_trusted_for_claude).
   local state out
   state=$(new_state_dir herdr-native)
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
   fm_backend_busy_state() { printf '%s' "$FAKE_NATIVE"; }
   FAKE_NATIVE=busy
-  out=$(fm_busy_classify herdr s:p pi t1 "$state")
+  out=$(fm_busy_classify herdr s:p claude t1 "$state")
   [ "$out" = "busy herdr-native" ] || fail "native busy with no record must classify busy, got '$out'"
   FAKE_NATIVE=idle
-  out=$(fm_busy_classify herdr s:p pi t1 "$state")
+  out=$(fm_busy_classify herdr s:p claude t1 "$state")
   [ "$out" = "unknown missing" ] || fail "native idle must NOT classify idle, got '$out'"
   # A valid record outranks the native verdict.
   local gen
   gen=$("$EV" arm "$state" t1)
-  "$EV" apply "$state" t1 idle --gen "$gen" --source pi-ext --event stop
+  "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop
   FAKE_NATIVE=busy
-  out=$(fm_busy_classify herdr s:p pi t1 "$state")
-  [ "$out" = "idle pi-ext" ] || fail "the adapter record must outrank herdr's native verdict, got '$out'"
+  out=$(fm_busy_classify herdr s:p claude t1 "$state")
+  [ "$out" = "idle claude-hook" ] || fail "the adapter record must outrank herdr's native verdict, got '$out'"
   unset -f fm_backend_busy_state
   pass "herdr's native verdict is trusted for busy only, and records outrank it"
 }
 
-test_herdr_native_busy_not_trusted_for_claude() {
-  # Anti-circularity: herdr never registers a claude crew itself, so its native
-  # agent_status for a claude pane is either unknown or firstmate's OWN
-  # report-agent echo (Track U3) - never an independent signal. fm_busy_classify
-  # must therefore NOT borrow herdr's native busy for claude, or a wedged crew's
-  # stale "working" report could latch busy and suppress stale detection.
-  local state out
-  state=$(new_state_dir herdr-native-claude)
+test_tern_native_busy_only() {
+  local state out gen verdict
+  state=$(new_state_dir tern-native)
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
-  fm_backend_busy_state() { printf 'busy'; }
-  out=$(fm_busy_classify herdr s:p claude t1 "$state")
-  [ "$out" = "unknown missing" ] || fail "claude must NOT borrow herdr's native busy (its own echo), got '$out'"
-  # A real firstmate turn record is still authoritative for claude.
-  local gen
-  gen=$("$EV" arm "$state" t1)
-  "$EV" apply "$state" t1 busy --gen "$gen" --source claude-hook --event submit
-  out=$(fm_busy_classify herdr s:p claude t1 "$state")
-  [ "$out" = "busy claude-hook" ] || fail "claude's own turn record must still drive busy, got '$out'"
-  unset -f fm_backend_busy_state
-  pass "claude does not borrow herdr's native busy verdict (report-agent echo), but its own record still counts"
-}
-
-# fm_busy_native_busy is the ONE owner of how far a backend's native
-# agent-registry verdict (fm_backend_busy_state) is trusted. It is what the
-# endpoint delivery-confirmation observers (secondmate pending-reply,
-# wake-resident stand-down) share, so its rule is pinned here directly rather
-# than only through fm_busy_classify.
-test_native_busy_owner_trusts_busy_only() {
-  local FAKE_NATIVE
-  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_native_busy
   fm_backend_busy_state() { printf '%s' "$FAKE_NATIVE"; }
   FAKE_NATIVE=busy
-  fm_busy_native_busy herdr s:p pi \
-    || fail "a native busy must be trusted for a non-claude harness"
-  FAKE_NATIVE=idle
-  if fm_busy_native_busy herdr s:p pi; then
-    fail "a native idle must NOT be trusted - it is a pane-typed agent's shadow"
-  fi
-  FAKE_NATIVE=unknown
-  if fm_busy_native_busy herdr s:p pi; then
-    fail "a native unknown must NOT be trusted as busy"
-  fi
+  out=$(fm_busy_classify tern 7:9 claude t1 "$state")
+  [ "$out" = "busy tern-native" ] || fail "tern native busy with no record must classify busy, got '$out'"
+  for verdict in idle blocked unknown; do
+    FAKE_NATIVE=$verdict
+    out=$(fm_busy_classify tern 7:9 claude t1 "$state")
+    [ "$out" = "unknown missing" ] || fail "tern native '$verdict' must NOT classify as a verdict, got '$out'"
+  done
+  # A valid record outranks the native verdict.
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop
   FAKE_NATIVE=busy
-  if fm_busy_native_busy herdr s:p claude; then
-    fail "claude's native busy is firstmate's own report-agent echo and must NOT be trusted"
-  fi
-  if fm_busy_native_busy herdr s:p pi-signed; then
-    : # non-claude harnesses keep the trusted busy
-  else
-    fail "pi-signed native busy must stay trusted"
-  fi
+  out=$(fm_busy_classify tern 7:9 claude t1 "$state")
+  [ "$out" = "idle claude-hook" ] || fail "the adapter record must outrank tern's native verdict, got '$out'"
   unset -f fm_backend_busy_state
-  # With the backend layer unsourced there is no native primitive at all; the
-  # owner defers to the caller's own reality-touching fallback rather than
-  # asserting busy.
-  if fm_busy_native_busy herdr s:p pi; then
-    fail "a missing native primitive must defer, not assert busy"
-  fi
-  pass "fm_busy_native_busy trusts a native busy only (never idle, never claude, never when unsourced)"
+  pass "tern's native verdict is trusted for busy only (source tern-native), and records outrank it"
 }
 
 # The record parser runs inside sourcing callers (the watcher, the daemon, the
@@ -502,6 +715,112 @@ test_boolean_view_never_promotes_unknown() {
   pass "the boolean view reports busy only on an exact busy verdict"
 }
 
+test_progress_is_generation_bound_and_not_semantic_state() {
+  local state gen replacement before
+  state=$(new_state_dir native-progress)
+  gen=$("$EV" arm "$state" t1)
+  before=$(cat "$state/t1.busy-state")
+  "$EV" progress "$state" t1 --gen "$gen" || fail "current progress was refused"
+  [ -f "$state/t1.progress" ] || fail "progress marker missing"
+  [ ! -e "$state/t1.turn-ended" ] || fail "progress emitted a completed turn"
+  [ "$(cat "$state/t1.busy-state")" = "$before" ] || fail "progress changed semantic state"
+  replacement=$("$EV" arm "$state" t1)
+  [ ! -e "$state/t1.progress" ] || fail "arm retained the previous incarnation's progress"
+  if "$EV" progress "$state" t1 --gen "$gen" 2>/dev/null; then fail "stale progress was accepted"; fi
+  [ ! -e "$state/t1.progress" ] || fail "stale progress wrote a marker"
+  "$EV" progress "$state" t1 --gen "$replacement" || fail "replacement progress was refused"
+  "$EV" retire "$state" t1 --gen "$replacement" || fail "retire failed"
+  [ ! -e "$state/t1.progress" ] || fail "retire retained progress"
+  pass "native progress is generation-bound, separately recorded, and cleared on arm and retire"
+}
+
+test_turn_ended_notification_is_generation_bound() {
+  local state gen
+  state=$(new_state_dir turn-ended)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 idle --gen "$gen" --source commandcode-mod --event run-end \
+    || fail "current idle event was refused"
+  [ ! -e "$state/t1.turn-ended" ] || fail "an idle event without --turn-ended notified"
+  "$EV" apply "$state" t1 idle --gen "$gen" --source commandcode-mod --event run-end --turn-ended \
+    || fail "current turn-ended event was refused"
+  [ -f "$state/t1.turn-ended" ] || fail "turn-ended notification missing"
+  rm "$state/t1.turn-ended"
+  "$EV" arm "$state" t1 >/dev/null
+  if "$EV" apply "$state" t1 idle --gen "$gen" --source commandcode-mod --event run-end --turn-ended 2>/dev/null; then
+    fail "stale turn-ended event was accepted"
+  fi
+  [ ! -e "$state/t1.turn-ended" ] || fail "stale turn-ended event woke the replacement"
+  if "$EV" progress "$state" t1 --gen "$gen" --turn-ended 2>/dev/null; then fail "--turn-ended accepted outside apply"; fi
+  pass "the turn-ended notification rides the apply generation check"
+}
+
+test_model_stream_lifecycle_is_fenced() {
+  local state gen next before snapshot
+  state=$(new_state_dir model-stream)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
+  before=$(cat "$state/t1.busy-state")
+  "$EV" stream "$state" t1 open --gen "$gen" --request 1 || fail "current stream open refused"
+  snapshot=$(fm_busy_stream_read "$state" t1 pi) || fail "current stream unreadable"
+  "$EV" stream "$state" t1 progress --gen "$gen" --request 1 || fail "current progress refused"
+  [ "$(fm_busy_stream_read "$state" t1 pi)" != "$snapshot" ] || fail "progress did not advance evidence"
+  [ -f "$state/t1.model-progress" ] || fail "model progress anchor missing"
+  [ ! -e "$state/t1.progress" ] || fail "model stream changed the default native anchor"
+  [ "$(cat "$state/t1.busy-state")" = "$before" ] || fail "stream changed busy state"
+  [ ! -e "$state/t1.turn-ended" ] || fail "stream fabricated completion"
+  if fm_busy_stream_read "$state" t1 claude >/dev/null; then fail "foreign harness trusted stream"; fi
+  "$EV" stream "$state" t1 close --gen "$gen" --request 1 || fail "stream close refused"
+  [ ! -e "$state/t1.model-stream" ] || fail "close retained active marker"
+  if "$EV" stream "$state" t1 progress --gen "$gen" --request 1 2>/dev/null; then fail "closed progress accepted"; fi
+  if "$EV" stream "$state" t1 open --gen "$gen" --request 1 2>/dev/null; then fail "closed request reopened"; fi
+  "$EV" stream "$state" t1 open --gen "$gen" --request 2 || fail "retry open refused"
+  snapshot=$(fm_busy_stream_read "$state" t1 pi)
+  if "$EV" stream "$state" t1 close --gen "$gen" --request 1 2>/dev/null; then fail "old close accepted"; fi
+  [ "$(fm_busy_stream_read "$state" t1 pi)" = "$snapshot" ] || fail "old close changed retry"
+  "$EV" apply "$state" t1 idle --gen "$gen" --source pi-ext --event agent-settled
+  [ ! -e "$state/t1.model-stream" ] || fail "settled record retained stream"
+  if "$EV" stream "$state" t1 progress --gen "$gen" --request 2 2>/dev/null; then fail "idle progress accepted"; fi
+  next=$("$EV" arm "$state" t1)
+  [ ! -e "$state/t1.model-stream-order" ] || fail "replacement retained stream ordering"
+  [ ! -e "$state/t1.model-progress" ] || fail "replacement retained model progress"
+  if "$EV" stream "$state" t1 open --gen "$gen" --request 3 2>/dev/null; then fail "stale open accepted"; fi
+  "$EV" apply "$state" t1 busy --gen "$next" --source pi-ext --event agent-start
+  "$EV" stream "$state" t1 open --gen "$next" --request 1
+  "$EV" retire "$state" t1 --gen "$next"
+  [ ! -e "$state/t1.model-stream" ] && [ ! -e "$state/t1.model-stream-order" ] && [ ! -e "$state/t1.model-progress" ] || fail "retire left stream evidence"
+  if "$EV" stream "$state" t1 open --gen "$next" --request 2 2>/dev/null; then fail "unarmed open accepted"; fi
+  pass "model streams preserve state and reject stale, closed, superseded, foreign, and retired events"
+}
+
+test_model_stream_close_failure_invalidates_observation() {
+  local state gen fakebin real_mv
+  state=$(new_state_dir model-stream-close-failure)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
+  "$EV" stream "$state" t1 open --gen "$gen" --request 1
+  fakebin=$(fm_fakebin "$TMP_ROOT/model-stream-close-failure")
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+case "\${!#}" in *.model-stream-order) exit 1 ;; esac
+exec "$real_mv" "\$@"
+SH
+  chmod +x "$fakebin/mv"
+  if PATH="$fakebin:$PATH" "$EV" stream "$state" t1 close --gen "$gen" --request 1; then
+    fail "faulted close reported success"
+  fi
+  if fm_busy_stream_read "$state" t1 pi >/dev/null; then fail "failed close left active observation"; fi
+  if "$EV" stream "$state" t1 progress --gen "$gen" --request 1; then fail "late progress resurrected failed close"; fi
+  if "$EV" stream "$state" t1 open --gen "$gen" --request 1; then fail "failed close admitted duplicate request"; fi
+  "$EV" stream "$state" t1 open --gen "$gen" --request 2 || fail "new request after failed close refused"
+  pass "failed close invalidates observation before persistence and denies late replay"
+}
+
+test_model_stream_close_failure_invalidates_observation
+test_model_stream_lifecycle_is_fenced
+test_progress_is_generation_bound_and_not_semantic_state
+test_turn_ended_notification_is_generation_bound
+
 test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
 test_apply_current_gen_reset
@@ -509,6 +828,10 @@ test_apply_unarmed_refused
 test_retire_serializes_and_rejects_stale_gen
 test_retire_missing_sidecar_is_idempotent
 test_stale_lock_broken_under_gnu_stat
+test_fresh_orphan_lock_is_broken_on_the_first_retire
+test_live_writer_lock_is_waited_for_not_broken
+test_leading_zero_stale_setting_waits_for_live_writer
+test_lock_that_stays_young_is_refused_within_a_bound
 test_stale_gen_event_rejected
 test_stale_gen_record_unknown
 test_missing_record_unknown_not_idle
@@ -516,14 +839,22 @@ test_malformed_record_unknown
 test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
+test_launch_prompt_claude_trust_dialog
+test_launch_prompt_pi_trust_dialog
+test_launch_prompt_pi_requires_both_markers
+test_launch_prompt_gemini_dialogs
+test_launch_prompt_never_shortens_a_working_launch
+test_launch_prompt_scoped_to_armed_harnesses
+test_launch_prompt_never_reclassifies_an_advanced_record
+test_launch_prompt_requires_a_captured_tail
 test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
+test_pi_stream_version_floor_accepts_verified_rejects_unverified
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
-test_herdr_native_busy_not_trusted_for_claude
-test_native_busy_owner_trusts_busy_only
+test_tern_native_busy_only
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
 

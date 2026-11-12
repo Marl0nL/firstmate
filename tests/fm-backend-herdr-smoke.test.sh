@@ -67,6 +67,18 @@ esac
 [ -n "$SEEDED_TAB_ID" ] || fail "the first container_ensure in a brand-new isolated session must CREATE the workspace and report its seeded default tab id"
 pass "real herdr: container_ensure starts the isolated session's server, creates the firstmate workspace ($CONTAINER), and reports its seeded default tab id ($SEEDED_TAB_ID)"
 
+# --- client selection: the real status shape the selection reads ------------
+# bin/backends/herdr.sh "client selection" steps around a client the running
+# server refuses by reading .server.running/.server.compatible per session; a
+# fixture can only restate that shape, so prove the installed binary against
+# its own running lab server normalizes to running and compatible with equal
+# protocols.
+CLIENT_STATUS=$(fm_backend_herdr_client_status "$(command -v herdr)" "$SESSION")
+IFS='|' read -r CS_RUNNING CS_COMPATIBLE <<< "$CLIENT_STATUS"
+[ "$CS_RUNNING" = true ] || fail "real herdr: status for the running lab server normalized running=$CS_RUNNING (raw: $CLIENT_STATUS)"
+[ "$CS_COMPATIBLE" = true ] || fail "real herdr: the installed client normalized compatible=$CS_COMPATIBLE against its own server (raw: $CLIENT_STATUS)"
+pass "real herdr: session status normalizes running and compatible"
+
 # A second container_ensure must reuse (ADOPT) the same workspace (idempotent)
 # and report an EMPTY seeded tab id - the created-vs-adopted gate that fixes
 # the 2026-07-02 self-kill incident (docs/herdr-backend.md "Default-tab
@@ -288,7 +300,7 @@ pass "real herdr: current_path reads the pane's live cwd"
 # --- busy_state on a real claude harness (verified in herdr-verification-p2.md) ---
 
 if [ "${FM_HERDR_SMOKE_REAL_CLAUDE:-0}" = 1 ] && command -v claude >/dev/null 2>&1; then
-  fm_backend_herdr_send_literal "$TARGET" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --print 'say the word HERDRSMOKEOK and nothing else'"
+  fm_backend_herdr_send_literal "$TARGET" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --print 'say the word HERDRSMOKEOK and nothing else'"
   sleep 0.2
   fm_backend_herdr_send_key "$TARGET" Enter
   found_working=0
@@ -316,59 +328,29 @@ else
   echo "note: claude not installed; skipping the real-agent busy_state check" >&2
 fi
 
-# --- kill: removes a non-last tab, refuses the workspace's last tab ----------
+# --- kill -----------------------------------------------------------------
 
-# fm_backend_herdr_kill (the generic fm_backend_kill herdr path) refuses to close
-# a workspace's LAST tab, because closing a workspace's last tab deletes the whole
-# persistent workspace on real herdr; it leaves a residue tab that the next spawn
-# of the same label reclaims as a husk, and reports it informationally instead (docs/verification/runtime-backends.md "Endpoint
-# absence probe" / this session). A sibling tab is created first so fm-smoke1's
-# kill is NOT the last tab and removes its pane normally.
-SIB_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-smoke-sib" /tmp "") || fail "sibling create_task failed"
-read -r SIB_TAB_ID SIB_PANE_ID <<EOF
-$SIB_IDS
-EOF
-[ -n "$SIB_PANE_ID" ] || fail "sibling create_task returned no pane id"
-
-# fm-smoke1 is now a NON-last tab: kill removes its pane.
 fm_backend_herdr_kill "$TARGET"
 if herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
-  fail "kill did not remove the non-last-tab pane"
+  fail "kill did not remove the pane"
 fi
 # Best-effort contract: killing an already-gone pane must not error.
 fm_backend_herdr_kill "$TARGET" || fail "kill on an already-dead target must stay best-effort (never fail)"
-
-# The sibling is now the workspace's ONLY tab: kill must REFUSE (residue + remedy).
-kill_err=$(fm_backend_herdr_kill "$SESSION:$SIB_PANE_ID" 2>&1)
-if ! herdr pane get "$SIB_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
-  fail "kill of the workspace's LAST tab must be refused, but its pane was removed (the persistent workspace was deleted)"
-fi
-case "$kill_err" in
-  *"reclaimable residue"*) : ;;
-  *) fail "the last-tab kill refusal must report the spared tab as a reclaimable residue the retry reuses, got: $kill_err" ;;
-esac
-case "$kill_err" in
-  *"herdr tab close"*)
-    fail "the refusal must NOT print a tab-close command - running it on this last tab would delete the very workspace the guard protected: $kill_err" ;;
-esac
-# The point of the refusal: the spared TAB (and with it the persistent workspace)
-# is still there for the next spawn of this label to reclaim as a husk.
-herdr tab list --workspace "${CONTAINER#*:}" --session "$SESSION" 2>/dev/null \
-  | jq -e --arg t "$SIB_TAB_ID" '[.result.tabs[]?.tab_id] | index($t)' >/dev/null \
-  || fail "the spared residue tab $SIB_TAB_ID must survive in workspace ${CONTAINER#*:} - that is what the refusal preserved"
-pass "real herdr: kill removes a non-last-tab pane (idempotent/best-effort) and refuses the workspace's last tab, reporting it as a reclaimable residue rather than something to remove"
+pass "real herdr: kill removes the pane and is idempotent/best-effort"
 
 # --- list_live (label-based recovery discovery) ------------------------------
 
-# The last-tab kill above was refused, so the workspace SURVIVES with the sibling
-# residue tab. Real firstmate spawns always re-run container_ensure immediately
-# before create_task (bin/fm-spawn.sh); here it must ADOPT the surviving workspace
-# (report no seeded default tab), and list_live must still discover a freshly
-# created task tab by its fm-<id> label.
+# Real firstmate spawns always re-run container_ensure immediately before
+# create_task (bin/fm-spawn.sh), never reusing a container reference from an
+# earlier spawn. This test must do the same: the kill above closed the only
+# remaining tab in $CONTAINER's workspace, and closing a workspace's last tab
+# deletes the workspace itself (verified real-herdr behavior), so the stale
+# $CONTAINER from container_ensure at test start no longer names a live
+# workspace.
 CONTAINER_RAW=$(fm_backend_herdr_container_ensure /tmp) || fail "container_ensure for the second task failed"
 CONTAINER=${CONTAINER_RAW%%$'\t'*}
 SEEDED_TAB_ID=${CONTAINER_RAW#*$'\t'}
-[ -z "$SEEDED_TAB_ID" ] || fail "the workspace survived the refused last-tab kill, so container_ensure must ADOPT it and report NO seeded default tab, got '$SEEDED_TAB_ID'"
+[ -n "$SEEDED_TAB_ID" ] || fail "the workspace was deleted when its last tab was killed, so this container_ensure must CREATE a fresh one and report its seeded default tab id"
 LABEL2="fm-smoke2"
 TASK_IDS2=$(fm_backend_herdr_create_task "$CONTAINER" "$LABEL2" /tmp "$SEEDED_TAB_ID") || fail "second create_task failed"
 read -r _TAB_ID2 PANE_ID2 <<EOF
@@ -377,9 +359,8 @@ EOF
 live=$(fm_backend_herdr_list_live "$SESSION")
 assert_contains_local() { case "$1" in *"$2"*) : ;; *) fail "$3"$'\n'"--- got ---"$'\n'"$1" ;; esac; }
 assert_contains_local "$live" "$LABEL2" "list_live did not report the freshly created task tab by label"
-pass "real herdr: container_ensure adopts the surviving workspace and list_live discovers a live task tab by fm-<id> label"
+pass "real herdr: list_live discovers a live task tab by fm-<id> label"
 
-# fm-smoke2 is a non-last tab (the sibling residue remains), so this removes it.
 fm_backend_herdr_kill "$SESSION:$PANE_ID2"
 
 cleanup_all

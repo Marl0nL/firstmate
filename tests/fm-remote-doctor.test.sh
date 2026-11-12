@@ -2,15 +2,21 @@
 # tests/fm-remote-doctor.test.sh - the remote second-mate readiness gate.
 #
 # Drives the real bin/fm-remote-doctor.sh against a controlled account fixture:
-# a private HOME, a fake launchctl backed by state files, a fake herdr CLI, and
-# a fake uname that selects the platform under test. Nothing here touches the
-# runner's own launch agents, login session, or herdr server.
+# a private HOME, a fake launchctl backed by state files, a fake herdr CLI, a
+# fake lsof that names a real holder process as the fm-remote socket owner, and
+# a fake uname that selects the platform under test. The holders are real
+# non-platform processes (jq blocked on a fifo) whose environment carries the
+# birth markers bin/fm-remote-herdr-owner-lib.sh reads, so the Aqua-versus-SSH
+# verdict is exercised for real. Nothing here touches the runner's own launch
+# agents, login session, or herdr server.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-
+# shellcheck source=tests/rex-fake-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/rex-fake-fixture.sh"
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (the herdr adapter parses its JSON)"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (plistlib parses the owned launch-agent contract)"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-remote-doctor)
 LABEL=dev.firstmate.herdr.fm-remote
@@ -20,7 +26,9 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 JOB_LABEL=dev.firstmate.remote-job
 CASE_N=0
 DOCTOR_WORKER_PID=
-trap 'if [ -n "$DOCTOR_WORKER_PID" ]; then kill "$DOCTOR_WORKER_PID" 2>/dev/null || true; fi; fm_test_cleanup || true' EXIT
+HOLDER_PIDS=()
+trap 'if [ -n "$DOCTOR_WORKER_PID" ]; then kill "$DOCTOR_WORKER_PID" 2>/dev/null || true; fi; if [ "${#HOLDER_PIDS[@]}" -gt 0 ]; then kill "${HOLDER_PIDS[@]}" 2>/dev/null || true; fi; fm_test_cleanup || true' EXIT
+GUARD="$ROOT/bin/fm-remote-herdr-guard.sh"
 
 # A fixture must be able to present a host with NO herdr, so the doctor never
 # sees the runner's own PATH. Only the two required tools are re-exposed, by
@@ -31,15 +39,50 @@ ln -sf "$(command -v git)" "$TOOLS/git"
 ln -sf "$(command -v jq)" "$TOOLS/jq"
 BASE_PATH="$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin"
 
-# new_case <Darwin|Linux> [with-herdr] [gui]
+# Real socket-owner holders for the Darwin birth check: a non-platform jq
+# blocked on a fifo this test keeps open, with exactly the marker environment
+# each birth needs.
+HOLDER_JQ=$(fm_test_nonplatform_binary "$(command -v jq)" "$TMP_ROOT") ||
+  fail "cannot build a non-platform jq holder on this host"
+HOLDER_FD=5
+hold() { # <marker-env...> -> HOLDER_PID
+  local fifo="$TMP_ROOT/holder-$HOLDER_FD.fifo"
+  mkfifo "$fifo"
+  env -i "$@" "$HOLDER_JQ" . "$fifo" &
+  HOLDER_PID=$!
+  HOLDER_PIDS+=("$HOLDER_PID")
+  eval "exec ${HOLDER_FD}>\"\$fifo\""
+  HOLDER_FD=$((HOLDER_FD + 1))
+}
+hold XPC_SERVICE_NAME=dev.firstmate.herdr.fm-remote
+AQUA_HOLDER_PID=$HOLDER_PID
+hold XPC_SERVICE_NAME=dev.firstmate.herdr.fm-remote
+BACKGROUND_HOLDER_PID=$HOLDER_PID
+hold XPC_SERVICE_NAME=0
+XPC_ZERO_HOLDER_PID=$HOLDER_PID
+hold FM_REMOTE_JOB_ACTIVE=1
+WORKER_HOLDER_PID=$HOLDER_PID
+hold SSH_CONNECTION='100.102.217.78 51234 100.100.1.2 22' SSH_CLIENT='100.102.217.78 51234 22'
+SSH_HOLDER_PID=$HOLDER_PID
+
+# new_case <Darwin|Linux> [with-herdr] [gui] [login-shell]
 # Builds one isolated account fixture and points the module-level CASE_*
 # variables at it. "with-herdr" installs the fake herdr CLI; "gui" makes the
-# fake launchctl report an existing Aqua login session.
+# fake launchctl report an existing Aqua login session. login-shell is the
+# Directory Services UserShell the fake dscl reports (default /bin/sh so the
+# fixture is portable to hosts without /bin/zsh).
 new_case() {
   local platform=$1 want_herdr=${2:-with-herdr} want_gui=${3:-gui}
   unset CASE_REMOTE_JOB_ACTIVE
   unset CASE_PLATFORM_OVERRIDE
+  unset CASE_ROOT_OVERRIDE
+  unset CASE_DSCL_FAIL
+  unset CASE_DSCL_HANG
+  unset CASE_SECOND_LOGIN_SHELL
+  unset CASE_ENV_SHELL
+  unset CASE_RESOLVE_DSCL
   CASE_N=$((CASE_N + 1))
+  CASE_LOGIN_SHELL=${4:-/bin/sh}
   CASE_DIR="$TMP_ROOT/case$CASE_N"
   CASE_BIN="$CASE_DIR/bin"
   CASE_HOME="$CASE_DIR/home"
@@ -51,7 +94,8 @@ new_case() {
   CASE_PLIST="$CASE_HOME/Library/LaunchAgents/$LABEL.plist"
   CASE_INTERACTIVE_PLIST="$CASE_HOME/Library/LaunchAgents/$INTERACTIVE_LABEL.plist"
   CASE_JOB_PLIST="$CASE_HOME/Library/LaunchAgents/$JOB_LABEL.plist"
-  mkdir -p "$CASE_BIN" "$CASE_HOME" "$CASE_PROJECT_HOME" "$CASE_STATE"
+  mkdir -p "$CASE_BIN" "$CASE_HOME" "$CASE_PROJECT_HOME" "$CASE_STATE" "$CASE_HOME/.firstmate"
+  printf '%s\n' "$ROOT" > "$CASE_HOME/.firstmate/remote-herdr-owner"
   printf 'false\n' > "$CASE_HERDR_RUNNING"
   : > "$CASE_LAUNCHCTL_LOG"
   : > "$CASE_FORBIDDEN_LOG"
@@ -72,6 +116,10 @@ loaded="$FM_FAKE_STATE/loaded-$label"
 case "${1:-}" in
   print)
     case "$domain" in
+      user/*/*)
+        [ -f "$FM_FAKE_STATE/user-loaded-$label" ] || exit 113
+        cat "$FM_FAKE_STATE/user-loaded-$label"
+        ;;
       */dev.firstmate.herdr.fm-remote)
         [ -f "$loaded" ] || exit 113
         cat "$loaded"
@@ -112,33 +160,74 @@ properties = keepalive | runatload | inferred program
 EOF
         ;;
       *)
+        case "$label" in
+          dev.firstmate.herdr.fm-remote) session=fm-remote ;;
+          dev.firstmate.herdr.fm-remote-*) session=fm-remote-${label##*-} ;;
+          *) session=fm-remote ;;
+        esac
+        plist="$FM_FAKE_HOME/Library/LaunchAgents/$label.plist"
+        log="$FM_FAKE_HOME/Library/Logs/$label.log"
+        guard="$FM_FAKE_ROOT/bin/fm-remote-herdr-guard.sh"
         cat > "$loaded" <<EOF
-path = $FM_FAKE_PLIST
-program = $FM_FAKE_HERDR_BIN
+path = $plist
+program = $FM_FAKE_LOGIN_SHELL
 arguments = {
-	$FM_FAKE_HERDR_BIN
-	server
-	--session
-	fm-remote
+	$FM_FAKE_LOGIN_SHELL
+	-l
+	-c
+	exec '$guard' '$FM_FAKE_HERDR_BIN' '$session'
 }
-stdout path = $FM_FAKE_LAUNCH_AGENT_LOG
-stderr path = $FM_FAKE_LAUNCH_AGENT_LOG
-properties = keepalive | runatload | inferred program
+stdout path = $log
+stderr path = $log
+semaphores = {
+	successful exit => 0
+}
+properties = runatload | inferred program
 EOF
-        [ -f "$FM_FAKE_STATE/bootstrap-does-not-start" ] || printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
+        # A mate launch racing the repair lands its pane in the fresh server.
+        [ ! -f "$FM_FAKE_STATE/panes-after-bootstrap" ] || cp "$FM_FAKE_STATE/panes-after-bootstrap" "$FM_FAKE_STATE/panes.json"
+        if [ ! -f "$FM_FAKE_STATE/bootstrap-does-not-start" ]; then
+          printf 'true\n' > "$FM_FAKE_STATE/herdr.running.$session"
+          if [ "$session" = fm-remote ]; then printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"; fi
+          printf '%s\n' "$FM_FAKE_AQUA_PID" > "$FM_FAKE_STATE/socket-owner"
+        fi
         ;;
     esac
     exit 0
     ;;
   kickstart)
+    if [ -f "$FM_FAKE_STATE/interrupt-takeover" ]; then
+      marker="$FM_FAKE_HOME/.firstmate/remote-herdr-takeover-fm-remote"
+      { IFS= read -r doctor_pid; IFS= read -r doctor_start; } < "$marker" || exit 7
+      [ -n "$doctor_start" ] || exit 7
+      kill -"$(cat "$FM_FAKE_STATE/interrupt-takeover")" "$doctor_pid"
+      exit 0
+    fi
     [ ! -f "$FM_FAKE_STATE/kickstart-fail" ] || { printf 'Kickstart failed: service unavailable\n' >&2; exit 6; }
+    forced=0
+    if [ "$domain" = -k ]; then
+      forced=1
+      domain=${3:-}
+      label=${domain##*/}
+    fi
     case "$label" in
       dev.firstmate.remote-job) : ;;
       *)
+        # The real job execs the guard, which stops a foreign server and
+        # becomes the Aqua-born owner; the fixture models that outcome. A
+        # forced kickstart kills the running server, and every pane with it.
+        [ "$forced" -eq 0 ] || rm -f "$FM_FAKE_STATE/panes.json"
+        case "$label" in
+          dev.firstmate.herdr.fm-remote) session=fm-remote ;;
+          dev.firstmate.herdr.fm-remote-*) session=fm-remote-${label##*-} ;;
+          *) session=fm-remote ;;
+        esac
+        printf '%s\n' "$FM_FAKE_AQUA_PID" > "$FM_FAKE_STATE/socket-owner"
         if [ -f "$FM_FAKE_STATE/kickstart-delay" ]; then
           cp "$FM_FAKE_STATE/kickstart-delay" "$FM_FAKE_STATE/herdr-delay"
         else
-          printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
+          printf 'true\n' > "$FM_FAKE_STATE/herdr.running.$session"
+          if [ "$session" = fm-remote ]; then printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"; fi
         fi
         ;;
     esac
@@ -160,13 +249,60 @@ SH
     chmod +x "$CASE_BIN/$forbidden"
   done
 
+  # The socket owner the birth check sees: the pid in socket-owner, or the
+  # Aqua holder when a case never chose one.
+  cat > "$CASE_BIN/lsof" <<'SH'
+#!/usr/bin/env bash
+pid=$(cat "$FM_FAKE_STATE/socket-owner" 2>/dev/null || printf '%s' "$FM_FAKE_AQUA_PID")
+[ -n "$pid" ] || exit 0
+printf 'p%s\n' "$pid"
+printf 'n%s\n' "$FM_FAKE_HERDR_SOCKET"
+SH
+  chmod +x "$CASE_BIN/lsof"
+
+  cat > "$CASE_BIN/dscl" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${FM_FAKE_DSCL_FAIL:-0}" != 1 ] || exit 1
+[ "${FM_FAKE_DSCL_HANG:-0}" != 1 ] || exec /bin/sleep 30
+if [ "${1:-}" = . ] && [ "${2:-}" = -read ] && [ "${4:-}" = UserShell ]; then
+  count_file="$FM_FAKE_STATE/dscl-count"
+  count=$(cat "$count_file" 2>/dev/null || printf 0)
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$count_file"
+  shell=${FM_FAKE_LOGIN_SHELL:-/bin/sh}
+  if [ "$count" -gt 1 ] && [ -n "${FM_FAKE_SECOND_LOGIN_SHELL:-}" ]; then
+    shell=$FM_FAKE_SECOND_LOGIN_SHELL
+  fi
+  printf 'UserShell: %s\n' "$shell"
+  exit 0
+fi
+exit 1
+SH
+
   if [ "$want_herdr" = with-herdr ]; then
     cat > "$CASE_BIN/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
-running=$(cat "$FM_FAKE_HERDR_RUNNING" 2>/dev/null || printf 'false')
-case "${1:-} ${2:-}" in
-  "status --json")
+session=fm-remote
+want_session=0
+for arg in "$@"; do
+  if [ "$want_session" -eq 1 ]; then session=$arg; want_session=0; continue; fi
+  [ "$arg" != --session ] || want_session=1
+done
+running_file="$FM_FAKE_STATE/herdr.running.$session"
+if [ "$session" = fm-remote ]; then running_file=$FM_FAKE_HERDR_RUNNING; fi
+running=$(cat "$running_file" 2>/dev/null || printf 'false')
+case " $* " in
+  *"pane list"*)
+    [ ! -f "$FM_FAKE_STATE/pane-list-fail" ] || exit 1
+    if [ -f "$FM_FAKE_STATE/panes.json" ]; then
+      cat "$FM_FAKE_STATE/panes.json"
+    else
+      printf '{"result":{"panes":[]}}\n'
+    fi
+    ;;
+  *"status --json"*)
     if [ -f "$FM_FAKE_STATE/herdr-delay" ]; then
       delay=$(cat "$FM_FAKE_STATE/herdr-delay")
       if [ "$delay" -gt 0 ]; then
@@ -178,10 +314,11 @@ case "${1:-} ${2:-}" in
         running=true
       fi
     fi
-    printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":%s}}\n' "$running"
+    printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":%s,"socket":"%s"}}\n' "$running" "$FM_FAKE_HERDR_SOCKET"
     ;;
-  "server "*|"server ")
-    printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
+  *"server "*)
+    printf 'true\n' > "$running_file"
+    if [ "$session" = fm-remote ]; then printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"; fi
     ;;
 esac
 exit 0
@@ -191,7 +328,7 @@ SH
   cat > "$CASE_BIN/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
-  --version:*) printf '0.2.4\n' ;;
+  --version:*) printf '0.2.6\n' ;;
   update:--help) printf '%s\n' --archive-body ;;
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
 esac
@@ -204,7 +341,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$CASE_BIN/uname" "$CASE_BIN/launchctl" "$CASE_BIN/tasks-axi" "$CASE_BIN/treehouse" "$CASE_BIN/claude"
+  chmod +x "$CASE_BIN/uname" "$CASE_BIN/launchctl" "$CASE_BIN/dscl" "$CASE_BIN/tasks-axi" "$CASE_BIN/treehouse" "$CASE_BIN/claude"
   cat > "$CASE_BIN/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -225,10 +362,22 @@ doctor() {
     FM_FAKE_FORBIDDEN_LOG="$CASE_FORBIDDEN_LOG" \
     FM_FAKE_HERDR_RUNNING="$CASE_HERDR_RUNNING" \
     FM_FAKE_HERDR_BIN="$CASE_BIN/herdr" \
+    FM_FAKE_HERDR_SOCKET="$CASE_STATE/herdr.sock" \
+    FM_FAKE_GUARD="$GUARD" \
+    FM_FAKE_ROOT="${CASE_ROOT_OVERRIDE:-$ROOT}" \
+    FM_FAKE_HOME="$CASE_HOME" \
+    FM_FAKE_AQUA_PID="$AQUA_HOLDER_PID" \
     FM_FAKE_PLIST="$CASE_PLIST" \
     FM_FAKE_JOB_PLIST="$CASE_JOB_PLIST" \
     FM_FAKE_JOB_WORKER="$ROOT/bin/fm-remote-job-worker.sh" \
     FM_FAKE_LAUNCH_AGENT_LOG="$CASE_HOME/Library/Logs/$LABEL.log" \
+    FM_FAKE_LOGIN_SHELL="${CASE_LOGIN_SHELL:-/bin/sh}" \
+    FM_FAKE_SECOND_LOGIN_SHELL="${CASE_SECOND_LOGIN_SHELL:-}" \
+    FM_ROOT_OVERRIDE="${CASE_ROOT_OVERRIDE-${FM_ROOT_OVERRIDE-}}" \
+    FM_FAKE_DSCL_FAIL="${CASE_DSCL_FAIL:-0}" \
+    FM_FAKE_DSCL_HANG="${CASE_DSCL_HANG:-0}" \
+    FM_LAUNCH_AGENT_SHELL="$([ "${CASE_RESOLVE_DSCL:-0}" = 1 ] || printf '%s' "$CASE_LOGIN_SHELL")" \
+    SHELL="${CASE_ENV_SHELL-${SHELL-}}" \
     FM_REMOTE_JOB_PLATFORM_OVERRIDE="${CASE_PLATFORM_OVERRIDE-}" \
     FM_REMOTE_JOB_ACTIVE="${CASE_REMOTE_JOB_ACTIVE-1}" \
     "$ROOT/bin/fm-remote-doctor.sh" "$@" 2>&1
@@ -237,21 +386,61 @@ doctor() {
   set -e
 }
 
-write_loaded_contract() { # <herdr-path> [properties]
-  local herdr_bin=$1 properties=${2:-'keepalive | runatload | inferred program'}
+write_loaded_contract() { # <herdr-path> [properties] [exec-command]
+  local herdr_bin=$1 properties=${2:-'runatload | inferred program'} exec_cmd
+  exec_cmd=${3:-"exec '$GUARD' '$herdr_bin' 'fm-remote'"}
   cat > "$CASE_STATE/loaded-$LABEL" <<EOF
 path = $CASE_PLIST
-program = $herdr_bin
+program = $CASE_LOGIN_SHELL
 arguments = {
-	$herdr_bin
-	server
-	--session
-	fm-remote
+	$CASE_LOGIN_SHELL
+	-l
+	-c
+	$exec_cmd
 }
 stdout path = $CASE_HOME/Library/Logs/$LABEL.log
 stderr path = $CASE_HOME/Library/Logs/$LABEL.log
+semaphores = {
+	successful exit => 0
+}
 properties = $properties
 EOF
+}
+
+# Parse the doctor's owned launch-agent plist and assert the login-shell
+# argv contract. The plist is Firstmate's output, so semantic structure is
+# in bounds; never match the XML source as a substring.
+plist_value() { # <plist> <key>
+  python3 -c 'import plistlib,sys; value=plistlib.load(open(sys.argv[1], "rb"))[sys.argv[2]]; print(value)' "$1" "$2"
+}
+
+plist_first_value() { # <plist> <array-key>
+  python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb"))[sys.argv[2]][0])' "$1" "$2"
+}
+
+assert_herdr_launch_agent_contract() { # <plist> <herdr-bin> [login-shell]
+  local plist=$1 herdr_bin=$2 expected_shell=${3:-$CASE_LOGIN_SHELL} json argv0 argv1 argv2 cmd
+  json=$(python3 -c 'import json,plistlib,sys; print(json.dumps(plistlib.load(open(sys.argv[1], "rb"))))' "$plist") \
+    || fail "could not parse $plist as a plist"
+  argv0=$(printf '%s' "$json" | jq -r '.ProgramArguments[0]')
+  argv1=$(printf '%s' "$json" | jq -r '.ProgramArguments[1]')
+  argv2=$(printf '%s' "$json" | jq -r '.ProgramArguments[2]')
+  cmd=$(printf '%s' "$json" | jq -r '.ProgramArguments[3]')
+  [ "$argv0" = "$expected_shell" ] || fail "ProgramArguments[0] is $argv0, not the resolved login shell $expected_shell"
+  [ "$argv1" = -l ] || fail "ProgramArguments[1] is $argv1, not -l"
+  [ "$argv2" = -c ] || fail "ProgramArguments[2] is $argv2, not -c"
+  [ "$cmd" = "exec '$GUARD' '$herdr_bin' 'fm-remote'" ] \
+    || fail "ProgramArguments[3] is not exec of the guard with $herdr_bin for session fm-remote: $cmd"
+  [ "$(printf '%s' "$json" | jq -r '.LimitLoadToSessionType')" = Aqua ] \
+    || fail "LimitLoadToSessionType is not Aqua"
+  [ "$(printf '%s' "$json" | jq -r '.RunAtLoad')" = true ] \
+    || fail "RunAtLoad is not true"
+  [ "$(printf '%s' "$json" | jq -r '.KeepAlive.SuccessfulExit')" = false ] \
+    || fail "KeepAlive is not {SuccessfulExit=false}: $(printf '%s' "$json" | jq -c '.KeepAlive')"
+  [ "$(printf '%s' "$json" | jq -r '.ThrottleInterval')" = 10 ] \
+    || fail "ThrottleInterval is not 10"
+  [ "$(printf '%s' "$json" | jq -r '.Label')" = "$LABEL" ] \
+    || fail "Label is not $LABEL"
 }
 
 assert_no_dangerous_calls() { # <msg>
@@ -262,19 +451,25 @@ assert_no_dangerous_calls() { # <msg>
   assert_absent "$CASE_HOME/kcpassword" "the doctor wrote an auto-login password"
 }
 
-# --- a host with no herdr is never ready, and --fix cannot install one -------
+# --- a host with no session backend is never ready ---------------------------
 
 new_case Darwin no-herdr gui
 doctor
-expect_code 1 "$DOCTOR_RC" "a host without herdr was reported ready"
-assert_contains "$DOCTOR_OUT" 'check herdr=human:' "a missing herdr CLI was not tagged as a human gap"
-assert_contains "$DOCTOR_OUT" 'action: herdr:' "a missing herdr CLI came with no operator action"
+expect_code 1 "$DOCTOR_RC" "a host without any session backend was reported ready"
+assert_contains "$DOCTOR_OUT" 'check backend=human:' "a missing backend CLI was not tagged as a human gap"
+assert_contains "$DOCTOR_OUT" 'action: backend:' "a missing backend CLI came with no operator action"
+assert_contains "$DOCTOR_OUT" 'required backend=MISSING' "the unresolved backend slot was not reported missing"
+assert_not_contains "$DOCTOR_OUT" 'check herdr-server=' "a backend-less host still ran backend-specific server checks"
 doctor --fix
-expect_code 1 "$DOCTOR_RC" "--fix reported a host without herdr as ready"
-assert_contains "$DOCTOR_OUT" 'check herdr=human:' "--fix stopped reporting the missing herdr CLI"
-assert_not_contains "$DOCTOR_OUT" 'fix herdr=applied' "--fix claimed to have installed herdr"
+expect_code 1 "$DOCTOR_RC" "--fix reported a host without any session backend as ready"
+assert_contains "$DOCTOR_OUT" 'check backend=human:' "--fix stopped reporting the missing backend"
+assert_not_contains "$DOCTOR_OUT" 'fix backend=applied' "--fix claimed to have installed a backend"
 assert_no_dangerous_calls "the doctor reached for auto-login, FileVault, or the keychain"
-pass "a missing herdr CLI is a human gap that --fix never claims to close"
+doctor --backend herdr
+expect_code 1 "$DOCTOR_RC" "an explicit herdr request reported a herdr-less host as ready"
+assert_contains "$DOCTOR_OUT" 'check herdr=human:' "an explicit herdr request did not report the missing CLI"
+assert_contains "$DOCTOR_OUT" 'required herdr=MISSING' "an explicit herdr request did not name the missing tool"
+pass "a missing session backend is a human gap that --fix never claims to close"
 
 # --- an absent launch agent is a fixable gap that --fix installs -------------
 
@@ -326,19 +521,21 @@ assert_contains "$DOCTOR_OUT" 'check remote-job-worker=ok:' "--fix did not insta
 assert_contains "$DOCTOR_OUT" 'check remote-job-worker-loaded=ok:' "--fix did not load the remote job worker"
 assert_present "$CASE_PLIST" "--fix reported success without writing the plist"
 assert_present "$CASE_JOB_PLIST" "--fix reported success without writing the remote job worker plist"
-assert_grep '<string>Aqua</string>' "$CASE_PLIST" "the written plist is not Aqua-scoped"
-assert_grep "<string>$LABEL</string>" "$CASE_PLIST" "the written plist does not carry the Firstmate label"
-assert_grep '<string>server</string>' "$CASE_PLIST" "the written plist does not run a herdr server"
-assert_grep '<string>fm-remote</string>' "$CASE_PLIST" "the written plist does not pin the remote-secondmate session"
-assert_no_grep '<string>default</string>' "$CASE_PLIST" "the written plist pins the interactive default session"
-assert_grep "<string>$JOB_LABEL</string>" "$CASE_JOB_PLIST" "the worker plist does not carry the Firstmate label"
-assert_grep '<string>Aqua</string>' "$CASE_JOB_PLIST" "the worker plist is not Aqua-scoped"
-assert_grep "$ROOT/bin/fm-remote-job-worker.sh" "$CASE_JOB_PLIST" "the worker plist does not use the configured code root"
+[ "$(cat "$CASE_HOME/.firstmate/remote-herdr-owner")" = "$ROOT" ] \
+  || fail "the primary service owner marker does not record its code root"
+assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr"
+[ "$(plist_value "$CASE_JOB_PLIST" Label)" = "$JOB_LABEL" ] \
+  || fail "the worker plist does not carry the Firstmate label"
+[ "$(plist_value "$CASE_JOB_PLIST" LimitLoadToSessionType)" = Aqua ] \
+  || fail "the worker plist is not Aqua-scoped"
+[ "$(plist_first_value "$CASE_JOB_PLIST" ProgramArguments)" = "$ROOT/bin/fm-remote-job-worker.sh" ] \
+  || fail "the worker plist does not use the configured code root"
+assert_absent "$CASE_STATE/dscl-count" "the injected login shell still consulted Directory Services"
 assert_grep "gui/$(id -u)" "$CASE_LAUNCHCTL_LOG" "the launch agent was not bootstrapped into the GUI domain"
 cmp -s "$CASE_STATE/interactive-before.plist" "$CASE_INTERACTIVE_PLIST" \
   || fail "the fm-remote repair rewrote the interactive default launch agent"
 assert_present "$CASE_STATE/interactive-loaded" "the fm-remote repair unloaded the interactive default launch agent"
-assert_no_grep "gui/$(id -u)/$INTERACTIVE_LABEL$" "$CASE_LAUNCHCTL_LOG" \
+assert_no_regex "gui/$(id -u)/${INTERACTIVE_LABEL//./\\.}$" "$CASE_LAUNCHCTL_LOG" \
   "the fm-remote repair inspected or controlled the interactive default launch agent"
 assert_no_dangerous_calls "the repair reached for auto-login, FileVault, or the keychain"
 pass "--fix installs the dedicated fm-remote launch agent without touching default"
@@ -354,7 +551,108 @@ assert_not_contains "$DOCTOR_OUT" 'fix launchagent-loaded=applied:' "a second --
   "a second --fix re-bootstrapped a loaded launch agent"
 pass "--fix is idempotent once the host is ready"
 
-# --- a loaded, running launch agent with contract drift is repaired ----------
+# --- a second code root must not rewrite the shared running service ----------
+
+new_case Darwin with-herdr gui
+mkdir -p "$(dirname "$CASE_PLIST")" "$CASE_STATE/owner-root/bin" "$CASE_DIR/second-root/bin"
+printf '%s\n' "$CASE_STATE/owner-root" > "$CASE_HOME/.firstmate/remote-herdr-owner"
+printf '#!/bin/sh\n' > "$CASE_STATE/owner-root/bin/fm-remote-herdr-guard.sh"
+printf '#!/bin/sh\n' > "$CASE_DIR/second-root/bin/fm-remote-herdr-guard.sh"
+cat > "$CASE_PLIST" <<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$LABEL</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-l</string>
+		<string>-c</string>
+		<string>exec '$CASE_STATE/owner-root/bin/fm-remote-herdr-guard.sh' '$CASE_BIN/herdr' 'fm-remote'</string>
+	</array>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+</dict>
+</plist>
+XML
+write_loaded_contract "$CASE_BIN/herdr"
+printf 'true\n' > "$CASE_HERDR_RUNNING"
+CASE_ROOT_OVERRIDE="$CASE_DIR/second-root"
+doctor --fix
+SECOND_ROOT_ID=$(printf '%s' "$CASE_DIR/second-root" | shasum -a 256 | awk '{print substr($1, 1, 16)}')
+assert_contains "$DOCTOR_OUT" "dev.firstmate.herdr.fm-remote-$SECOND_ROOT_ID.plist" \
+  "the second root did not resolve a separately named launch agent"
+! grep -Fx "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" >/dev/null \
+  || fail "the second root booted out the shared launch agent"
+! grep -Eq -- "kickstart.* gui/$(id -u)/$LABEL$" "$CASE_LAUNCHCTL_LOG" || fail "the second root restarted the shared service"
+assert_present "$CASE_PLIST" "the second root removed the shared launch agent"
+assert_grep "$CASE_STATE/owner-root" "$CASE_PLIST" "the primary launch agent no longer names its owner root"
+PRIMARY_COMMAND=$(python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb"))["ProgramArguments"][3])' "$CASE_PLIST")
+[ "$PRIMARY_COMMAND" = "exec '$CASE_STATE/owner-root/bin/fm-remote-herdr-guard.sh' '$CASE_BIN/herdr' 'fm-remote'" ] \
+  || fail "the primary launch agent's session name changed"
+SECOND_PLIST="$CASE_HOME/Library/LaunchAgents/dev.firstmate.herdr.fm-remote-$SECOND_ROOT_ID.plist"
+assert_present "$SECOND_PLIST" "the second root did not install its own launch agent"
+[ "$(plist_value "$SECOND_PLIST" Label)" = "dev.firstmate.herdr.fm-remote-$SECOND_ROOT_ID" ] \
+  || fail "the second launch agent has the wrong label"
+SECOND_COMMAND=$(python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb"))["ProgramArguments"][3])' "$SECOND_PLIST")
+case "$SECOND_COMMAND" in *"$CASE_DIR/second-root/bin/fm-remote-herdr-guard.sh"*"fm-remote-$SECOND_ROOT_ID"*) ;; *) fail "the second launch agent does not target its own guard and session" ;; esac
+assert_present "$CASE_STATE/herdr.running.fm-remote-$SECOND_ROOT_ID" "the second Herdr session did not start independently"
+pass "a second code root gets a separate Herdr session and launch agent"
+
+# --- a second code root is ready behind the account's shared entrypoint ------
+
+new_case Linux with-herdr no-gui
+SECOND_ROOT="$CASE_DIR/second-root"
+mkdir -p "$SECOND_ROOT/bin"
+cp "$ROOT/bin/fm-remote-job-worker.sh" "$SECOND_ROOT/bin/fm-remote-job-worker.sh"
+CASE_ROOT_OVERRIDE="$ROOT"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "the primary root could not be made ready"
+ENTRYPOINT="$CASE_HOME/.local/bin/fm-remote-entrypoint.sh"
+[ "$(readlink "$ENTRYPOINT")" = "$ROOT/bin/fm-remote-entrypoint.sh" ] || fail "the primary root did not link the shared entrypoint"
+CASE_ROOT_OVERRIDE="$SECOND_ROOT"
+doctor
+assert_contains "$DOCTOR_OUT" "check entrypoint-link=ok: $ENTRYPOINT is the account's shared entrypoint" \
+  "the second root rejected the account's shared entrypoint"
+doctor --fix --automatic
+expect_code 0 "$DOCTOR_RC" "automatic readiness did not make the second root ready"
+doctor
+expect_code 0 "$DOCTOR_RC" "the second root's readiness verdict failed after its repair"
+SECOND_ROOT_ID=$(printf '%s' "$SECOND_ROOT" | shasum -a 256 | awk '{print substr($1, 1, 16)}')
+[ "$(cat "$CASE_STATE/herdr.running.fm-remote-$SECOND_ROOT_ID" 2>/dev/null)" = true ] \
+  || fail "the second root's own Herdr session was not started"
+[ "$(readlink "$ENTRYPOINT")" = "$ROOT/bin/fm-remote-entrypoint.sh" ] || fail "the second root repointed the primary root's entrypoint"
+CASE_ROOT_OVERRIDE="$ROOT"
+doctor
+expect_code 0 "$DOCTOR_RC" "the primary root lost readiness after the second root became ready"
+unset CASE_ROOT_OVERRIDE
+pass "a second code root reaches readiness through the shared entrypoint and the primary root stays ready"
+
+# --- a legacy owner is adopted from its guard without restarting its service -
+
+new_case Darwin with-herdr gui
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "the legacy-owner fixture did not initialize"
+rm -f "$CASE_HOME/.firstmate/remote-herdr-owner"
+: > "$CASE_LAUNCHCTL_LOG"
+doctor
+expect_code 1 "$DOCTOR_RC" "a legacy service without its durable owner marker was reported ready"
+assert_contains "$DOCTOR_OUT" 'check herdr-owner=fixable: session fm-remote is proven to belong to' \
+  "the doctor did not offer safe metadata-only adoption of the legacy owner"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' \
+  "a missing owner record was reported as a server lifecycle gap"
+assert_no_grep "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" \
+  "a read-only legacy check controlled the service"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "the legacy owner could not be adopted without a restart"
+assert_contains "$DOCTOR_OUT" 'fix herdr-owner=applied:' "the metadata-only adoption was not reported"
+[ "$(cat "$CASE_HOME/.firstmate/remote-herdr-owner")" = "$ROOT" ] \
+  || fail "the legacy service owner marker was not adopted"
+! grep -Eq -- '^(bootout|bootstrap|kickstart) ' "$CASE_LAUNCHCTL_LOG" || fail "legacy adoption reloaded or restarted an empty healthy service"
+pass "a legacy service is adopted by its matching guard without service control"
+
+# --- automatic readiness never touches a running drifted service ------------
 
 new_case Darwin with-herdr gui
 mkdir -p "$(dirname "$CASE_PLIST")"
@@ -376,7 +674,7 @@ cat > "$CASE_PLIST" <<XML
 </dict>
 </plist>
 XML
-write_loaded_contract /obsolete/bin/herdr 'runatload | inferred program'
+write_loaded_contract /obsolete/bin/herdr 'keepalive | runatload | inferred program' "exec '/obsolete/bin/herdr' server --session 'fm-remote'"
 printf 'true\n' > "$CASE_HERDR_RUNNING"
 doctor
 expect_code 1 "$DOCTOR_RC" "a stale launch-agent contract was reported ready"
@@ -384,14 +682,131 @@ assert_contains "$DOCTOR_OUT" 'check launchagent=fixable:' "launch-agent contrac
 assert_contains "$DOCTOR_OUT" 'check launchagent-scope=ok:' "the independent Aqua scope was not recognized"
 assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=fixable:' "the stale effective launch-agent contract was not tagged fixable"
 assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "the running fixture was not recognized"
+cp "$CASE_PLIST" "$CASE_STATE/plist.before"
+: > "$CASE_LAUNCHCTL_LOG"
+doctor --fix --automatic
+expect_code 1 "$DOCTOR_RC" "automatic readiness repaired the launch agent of a running server"
+assert_contains "$DOCTOR_OUT" 'check launchagent=human: cannot repair' "automatic readiness did not leave the running service to an operator"
+assert_contains "$DOCTOR_OUT" 'automatic readiness repair never stops, reloads, or takes over a running server' \
+  "automatic readiness did not explain why it left the running service alone"
+assert_contains "$DOCTOR_OUT" "action: launchagent: an operator runs 'bin/fm-on.sh <route> fm-remote-doctor.sh --fix'" \
+  "automatic readiness did not name the operator's repair"
+cmp -s "$CASE_PLIST" "$CASE_STATE/plist.before" || fail "automatic readiness rewrote the launch agent of a running server"
+assert_no_grep "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" "automatic readiness booted out a running server"
+assert_no_grep "bootstrap gui/$(id -u) $CASE_PLIST" "$CASE_LAUNCHCTL_LOG" "automatic readiness bootstrapped over a running server"
+! grep -Eq -- "kickstart.* gui/$(id -u)/$LABEL$" "$CASE_LAUNCHCTL_LOG" || fail "automatic readiness kickstarted a running server"
+[ "$(cat "$CASE_HERDR_RUNNING")" = true ] || fail "automatic readiness stopped the running server"
+pass "automatic readiness reports a running drifted service to an operator and leaves it untouched"
+
+# --- the operator's --fix repairs an empty service this root owns ------------
+
+: > "$CASE_LAUNCHCTL_LOG"
 doctor --fix
-expect_code 0 "$DOCTOR_RC" "--fix did not repair launch-agent contract drift"
+expect_code 0 "$DOCTOR_RC" "the operator's --fix did not repair an empty service this root owns"
 assert_contains "$DOCTOR_OUT" 'check launchagent=ok:' "the repaired launch-agent contract was not confirmed"
-assert_grep "<string>$CASE_BIN/herdr</string>" "$CASE_PLIST" "the repaired launch agent does not use the resolved herdr path"
-assert_grep '<key>RunAtLoad</key>' "$CASE_PLIST" "the repaired launch agent does not start at login"
-assert_grep '<key>KeepAlive</key>' "$CASE_PLIST" "the repaired launch agent is not kept alive"
-assert_no_grep '/obsolete/bin/herdr' "$CASE_PLIST" "the obsolete herdr path survived repair"
-pass "a loaded and running launch agent must match the complete owned contract"
+assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr"
+assert_grep "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" "the operator's repair did not replace the stale loaded job"
+! grep -Eq -- "kickstart -k gui/$(id -u)/$LABEL$" "$CASE_LAUNCHCTL_LOG" || fail "the operator's repair force-restarted the fresh server"
+assert_absent "$CASE_HOME/.firstmate/remote-herdr-takeover-fm-remote" "the operator's takeover authorization outlived its repair"
+pass "an operator's --fix repairs a running service this root owns once its pane list proves it empty"
+
+# --- live panes make a launch-agent mismatch a refusal, not a restart --------
+
+new_case Darwin with-herdr gui
+mkdir -p "$(dirname "$CASE_PLIST")"
+printf '<plist><dict><key>Label</key><string>%s</string></dict></plist>\n' "$LABEL" > "$CASE_PLIST"
+write_loaded_contract /obsolete/bin/herdr 'keepalive | runatload | inferred program' "exec '/obsolete/bin/herdr' server --session 'fm-remote'"
+printf 'true\n' > "$CASE_HERDR_RUNNING"
+printf '{"result":{"panes":[{"pane_id":"p1"}]}}\n' > "$CASE_STATE/panes.json"
+cp "$CASE_PLIST" "$CASE_STATE/plist.before"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "a live service with panes was reported repaired"
+assert_contains "$DOCTOR_OUT" 'service has live panes' "the refusal did not explain why restart was unsafe"
+assert_contains "$DOCTOR_OUT" "owner: $ROOT" "the refusal omitted the code-root owner"
+[ "$(cat "$CASE_PLIST")" = "$(cat "$CASE_STATE/plist.before")" ] \
+  || fail "the doctor rewrote the launch agent despite live panes"
+assert_no_grep "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" "the doctor booted out a service with live panes"
+assert_no_grep "bootstrap gui/$(id -u) $CASE_PLIST" "$CASE_LAUNCHCTL_LOG" "the doctor bootstrapped a service with live panes"
+! grep -Eq -- "kickstart.* gui/$(id -u)/$LABEL$" "$CASE_LAUNCHCTL_LOG" || fail "the doctor kickstarted a service with live panes"
+pass "a service with live panes is never rewritten or restarted"
+
+# --- unprovable pane state is a refusal, never proof of an empty session ----
+
+for pane_state in malformed unavailable; do
+  new_case Darwin with-herdr gui
+  mkdir -p "$(dirname "$CASE_PLIST")"
+  printf '<plist><dict><key>Label</key><string>%s</string></dict></plist>\n' "$LABEL" > "$CASE_PLIST"
+  write_loaded_contract /obsolete/bin/herdr 'keepalive | runatload | inferred program' "exec '/obsolete/bin/herdr' server --session 'fm-remote'"
+  printf 'true\n' > "$CASE_HERDR_RUNNING"
+  case "$pane_state" in
+    malformed) printf '{}\n' > "$CASE_STATE/panes.json" ;;
+    unavailable) touch "$CASE_STATE/pane-list-fail" ;;
+  esac
+  cp "$CASE_PLIST" "$CASE_STATE/plist.before"
+  doctor --fix
+  expect_code 1 "$DOCTOR_RC" "a service with $pane_state pane state was reported repaired"
+  assert_contains "$DOCTOR_OUT" 'pane state is uninspectable' "the $pane_state pane state was not named as the refusal"
+  cmp -s "$CASE_PLIST" "$CASE_STATE/plist.before" \
+    || fail "the doctor rewrote the launch agent with $pane_state pane state"
+  assert_no_grep "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" "the doctor booted out a service with $pane_state pane state"
+  assert_no_grep "bootstrap gui/$(id -u) $CASE_PLIST" "$CASE_LAUNCHCTL_LOG" "the doctor bootstrapped a service with $pane_state pane state"
+  ! grep -Eq -- "kickstart.* gui/$(id -u)/$LABEL$" "$CASE_LAUNCHCTL_LOG" || fail "the doctor kickstarted a service with $pane_state pane state"
+done
+pass "a pane listing that fails or lacks a panes array blocks every repair"
+
+# --- a mate pane that lands during a reload survives it ---------------------
+
+new_case Darwin with-herdr gui
+mkdir -p "$(dirname "$CASE_PLIST")"
+printf '<plist><dict><key>Label</key><string>%s</string></dict></plist>\n' "$LABEL" > "$CASE_PLIST"
+write_loaded_contract /obsolete/bin/herdr 'keepalive | runatload | inferred program' "exec '/obsolete/bin/herdr' server --session 'fm-remote'"
+printf '{"result":{"panes":[{"pane_id":"p-racing-mate"}]}}\n' > "$CASE_STATE/panes-after-bootstrap"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "a stopped owned service with a stale contract was not repaired"
+assert_grep "bootstrap gui/$(id -u) $CASE_PLIST" "$CASE_LAUNCHCTL_LOG" "the stale launch agent was not reloaded"
+assert_present "$CASE_STATE/panes.json" "the reload force-restarted the fresh server and killed a mate pane that landed after bootstrap"
+pass "a reload never force-restarts the freshly bootstrapped server"
+
+# --- concurrent automatic readiness never restarts a service a mate uses ---
+
+# Two readiness runs see the same stopped service with a stale loaded job, and
+# a mate launch lands between them. Neither may boot out, replace, or restart
+# the loaded job, however their steps interleave with launchd and the mate.
+new_case Darwin with-herdr gui
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "the concurrent-readiness fixture could not be initialized"
+printf 'false\n' > "$CASE_HERDR_RUNNING"
+printf '<plist><dict><key>Label</key><string>%s</string></dict></plist>\n' "$LABEL" > "$CASE_PLIST"
+write_loaded_contract /obsolete/bin/herdr 'keepalive | runatload | inferred program' "exec '/obsolete/bin/herdr' server --session 'fm-remote'"
+cp "$CASE_PLIST" "$CASE_STATE/plist.before"
+: > "$CASE_LAUNCHCTL_LOG"
+(
+  doctor --fix --automatic
+  printf '%s\n' "$DOCTOR_RC" > "$CASE_STATE/first.rc"
+  printf '%s\n' "$DOCTOR_OUT" > "$CASE_STATE/first.out"
+) &
+FIRST_PID=$!
+printf 'true\n' > "$CASE_HERDR_RUNNING"
+printf '{"result":{"panes":[{"pane_id":"p-mate"}]}}\n' > "$CASE_STATE/panes.json"
+(
+  doctor --fix --automatic
+  printf '%s\n' "$DOCTOR_RC" > "$CASE_STATE/second.rc"
+  printf '%s\n' "$DOCTOR_OUT" > "$CASE_STATE/second.out"
+) &
+SECOND_PID=$!
+wait "$FIRST_PID" "$SECOND_PID"
+for run in first second; do
+  [ "$(cat "$CASE_STATE/$run.rc")" = 1 ] || fail "the $run automatic readiness run reported the stale service repaired"
+  assert_grep 'automatic readiness repair never' "$CASE_STATE/$run.out" \
+    "the $run automatic readiness run did not explain why it left the service to an operator"
+done
+cmp -s "$CASE_PLIST" "$CASE_STATE/plist.before" || fail "automatic readiness rewrote a loaded launch agent"
+assert_no_grep "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" "automatic readiness booted out the loaded launch agent"
+assert_no_grep "bootstrap gui/$(id -u) $CASE_PLIST" "$CASE_LAUNCHCTL_LOG" "automatic readiness replaced the loaded launch agent"
+! grep -Eq -- "kickstart.* gui/$(id -u)/$LABEL$" "$CASE_LAUNCHCTL_LOG" || fail "automatic readiness restarted the loaded launch agent"
+assert_present "$CASE_STATE/panes.json" "automatic readiness killed the mate that launched between the runs"
+[ "$(cat "$CASE_HERDR_RUNNING")" = true ] || fail "automatic readiness stopped the server the mate is using"
+pass "concurrent automatic readiness runs with an intervening mate launch never restart the service"
 
 # --- failed replacement cannot hide a stale loaded launch-agent contract -----
 
@@ -415,15 +830,14 @@ cat > "$CASE_PLIST" <<XML
 </dict>
 </plist>
 XML
-write_loaded_contract /obsolete/bin/herdr 'runatload | inferred program'
-printf 'true\n' > "$CASE_HERDR_RUNNING"
+write_loaded_contract /obsolete/bin/herdr 'keepalive | runatload | inferred program' "exec '/obsolete/bin/herdr' server --session 'fm-remote'"
 touch "$CASE_STATE/bootout-fail"
 doctor --fix
 expect_code 1 "$DOCTOR_RC" "a stale loaded job passed after its replacement failed"
 assert_contains "$DOCTOR_OUT" 'fix launchagent-loaded=failed: launchctl bootstrap' "the failed replacement was not reported"
 assert_contains "$DOCTOR_OUT" 'check launchagent=ok:' "the repaired disk contract was not confirmed"
 assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=fixable:' "the stale loaded contract did not remain a readiness gap"
-assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "the existing server masking condition was not preserved"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=fixable:' "the stopped server was reported running after a failed reload"
 
 rm -f "$CASE_STATE/bootout-fail"
 doctor --fix
@@ -455,7 +869,7 @@ doctor --fix
 expect_code 0 "$DOCTOR_RC" "--fix could not re-scope an existing launch agent"
 assert_contains "$DOCTOR_OUT" 'check launchagent-scope=ok: LimitLoadToSessionType=Aqua' \
   "--fix did not re-scope the launch agent to Aqua"
-assert_no_grep 'Background' "$CASE_PLIST" "the Background session scope survived the repair"
+assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr"
 pass "a launch agent outside the Aqua session scope is rewritten in place"
 
 # --- launchd start failures are reported and delayed readiness is awaited ----
@@ -481,6 +895,91 @@ assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "delayed launchd startup 
 assert_absent "$CASE_STATE/herdr-delay" "the readiness poll stopped before the delayed server became reachable"
 pass "launchd failures are reported and delayed server readiness is awaited"
 
+# --- a running session served outside the Aqua login session is not ready ---
+
+new_case Darwin with-herdr gui
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "the Aqua-owner fixture could not be initialized"
+assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $AQUA_HOLDER_PID, launchd)" \
+  "a launchd-born owner was not reported with its pid and birth"
+
+printf '%s\n' "$BACKGROUND_HOLDER_PID" > "$CASE_STATE/socket-owner"
+printf 'background job\n' > "$CASE_STATE/user-loaded-$LABEL"
+doctor
+expect_code 1 "$DOCTOR_RC" "a label loaded in the user domain was reported Aqua-born"
+assert_contains "$DOCTOR_OUT" "check herdr-server=fixable: session fm-remote is served by pid $BACKGROUND_HOLDER_PID born outside the Aqua login session (unknown)" \
+  "the user-domain owner was not tagged fixable"
+rm -f "$CASE_STATE/user-loaded-$LABEL"
+
+printf '%s\n' "$XPC_ZERO_HOLDER_PID" > "$CASE_STATE/socket-owner"
+doctor
+expect_code 1 "$DOCTOR_RC" "an XPC_SERVICE_NAME=0 owner was reported Aqua-born"
+assert_contains "$DOCTOR_OUT" "check herdr-server=fixable: session fm-remote is served by pid $XPC_ZERO_HOLDER_PID born outside the Aqua login session (unknown)" \
+  "the inherited XPC marker was not tagged fixable"
+
+printf '%s\n' "$WORKER_HOLDER_PID" > "$CASE_STATE/socket-owner"
+doctor
+expect_code 0 "$DOCTOR_RC" "the gui-only remote-job worker owner was not reported ready"
+assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $WORKER_HOLDER_PID, worker)" \
+  "the gui-only worker was not recognized"
+
+printf '%s\n' "$SSH_HOLDER_PID" > "$CASE_STATE/socket-owner"
+: > "$CASE_LAUNCHCTL_LOG"
+doctor
+expect_code 1 "$DOCTOR_RC" "a session served by an SSH-born server was reported ready"
+assert_contains "$DOCTOR_OUT" "check herdr-server=fixable: session fm-remote is served by pid $SSH_HOLDER_PID born outside the Aqua login session (ssh)" \
+  "an SSH-born owner was not tagged fixable with its pid and birth"
+assert_contains "$DOCTOR_OUT" 'cannot reach the login keychain' "the consequence of the foreign birth was not named"
+assert_contains "$DOCTOR_OUT" 'action: herdr-server:' "the foreign-birth gap came with no operator action"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "a healthy loaded contract was blamed for the foreign server"
+[ ! -s "$CASE_LAUNCHCTL_LOG" ] || assert_not_contains "$(cat "$CASE_LAUNCHCTL_LOG")" kickstart \
+  "a read-only doctor run restarted the launch agent"
+
+doctor --fix --automatic
+expect_code 1 "$DOCTOR_RC" "automatic readiness claimed to repair a running foreign-born server"
+assert_contains "$DOCTOR_OUT" "check herdr-server=human: session fm-remote is served by pid $SSH_HOLDER_PID" \
+  "automatic readiness did not leave the foreign server to an operator"
+assert_not_contains "$DOCTOR_OUT" 'fix herdr-server=applied' "automatic readiness took over a running server"
+! grep -Eq -- "^(bootout|kickstart.*) gui/$(id -u)/$LABEL$" "$CASE_LAUNCHCTL_LOG" \
+  || fail "automatic readiness controlled the launch agent over a foreign server"
+assert_absent "$CASE_HOME/.firstmate/remote-herdr-takeover-fm-remote" "automatic readiness authorized a guard takeover"
+
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "the operator's --fix did not hand the session back to the launch agent"
+assert_contains "$DOCTOR_OUT" 'fix herdr-server=applied:' "--fix did not report the takeover through the launch agent"
+assert_grep "kickstart gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" "the takeover did not go through launchd"
+assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $AQUA_HOLDER_PID, launchd)" \
+  "the launch-agent-owned server was not confirmed after the takeover"
+assert_absent "$CASE_HOME/.firstmate/remote-herdr-takeover-fm-remote" "the operator's takeover authorization outlived its repair"
+assert_no_dangerous_calls "the takeover reached for auto-login, FileVault, or the keychain"
+
+printf '%s\n' "$SSH_HOLDER_PID" > "$CASE_STATE/socket-owner"
+touch "$CASE_STATE/kickstart-fail"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "a failed takeover was reported ready"
+assert_contains "$DOCTOR_OUT" 'fix herdr-server=failed: launchctl kickstart' "the failed takeover was not reported"
+assert_contains "$DOCTOR_OUT" "check herdr-server=fixable: session fm-remote is served by pid $SSH_HOLDER_PID" \
+  "a still-foreign server was reported ready after a failed takeover"
+rm -f "$CASE_STATE/kickstart-fail"
+
+# Handled doctor exits must revoke permission even if launchctl interrupts the
+# repair before the ordinary revoke call. The fixture signals the PID from
+# the emitted authorization record, not an inferred process-tree location.
+for interruption in 'HUP 129' 'INT 130' 'TERM 143'; do
+  printf '%s\n' "${interruption%% *}" > "$CASE_STATE/interrupt-takeover"
+  doctor --fix
+  expect_code "${interruption#* }" "$DOCTOR_RC" "the doctor did not handle ${interruption%% *} during takeover"
+  assert_absent "$CASE_HOME/.firstmate/remote-herdr-takeover-fm-remote" "handled ${interruption%% *} left takeover permission behind"
+done
+rm -f "$CASE_STATE/interrupt-takeover"
+
+: > "$CASE_STATE/socket-owner"
+doctor
+expect_code 1 "$DOCTOR_RC" "a session with no provable owner was reported ready"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=fixable: session fm-remote is running but no herdr process can be shown to own its socket' \
+  "an unprovable owner was not tagged fixable"
+pass "a foreign-born session is left to the operator, whose --fix takes it over through launchd"
+
 # --- no GUI login session: every dependent gap stays human -------------------
 
 new_case Darwin with-herdr no-gui
@@ -500,6 +999,88 @@ assert_contains "$DOCTOR_OUT" 'error: this host is not ready for a remote second
 assert_no_dangerous_calls "the doctor tried to create a login session by force"
 pass "human gaps are reported with their operator step and never claimed as fixed"
 
+# --- a non-zsh login shell is rendered with separate -l and -c --------------
+
+new_case Darwin with-herdr gui /bin/bash
+CASE_RESOLVE_DSCL=1
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix left a bash-login-shell host unready"
+assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr" /bin/bash
+pass "a bash Directory Services login shell is rendered with -l -c"
+
+new_case Darwin with-herdr gui
+CASE_LOGIN_SHELL="$CASE_DIR/My Shell/fish&dev"
+mkdir -p "$(dirname "$CASE_LOGIN_SHELL")"
+printf '#!/bin/sh\nexit 0\n' > "$CASE_LOGIN_SHELL"
+chmod +x "$CASE_LOGIN_SHELL"
+CASE_RESOLVE_DSCL=1
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix rejected a valid custom Directory Services shell"
+assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr" "$CASE_LOGIN_SHELL"
+pass "custom Directory Services shell paths remain valid plist arguments"
+
+# --- shell resolution falls back to an executable environment shell, then sh -
+
+new_case Darwin with-herdr gui /bin/bash
+CASE_RESOLVE_DSCL=1
+CASE_DSCL_FAIL=1
+CASE_ENV_SHELL=/bin/bash
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix rejected an executable SHELL fallback"
+assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr" /bin/bash
+
+new_case Darwin with-herdr gui /bin/sh
+CASE_RESOLVE_DSCL=1
+CASE_DSCL_FAIL=1
+CASE_ENV_SHELL="$CASE_DIR/not-a-shell"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix rejected the POSIX shell fallback"
+assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr" /bin/sh
+
+new_case Darwin with-herdr gui /bin/sh
+CASE_RESOLVE_DSCL=1
+CASE_DSCL_HANG=1
+CASE_ENV_SHELL=/bin/sh
+SECONDS=0
+doctor --fix
+elapsed=$SECONDS
+expect_code 0 "$DOCTOR_RC" "--fix did not fall back after a stalled Directory Services lookup"
+[ "$elapsed" -lt 10 ] || fail "a stalled Directory Services lookup blocked doctor for ${elapsed}s"
+assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr" /bin/sh
+pass "shell resolution bounds Directory Services and uses executable SHELL and POSIX fallbacks"
+
+# --- one shell resolution is shared by render, validation, and reporting ----
+
+new_case Darwin with-herdr gui /bin/sh
+CASE_RESOLVE_DSCL=1
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "initial repair did not install a healthy login-shell agent"
+assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr" /bin/sh
+: > "$CASE_LAUNCHCTL_LOG"
+rm -f "$CASE_STATE/dscl-count"
+CASE_SECOND_LOGIN_SHELL=/bin/bash
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "repeated repair drifted when a second shell lookup would differ"
+assert_contains "$DOCTOR_OUT" 'check launchagent=ok:' "the installed login-shell plist was reported as drifted"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "the loaded login-shell agent was reported as drifted"
+[ "$(cat "$CASE_STATE/dscl-count")" = 1 ] || fail "doctor resolved the account login shell more than once"
+assert_no_regex '^(bootout|bootstrap|kickstart)' "$CASE_LAUNCHCTL_LOG" \
+  "repeated repair reloaded an already healthy login-shell agent"
+pass "repeated repair reuses one resolved login shell and remains a no-op"
+
+# --- an unowned legacy server stays untouched until its owner is proven ------
+
+new_case Linux with-herdr no-gui
+rm -f "$CASE_HOME/.firstmate/remote-herdr-owner"
+printf 'true\n' > "$CASE_HERDR_RUNNING"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "a legacy server with unknown ownership was accepted"
+assert_contains "$DOCTOR_OUT" 'owner cannot be proven' "the unknown legacy owner was not reported"
+assert_not_contains "$DOCTOR_OUT" 'fix herdr-server=applied:' "the doctor took over the legacy server"
+assert_absent "$CASE_HOME/.firstmate/remote-herdr-owner" "the doctor claimed an unproven legacy server"
+[ "$(cat "$CASE_HERDR_RUNNING")" = true ] || fail "the doctor changed the legacy server state"
+pass "a legacy service without a provable owner is reported and never taken over"
+
 # --- linux has no launch agent, and --fix starts the server directly ---------
 
 new_case Linux with-herdr no-gui
@@ -513,8 +1094,19 @@ doctor --fix
 expect_code 0 "$DOCTOR_RC" "--fix did not start the herdr server on linux"
 assert_contains "$DOCTOR_OUT" 'fix herdr-server=applied:' "--fix did not report starting the server"
 assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "the started server was not confirmed by the re-check"
+[ "$(cat "$CASE_HOME/.firstmate/remote-herdr-owner")" = "$ROOT" ] \
+  || fail "the Linux server owner marker does not record its code root"
 [ ! -s "$CASE_LAUNCHCTL_LOG" ] || fail "the linux path invoked launchctl"
 pass "a non-darwin host skips launch agents and starts its herdr server directly"
+
+new_case Linux with-herdr no-gui
+rm -f "$CASE_BIN/claude"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$CASE_BIN/omp"
+chmod +x "$CASE_BIN/omp"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "a host whose only harness is omp was not ready after --fix"
+assert_contains "$DOCTOR_OUT" 'required harness=omp:' "omp did not satisfy the at-least-one-harness requirement"
+pass "omp alone satisfies the remote harness requirement"
 
 # --- --fix may add only owned wrappers for version-manager tools -------------
 
@@ -623,3 +1215,187 @@ assert_contains "$DOCTOR_OUT" 'check entrypoint-link=human:' "an operator-owned 
   || fail "--fix overwrote a file it did not create"
 unset FM_ROOT_OVERRIDE
 pass "the entrypoint symlink is recreated when absent and never overwritten when operator-owned"
+
+
+# --- the rex backend: CLI, API floor, and the persistent-server contract ------
+
+# install_case_rex [endpoint]: put the shared stateful rex fake on the case
+# PATH with a private state dir reporting a persistent unix:// server.
+install_case_rex() {
+  local endpoint=${1:-unix://$CASE_STATE/rex.sock}
+  write_rex_fake_cli "$CASE_BIN/rex" "D='$CASE_STATE/rexfake'"
+  install_rex_fake_state "$CASE_STATE/rexfake" "$endpoint"
+}
+
+new_case Darwin no-herdr gui
+install_case_rex
+doctor --backend rex
+expect_code 1 "$DOCTOR_RC" "a rex host with an absent job worker was reported ready"
+assert_contains "$DOCTOR_OUT" 'required rex=' "the rex CLI was not reported as a required tool"
+assert_not_contains "$DOCTOR_OUT" 'required herdr=' "a rex verification still required the herdr CLI"
+assert_contains "$DOCTOR_OUT" 'check rex=ok:' "the fake rex CLI was not detected"
+assert_contains "$DOCTOR_OUT" 'check rex-server=ok: persistent rex server' "a persistent rex server was not accepted"
+assert_not_contains "$DOCTOR_OUT" 'check herdr=' "a rex verification still ran the herdr checks"
+assert_not_contains "$DOCTOR_OUT" 'check herdr-server=' "a rex verification still ran the herdr server check"
+assert_not_contains "$DOCTOR_OUT" 'check launchagent=' "a rex verification still ran the Herdr launch-agent checks"
+assert_contains "$DOCTOR_OUT" 'check gui-session=ok:' "the backend-independent Aqua check did not run"
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker' "the backend-independent worker check did not run"
+doctor --backend rex --fix
+expect_code 0 "$DOCTOR_RC" "a rex host was not ready after --fix"
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker-loaded=ok:' "--fix did not load the remote job worker for rex"
+assert_not_contains "$DOCTOR_OUT" 'fix herdr-server=' "--fix touched a herdr server on the rex backend"
+assert_not_contains "$DOCTOR_OUT" 'fix launchagent=' "--fix wrote a Herdr launch agent on the rex backend"
+assert_no_grep 'dev.firstmate.herdr' "$CASE_LAUNCHCTL_LOG" \
+  "--fix bootstrapped a herdr launch agent on the rex backend"
+assert_no_dangerous_calls "the rex repair reached for auto-login, FileVault, or the keychain"
+pass "a rex-verified host checks rex, its persistent server, and the backend-independent worker"
+
+# A host offering both backends still verifies the default under `any`.
+new_case Darwin with-herdr gui
+install_case_rex
+doctor
+assert_contains "$DOCTOR_OUT" 'check herdr=ok:' "a host with both backends did not resolve herdr"
+assert_contains "$DOCTOR_OUT" 'required herdr=' "an any-resolution did not require the resolved backend CLI"
+assert_not_contains "$DOCTOR_OUT" 'check rex-server=' "an any-resolution ran rex checks on a herdr host"
+pass "backend resolution keeps herdr the default on a host offering both"
+
+# A rex-only host resolves rex under `any`.
+new_case Darwin no-herdr gui
+install_case_rex
+doctor
+assert_contains "$DOCTOR_OUT" 'check rex=ok:' "a rex-only host did not resolve rex"
+assert_contains "$DOCTOR_OUT" 'required rex=' "a rex-only host did not require the rex CLI"
+assert_not_contains "$DOCTOR_OUT" 'check herdr=' "a rex-only host still ran the herdr checks"
+pass "backend resolution falls to rex when herdr is absent"
+
+# A missing rex server is fixable through `rex server start`.
+new_case Darwin no-herdr gui
+install_case_rex
+touch "$CASE_STATE/rexfake/down"
+doctor --backend rex
+expect_code 1 "$DOCTOR_RC" "a rex host with no answering server was reported ready"
+assert_contains "$DOCTOR_OUT" 'check rex-server=fixable:' "a stopped rex server was not tagged fixable"
+assert_contains "$DOCTOR_OUT" 'check rex=ok:' "the rex CLI was not reported independent of its server"
+doctor --backend rex --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not start the rex server"
+assert_contains "$DOCTOR_OUT" 'fix rex-server=applied: started a persistent rex server' \
+  "--fix did not report starting the rex server"
+assert_contains "$DOCTOR_OUT" 'check rex-server=ok: persistent rex server' \
+  "the started rex server was not confirmed persistent by the re-check"
+assert_grep 'rex server start' "$CASE_STATE/rexfake/log" "--fix never ran rex server start"
+assert_no_grep 'dev.firstmate.herdr' "$CASE_LAUNCHCTL_LOG" \
+  "the rex server repair touched a herdr launch agent"
+pass "--fix starts a missing rex server as the persistent shape"
+
+# An exit-empty server is durable-looking but ephemeral. It still answers, and
+# may hold unrelated sessions and sibling agents whose processes a stop would
+# kill, so --fix must leave it running and hand the restart to an operator.
+new_case Darwin no-herdr gui
+install_case_rex
+printf 'true\n' > "$CASE_STATE/rexfake/exit-empty"
+doctor --backend rex
+expect_code 1 "$DOCTOR_RC" "an exit-empty rex server was accepted as durable readiness"
+assert_contains "$DOCTOR_OUT" 'check rex-server=human:' "an exit-empty rex server was not tagged human"
+assert_contains "$DOCTOR_OUT" 'exits when empty' "the exit-empty gap did not name its durability problem"
+doctor --backend rex --fix
+expect_code 1 "$DOCTOR_RC" "--fix reported an exit-empty rex server ready"
+assert_contains "$DOCTOR_OUT" 'check rex-server=human:' \
+  "--fix did not keep the exit-empty server a human gap"
+assert_contains "$DOCTOR_OUT" "action: rex-server: at a time when nothing runs on that account's rex server, run 'rex server stop' and then 'rex server start'" \
+  "--fix did not hand the operator-scheduled restart to a person"
+assert_not_contains "$DOCTOR_OUT" 'fix rex-server=' "--fix attempted a repair on an answering rex server"
+assert_no_grep 'rex server stop' "$CASE_STATE/rexfake/log" "--fix stopped an answering rex server"
+assert_no_grep 'rex server start' "$CASE_STATE/rexfake/log" "--fix restarted an answering rex server"
+[ ! -e "$CASE_STATE/rexfake/down" ] || fail "--fix left the answering rex server down"
+[ "$(cat "$CASE_STATE/rexfake/exit-empty")" = true ] || fail "--fix changed the answering rex server's shape"
+pass "--fix never stops an answering exit-empty rex server and reports the operator restart"
+
+# Readiness contract: only a successful whoami with boolean false proves
+# persistence. Reject unreadable settings and false-like/missing values; the
+# captain's refusal decision is the oracle, not the fake's default settings.
+new_case Linux no-herdr
+install_case_rex
+touch "$CASE_STATE/rexfake/whoami-fail"
+doctor --backend rex --fix
+expect_code 1 "$DOCTOR_RC" "unreadable rex settings were reported ready"
+assert_contains "$DOCTOR_OUT" 'check rex-server=human:' "unreadable whoami was not a human gap"
+assert_contains "$DOCTOR_OUT" 'action: rex-server:' "unreadable whoami omitted the human action"
+assert_not_contains "$DOCTOR_OUT" 'check rex-server=ok:' "unreadable whoami claimed persistence"
+rm "$CASE_STATE/rexfake/whoami-fail"
+: > "$CASE_STATE/rexfake/log"
+doctor --backend rex
+expect_code 0 "$DOCTOR_RC" "explicit boolean false was not ready"
+[ "$(grep -c 'whoami --json' "$CASE_STATE/rexfake/log")" -eq 1 ] \
+  || fail "successful readiness did not read whoami exactly once"
+for settings in '{}' '{"exit_empty":null}' '{"exit_empty":"false"}' '{"exit_empty":0}' invalid trailing; do
+  case "$settings" in
+    invalid) printf 'invalid' > "$CASE_STATE/rexfake/whoami.json" ;;
+    trailing) printf '{"endpoint":"unix:///fake/rex.sock","exit_empty":false} invalid' > "$CASE_STATE/rexfake/whoami.json" ;;
+    *) printf '%s' "$settings" | jq '. + {endpoint:"unix:///fake/rex.sock"}' > "$CASE_STATE/rexfake/whoami.json" ;;
+  esac
+  : > "$CASE_STATE/rexfake/log"
+  doctor --backend rex
+  expect_code 1 "$DOCTOR_RC" "unverified persistence settings were reported ready: $settings"
+  assert_contains "$DOCTOR_OUT" 'check rex-server=human:' "invalid settings were not a human gap"
+  [ "$(grep -c 'whoami --json' "$CASE_STATE/rexfake/log")" -eq 1 ] \
+    || fail "readiness did not read whoami exactly once"
+done
+pass "unreadable, missing, and malformed rex persistence settings require human action"
+
+# A rex CLI below the verified API floor is a human gap, as is a server one.
+new_case Darwin no-herdr gui
+install_case_rex
+printf '3\n' > "$CASE_STATE/rexfake/client-api"
+doctor --backend rex
+expect_code 1 "$DOCTOR_RC" "an older rex CLI was reported ready"
+assert_contains "$DOCTOR_OUT" 'check rex=human:' "a rex CLI below the API floor was not tagged human"
+assert_contains "$DOCTOR_OUT" 'API revision 3' "the gap did not name the reported revision"
+printf '8\n' > "$CASE_STATE/rexfake/client-api"
+printf '4\n' > "$CASE_STATE/rexfake/server-api"
+doctor --backend rex
+expect_code 1 "$DOCTOR_RC" "an older rex server was reported ready"
+assert_contains "$DOCTOR_OUT" 'check rex-server=human:' "a rex server below the API floor was not tagged human"
+assert_contains "$DOCTOR_OUT" 'API revision 4' "the server gap did not name the reported revision"
+pass "a rex CLI or server below the verified API floor is a human gap"
+
+# A rex endpoint that is not a local unix socket is refused, like the adapter's
+# own locality gate.
+new_case Darwin no-herdr gui
+install_case_rex tcp://127.0.0.1:7299
+doctor --backend rex
+expect_code 1 "$DOCTOR_RC" "a non-local rex endpoint was reported ready"
+assert_contains "$DOCTOR_OUT" 'check rex-server=human:' "a tcp rex endpoint was not tagged human"
+assert_contains "$DOCTOR_OUT" 'not a local unix socket' "the endpoint gap did not name its locality problem"
+pass "a rex endpoint that is not a local unix socket is a human gap"
+
+# An explicit rex request on a rex-less host names the missing CLI and cannot
+# be fixed; an unknown --backend value is a usage error.
+new_case Darwin no-herdr gui
+doctor --backend rex
+expect_code 1 "$DOCTOR_RC" "a rex-less host was reported ready for rex"
+assert_contains "$DOCTOR_OUT" 'check rex=human:' "a missing rex CLI was not tagged as a human gap"
+assert_contains "$DOCTOR_OUT" 'required rex=MISSING' "the missing rex CLI was not reported"
+assert_contains "$DOCTOR_OUT" 'check rex-server=human:' "server status was attempted without both rex and jq"
+doctor --backend rex --fix
+expect_code 1 "$DOCTOR_RC" "--fix reported a rex-less host as ready for rex"
+assert_not_contains "$DOCTOR_OUT" 'fix rex=applied' "--fix claimed to have installed rex"
+assert_not_contains "$DOCTOR_OUT" 'fix rex-server=applied' "--fix claimed a rex server without a rex CLI"
+doctor --backend tmux
+expect_code 2 "$DOCTOR_RC" "an unknown --backend was accepted"
+pass "an explicit rex request needs the CLI on PATH, and --backend rejects unknown backends"
+
+# On Linux the rex backend skips every Aqua requirement and reports ready on
+# the worker's own PATH.
+new_case Linux no-herdr
+install_case_rex
+doctor --backend rex
+expect_code 0 "$DOCTOR_RC" "a Linux rex host with a persistent server was not ready"
+assert_contains "$DOCTOR_OUT" 'check gui-session=skip:' "an Aqua login session was required for rex on linux"
+assert_not_contains "$DOCTOR_OUT" 'check launchagent=' "a launch agent was checked for rex on linux"
+assert_contains "$DOCTOR_OUT" 'check rex-server=ok: persistent rex server' \
+  "a persistent rex server was not accepted on linux"
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker=ok:' \
+  "the Linux job worker was not checked for rex"
+assert_not_contains "$DOCTOR_OUT" 'check herdr-server=' "the herdr server was checked for rex on linux"
+[ ! -s "$CASE_LAUNCHCTL_LOG" ] || fail "the linux rex path invoked launchctl"
+pass "a Linux host verifies rex without any Aqua-specific requirement"

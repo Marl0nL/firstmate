@@ -30,7 +30,7 @@ jobs:
     # NOTE: do not use head.repo.fork - this repo is itself a fork of upstream,
     # so that flag is true for every PR. Compare the head repo to the base repo.
     runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","firstmate-ci"]') }}
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Compatibility pointers must stay intact

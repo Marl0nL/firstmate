@@ -1,9 +1,7 @@
 ---
 name: secondmate-provisioning
 description: >-
-  Agent-only reference for persistent secondmate setup and retirement.
-  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, when raising or standing down a wake-resident secondmate, or when editing data/secondmates.md.
-  Covers local leases, whole-home remote routes, transactional seeding, record intake for an existing or inherited domain, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, wake-residency, and teardown safety.
+  Load when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, or when editing data/secondmates.md.
 user-invocable: false
 metadata:
   internal: true
@@ -11,7 +9,7 @@ metadata:
 
 # secondmate-provisioning
 
-Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, before raising or standing down a wake-resident one, and before editing `data/secondmates.md`.
+Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
 Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
 
@@ -34,7 +32,7 @@ Each registry entry stays concise and single-line: the summary is one sentence n
 Natural-language summary and `scope:` text may contain parentheses and semicolons; keep the generated `(home: ...; scope: ...; projects: ...; added ...)` suffix intact so operational consumers resolve its explicit field markers.
 The `home:` path points to the seeded home containing `data/charter.md`; no extra registry pointer field is needed.
 For a remote route, `host:` is an OpenSSH config alias and `root:` is that host's separate tracked Firstmate code root.
-A remote second-mate agent always runs on the Herdr backend and every seed, launch, and liveness relaunch first gates its host on `bin/fm-remote-doctor.sh` readiness, so an unready host refuses with that doctor's own gap text rather than half-creating a route; the workers that second mate supervises keep the home's ordinary backend selection.
+See [remote launch and recovery](../../../docs/remote-secondmates.md#launch-or-recover) for backend selection and readiness (Herdr remains the default; Rex requires explicit selection and a ready doctor verdict).
 This release places whole secondmate homes remotely and never individual workers.
 [`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md) owns current operator setup and transport behavior.
 The home-seeded `data/charter.md` is the sole owner of boilerplate idle-by-default behavior, the normal delegation lifecycle, and standard escalation contracts, so point to that charter rather than restating those contracts in the registry entry.
@@ -85,48 +83,49 @@ Release happens only on explicit retirement or seed rollback, never on routine r
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 It also writes the gitignored `.fm-secondmate-parent` durable binding before the required `.fm-secondmate-home` identity marker; the parser header in [`bin/fm-secondmate-parent-lib.sh`](../../../bin/fm-secondmate-parent-lib.sh) owns the record contract, and both files must remain in place.
-`bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
-
-`config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.
-A bare `<harness>` (today's format, e.g. `claude`) behaves exactly as before - harness only, no model/effort flag - so this is fully backward-compatible.
-`bin/fm-harness.sh secondmate-model` and `bin/fm-harness.sh secondmate-effort` print the optional 2nd/3rd tokens (empty when absent, or when the file is absent/`default`/harness-only); they read only `config/secondmate-harness`, never `config/crew-harness`, which stays a bare adapter name.
-For a `--secondmate` spawn, `bin/fm-spawn.sh` populates `MODEL`/`EFFORT` from those tokens only when the harness itself came from the secondmate config path for that spawn.
-For a local route, an explicit per-spawn `--harness` flag, positional harness arg, or raw launch command starts clean on model and effort too, unless the caller also passes explicit `--model` or `--effort`.
-A remote route accepts only a verified harness adapter and refuses a raw launch command at the host boundary.
-When the file's tokens do apply, an explicit per-spawn `--model` or `--effort` flag always wins over the file's token for that axis.
-Because this resolves from the file on every spawn, the pin is durable across every respawn (recovery, `/updatefirstmate`, restart) exactly like the harness axis itself - e.g. `config/secondmate-harness` containing `claude opus` keeps a secondmate pinned to Opus even if the primary's own default model later changes.
-This is secondmate-only: crewmate/scout model resolution is untouched by this file.
+[`docs/configuration.md`](../../../docs/configuration.md#choose-the-secondmate-harness) owns the primary's secondmate runtime pins, per-mate overrides, launch precedence, compatibility, and malformed-file refusal.
+Select the registered mate's id when resolving its pin; [`bin/fm-harness.sh`](../../../bin/fm-harness.sh)'s header owns the resolver commands.
 
 This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.
-Before a local launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe; dirty, diverged, or in-flight homes launch unchanged with a warning.
+Before a local launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe, or reconciles a clean divergence whose complete local result is already present there (e.g. after a squash merge) with `reset --keep`; dirty, uniquely diverged, or in-flight homes launch unchanged with a warning, and a genuine divergence gets the same durable reconciliation record `bin/fm-ff-lib.sh` writes for `/updatefirstmate`.
 The locked session-start deferred network stage runs the same bootstrap sweep for every live local secondmate home, discovered from `state/<id>.meta` records with `kind=secondmate` (`data/secondmates.md` only backfills `home=` for older records).
-That no-fetch path is a purely local fast-forward of tracked files, never an origin fetch, and it never touches the gitignored operational dirs, so a secondmate's backlog, projects, and in-flight work are never disturbed; a linked worktree advances immediately, while a standalone clone that lacks the target receives firstmate updates through `/updatefirstmate`'s origin refresh.
-A remote launch and the deferred bootstrap sweep ask the configured host to fast-forward its persistent home to that host's code-root commit under the same clean and ancestry guards.
-`/updatefirstmate` first updates the remote code root from its own origin, then runs that guarded home sync.
+That no-fetch path is a purely local fast-forward or redundant-divergence reconcile of tracked files, never an origin fetch, and it never touches the gitignored operational dirs, so a secondmate's backlog, projects, and in-flight work are never disturbed; a linked worktree advances immediately, while a standalone clone that lacks the target receives firstmate updates through `/updatefirstmate`.
+A remote launch and the deferred bootstrap sweep hand the configured host the primary's own default-branch commit and ask it to fast-forward, or reconcile a redundant divergence, the persistent home to exactly that commit, under the same clean, ancestry, and branch guards a local home gets.
+A remote home is a standalone clone on another machine, so that host imports the one commit it was given - already present, else from that host's own Firstmate copy without moving it, else from the home's origin - and skips with an actionable reason when none of them holds it, which is what an unpushed primary commit looks like from there.
+Neither path moves the host's Firstmate copy, and the host-local launch never re-targets that copy after the parent has already synced the home.
+`/updatefirstmate` is the one path that still follows that copy: it first updates the remote code root from its own origin, then syncs the home to that refreshed code-root commit.
 SSH exit 255 preserves the route and reports unknown completion; it never triggers local respawn or failover.
-The same placement-specific launch and deferred bootstrap sweep also propagate the primary's declared inherited local material: `config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, `config/backend`, `config/herdr-presentation-spaces`, `config/startup-memory-budget`, and the one shared captain-preference file `data/captain-shared.md`.
+The same placement-specific launch and deferred bootstrap sweep also propagate the primary's inherited local material declared by [`fm_config_inherit_items`](../../../bin/fm-config-inherit-lib.sh), whose owner also defines which items are session-scoped.
 Because these paths are gitignored, that propagation is a separate, primary-authoritative copy independent of the tracked-files fast-forward: it re-converges every live home whether or not its tracked files advanced, and it touches only the declared items.
-Propagation failures warn without blocking secondmate launch or session-start continuation, and the destination keeps whatever safely validated state the helper left behind.
+Propagation failures warn without blocking a local secondmate launch or session-start continuation; a remote prelaunch transfer failure refuses that launch.
+The destination keeps whatever safely validated state the helper left behind.
+For inherited config files, local propagation and the remote sender preserve the destination item on source inspection errors and mirror only proven absence; [`fm-config-inherit-lib.sh`](../../../bin/fm-config-inherit-lib.sh) owns this boundary.
 Inheritance copies the literal `config/crew-harness` file, so a secondmate's own crewmates use the primary's crewmate harness only when it names a concrete adapter such as `codex`; an unset or `default` value has nothing concrete to inherit, and the secondmate's own crewmates fall back to the secondmate's own or detected harness instead.
 Inherited `config/backend` becomes that secondmate home's local runtime-backend default for future spawns only; it never retargets, rewrites, migrates, stops, or restarts an already-live worker endpoint.
-A present primary value always converges byte-exact into validated secondmate homes, and primary absence removes the destination so those homes keep runtime auto-detection - except that for a secondmate whose own endpoint backend (its meta `backend=`, or the spawn's `--backend` at launch) is herdr, convergence pins `config/backend=herdr` into that home through the inheritance effective-backend override in [`fm-config-inherit-lib.sh`](../../../bin/fm-config-inherit-lib.sh), because a claim-suppressed (`HERDR_ENV=0`) secondmate supervisor pane can no longer auto-detect herdr itself; a non-herdr-endpoint mate keeps the plain absence mirror, and claim-suppression itself fires only when the home actually holds that pin (remote and unpinned mates stay integration-claimed).
+A present primary `config/backend` value always converges byte-exact into validated secondmate homes, and primary absence removes that backend setting so those homes keep runtime auto-detection.
 Explicit per-spawn `--backend` and `FM_BACKEND` remain stronger than every home's local `config/backend`, including an inherited default.
+The declared `config/supervision-host-off` opt-out follows the same primary-authoritative propagation: its presence opts secondmate homes out even if they have their own engine setting, and its absence removes their copy at convergence.
+`config/supervision-host` itself is not inherited; each home selects its own engine.
 `config/secondmate-harness` is not inherited because it is only the primary's knob for launching secondmate agents.
+`config/firstmate-role` is inherited under the additional [resolved-role and receipt policy](../../../docs/configuration.md#firstmate-role-configfirstmate-role), not as a raw copy of the primary file.
+Account pins are not inherited.
+[`Worker account pin`](../../../docs/configuration.md#worker-account-pin-configclaude-account-configpi-account) owns `config/claude-account`, `config/claude-accounts`, and `config/pi-account` inheritance and backend limits; [`T3 provider instances`](../../../docs/t3code-backend.md#provider-instances-and-models) owns T3 account selection.
+[`docs/configuration.md` "Per-secondmate account pins"](../../../docs/configuration.md#per-secondmate-account-pins) owns the explicit `config/secondmate-accounts/<id>/` override and the independent worker pins inside each mate's home.
 `data/captain-shared.md` is main-authoritative in the primary home and read-only in secondmate homes.
 Its primary file header must state that the file is main-authoritative, read-only in secondmate homes, must not be edited there, and that new captain-preference discoveries are routed to the main firstmate through marked status or a document pointer.
 Every propagation point converges the secondmate copy to the primary bytes; when the primary file is absent, any existing secondmate copy is quarantined and removed so absence converges too.
+Both the local helper and the remote receiver compare the destination against the generation each last published there, so an untouched inherited copy is replaced quietly instead of being reported as drift.
+A destination matching neither the primary bytes nor that recorded generation is quarantined to a collision-safe private dated sibling file before replacement, with a `SECONDMATE_SYNC:` diagnostic naming the home and quarantine artifact on the local route, so genuine local edits and interrupted publication keep a recovery copy.
 The helper rejects unsafe directories, symlinked or nonordinary source or destination artifacts, and hardlinked destination files.
 Between propagation runs, the secondmate copy is filesystem read-only; the helper may make its owned destination writable only around a guarded update and restores read-only mode on success, unchanged bytes, and recoverable failure paths.
-Before replacing divergent secondmate bytes, the helper hash-compares source and destination, quarantines the secondmate-local version to a collision-safe private dated sibling file, and emits a `SECONDMATE_SYNC:` diagnostic naming the home and quarantine artifact.
 Never copy any secondmate `data/captain-shared.md` back into the primary.
 Keep each home's `data/captain.md` domain-local.
 After first propagation to an existing home, trim that home's local `data/captain.md` by hand to domain-specific content plus pointers to `data/captain-shared.md`; do not automate or silently delete private content.
 Keep every `data/learnings.md` fully local by captain decision; route fleet-general machinery facts into tracked documentation through the normal firstmate repo path rather than inventing shared learnings propagation.
 No AGENTS.md reread nudge is needed at spawn or respawn because the agent reads instructions fresh on launch; only the bootstrap sweep's running-home instruction-surface advance needs that AGENTS.md re-read.
 Bootstrap reports successful AGENTS.md re-read sends as `BOOTSTRAP_INFO:` and only emits `NUDGE_SECONDMATES:` when that send fails and needs retry.
-A dormant wake-resident home is never nudged on either path: it re-reads AGENTS.md fresh on its next raise, so the bootstrap fleet-update nudge and `fm-update.sh`'s nudge listing both skip it with an explicit report line instead of typing the doorbell into its bare shell (`bin/fm-wake-resident-lib.sh` `fm_wr_dormant_wake_resident`; `docs/wake-resident.md`).
 A separate, literal-content config reread is required whenever inherited `config/*` material changes under an already-running secondmate.
-For a local home, after each successful allowlisted config write, both the locked bootstrap convergence path and mid-session `bin/fm-config-push.sh` use the shared propagation report to build one per-home generation-specific private instruction file from the validated destination post-write bytes for only the allowlisted config items that actually changed for that home (`config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, `config/backend`, `config/herdr-presentation-spaces`, `config/startup-memory-budget`), in deterministic allowlist order.
+For a local home, after each successful allowlisted config write, both the locked bootstrap convergence path and mid-session `bin/fm-config-push.sh` use the shared propagation report to build one per-home generation-specific private instruction file from the validated destination post-write bytes for only the declared config items that actually changed for that home, in declaration order.
 Each changed path is printed with clear begin/end delimiters and the destination file's full exact new bytes unparsed, or the explicit token `ABSENT` when propagation removed the destination copy.
 The instruction uses only minimal framing that these are defaults/rules and do not remove judgment; it never includes SHA values, selected profiles, parsed summaries, or any other generated interpretation.
 `data/captain-shared.md` is not a config file and is never inlined into this instruction file or message.
@@ -137,10 +136,13 @@ The propagation, generation publication, and pointer-delivery sequence holds one
 A newly launched or relaunched secondmate already reads its files at launch, so its pending config-reread generations are discarded or quarantined after cleanup failure and it needs no redundant live-agent config nudge unless propagation changes files after launch.
 Quarantined pre-relaunch generations are retained in bounded private history, and cleanup skips creating an empty quarantine generation.
 Successfully delivered generations are retained only within a bounded per-home state history, while pending generations remain until delivery succeeds or a launch supersedes them.
-A remote home receives the same allowlisted bytes through `fm-remote-inherit.sh` and gets one marked re-read instruction after a changed transfer.
-The parent records that nudge before delivery, retains it after a failed send, and retries the exact same route during locked bootstrap convergence.
+A remote home receives the same allowlisted bytes through `fm-remote-inherit.sh` and gets one marked re-read instruction after successful convergence when a transfer or tracked instruction-surface change requires it, or an earlier re-read remains owed.
+An unchanged transfer or a tracked advance outside `AGENTS.md`, `bin/`, and `.agents/skills/` creates no new re-read obligation.
+The parent records that nudge before delivery, retains it after a failed send, a partial apply, unknown completion, or an attempt killed before it reported, and retries the exact same route during locked bootstrap convergence.
+[`fm-secondmate-nudge-lib.sh`](../../../bin/fm-secondmate-nudge-lib.sh) owns the durable obligation record and compatibility behavior.
 It does not receive a pointer to a primary-local generation path that cannot exist on that host.
-These config values remain defaults and rules only; they must not harden `fm-spawn` to reject a deliberate runtime choice that differs from the configured defaults.
+Inherited harness and runtime-backend defaults must not harden `fm-spawn` to reject a deliberate runtime choice that differs from those defaults.
+The [worker launch environment contract](../../../docs/configuration.md#worker-launch-environment-configlaunch-env-allowlist) separately governs explicit environment grants.
 For already-live secondmates, use `bin/fm-config-push.sh` to push a mid-session inherited local-material change without running the tracked-file fast-forward.
 It uses the same live-home discovery and propagation helper as bootstrap, reports each item as `pushed`, `unchanged`, `skipped`, or `error`, and follows the config-reread contract above for changed or pending generations.
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
@@ -190,11 +192,10 @@ After seeding, run this handoff for the new secondmate's in-scope queued items.
 For an existing or inherited domain, complete record intake first so no already-shipped plan row is handed off as open work.
 For a local route, the helper resolves and validates the secondmate home from `data/secondmates.md`, then delegates the item move to `tasks-axi mv` (the single owner of the backlog format), which moves each named item - and a whole connected set, blocker plus dependents, atomically - from the main `data/backlog.md` into the secondmate home's `data/backlog.md`.
 For a remote route, the same helper first moves the dependency-closed set atomically from the main backlog into `data/handoff/<id>.outbox.md`, then transfers that backlog-format outbox through `fm-on.sh` and lets the remote home's `fm-backlog-receive.sh` move every not-already-present key under the destination lock.
-After a new local placement or a remote outbox receipt becomes durable, the helper sends one marked routed-work instruction through the receiving secondmate's recorded endpoint; missing or failed delivery makes the command fail loudly with the moved work intact, and the same handoff command retries known-undelivered wake intent without moving an already-present item again.
-An unresolved delivery attempt is never blindly resent.
-For a remote route, the outbox remains until both backlog receipt and receiver wake are confirmed; `--resume-pending` retries unfinished outboxes, while the script header owns its stable wake-correlation recovery state.
+After a new local placement or a remote outbox receipt becomes durable, the helper attempts one marked routed-work instruction through the receiving secondmate's recorded endpoint.
+[`bin/fm-backlog-handoff.sh`](../../../bin/fm-backlog-handoff.sh) owns route-specific wake outcomes, remote outbox release after durable receipt, and stable wake-correlation retry behavior.
 There is no two-phase handoff journal and no tasks-axi release beyond the already-required atomic `mv` capability.
-Bootstrap retries pending outboxes when mutation is authorized and emits `SECONDMATE_HANDOFF:` for any that remain.
+Bootstrap retries pending outboxes and wakes when mutation is authorized and emits `SECONDMATE_HANDOFF:` for any outboxes that remain.
 This delegated route remains required when `config/backlog-backend=manual`, which controls only routine firstmate backlog edits.
 It moves each queued item's whole block - the `- [ ] <id> ...` header plus every following two-or-more-space-indented body line and blank separator, up to the next item or column-0 section heading - byte-exact under the same section, treating an indented `## ...` line as body rather than a section boundary, so neither the header nor its body is duplicated or orphaned.
 It refuses a selected item with a single-space or tab-indented continuation rather than risk leaving content orphaned in the main backlog.
@@ -221,51 +222,19 @@ An SSH transport failure or unreadable remote endpoint remains unknown and must 
 `stuck-crewmate-recovery`'s remote-secondmate note owns why the endpoint-dead and send-failed verdicts that seem to justify this are themselves unreliable.
 Respawn re-resolves the secondmate harness from current config, uses the same guarded pre-launch sync, and re-propagates inherited local material, so recovered secondmates converge inherited config items and shared captain preferences whenever their home validates; tracked-file sync remains guarded separately.
 If the secondmate is already running and only inherited local material changed, prefer `bin/fm-config-push.sh` over respawning.
-To move a live LOCAL secondmate onto a newly pinned harness, model, or effort without a full recovery, set `config/secondmate-harness` and then relaunch it with `bin/fm-control.sh <id> relaunch`, which re-resolves that pin, stops the agent, and launches the replacement in the same home ([`docs/agent-control.md`](../../../docs/agent-control.md)).
-That plane refuses a remotely placed secondmate by name, because its agent runs on another host where none of the plane's postconditions can be read; use the remote route's own relaunch path for those.
+Before moving a live LOCAL secondmate onto a newly pinned harness, model, or effort, check replacement support in [`docs/agent-control.md`](../../../docs/agent-control.md#fail-closed-boundaries).
+On a supported backend, set `config/secondmate-harness` and relaunch it with `bin/fm-control.sh <id> relaunch`, which re-resolves that pin, stops the agent, and launches the replacement in the same home.
+The same relaunch and recovery paths honor the durable [per-secondmate account pin](../../../docs/configuration.md#per-secondmate-account-pins).
+That plane refuses a remotely placed secondmate by name, because its agent runs on another host where none of the plane's postconditions can be read.
+Move a REMOTE one with `bin/fm-remote-secondmate-relaunch.sh <id> <harness> <model|default|-> <effort|default|->`, which runs that same control-plane relaunch on its host and then republishes this primary's own route metadata from the identity the host confirmed; pass the profile explicitly and use `default` for an absent pin, because `config/secondmate-harness` is not inherited and the copy on that host belongs to a different home ([`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md)).
+Never call `fm-remote-secondmate-control.sh relaunch` through `fm-on.sh` directly for this: it leaves this primary's own record naming the runtime the mate used to run.
+A successful update restarts every live mate of both placements on its own, including one already on the target commit; the `/updatefirstmate` skill owns that pass, and `bin/fm-secondmate-restart.sh` owns its persist gate and failure vocabulary.
 
 Do not reconstruct a secondmate's whole tree from the main home.
 The main firstmate reconciles only direct reports.
 Each secondmate is a firstmate in its own home, so it runs recovery on startup and reconciles its own crewmates.
 A secondmate's recovery reconciles only work that is already its own and then idles.
 It never initiates a survey or audit during recovery.
-
-## Wake-residency
-
-Persistent and wake-resident are DIFFERENT AXES, and conflating them is how a sleeping agent gets destroyed.
-Persistent means the IDENTITY and STATE are permanent: home, seed marker, charter, backlog, status log, the metadata carrying the worktree lease, and the registry route.
-Wake-resident means only the PROCESS is not permanent: a message in its chat inbox raises it, and an idle window exits it.
-A wake-resident secondmate is persistent on the first axis exactly as much as any other secondmate, so an empty queue is still not a reason to retire it, and an exit is not a teardown and loses nothing.
-`docs/wake-resident.md` owns the mechanism, the config format, the refusal table, the checked persistence invariant, and the race analysis; this section owns only what you do about it.
-
-Opting a secondmate in, after its home is seeded and registered:
-
-```sh
-bin/fm-wake-resident.sh enable <id> [--idle-secs <n>] [--inbox <abs-dir>]
-bin/fm-wake-resident.sh status
-```
-
-Its charter must also carry the wake-resident residency clause, or the agent will read every fresh start as lost context and may sit waiting for work that is already answered.
-`bin/fm-brief.sh <id> --secondmate --wake-resident ...` scaffolds that clause for a new home.
-For an already-seeded home, replace the charter's `# Definition of done` section with the same clause rather than re-seeding, and leave every other section as it is.
-
-On a `check:` wake reporting a wake-resident line, act on your own turn and never spawn a parallel agent to service it:
-
-- `... pending message(s), dormant - raise it` - run `bin/fm-wake-resident.sh raise <id>`.
-  It is the ordinary guarded `bin/fm-spawn.sh <id> --secondmate` behind a single-claim guard, so two wakes cannot produce two agents.
-  A refusal saying a raise is already in flight is correct behaviour; do not retry past it.
-- `... unread <s>s while resident - deliver it` - the secondmate is up but has not picked the message up, which usually means its own supervision cycle is down.
-  Steer it with one short `bin/fm-send.sh <id> ...` line, then confirm it drains the inbox.
-- `... quiet <m>m, nothing in flight - stand it down` - run `bin/fm-wake-resident.sh standdown <id>`.
-
-Never substitute `bin/fm-teardown.sh` for a stand-down.
-Teardown retires the secondmate permanently: it removes the home, releases the treehouse lease, drops the meta, and unregisters the route.
-A stand-down only exits the agent, and the home, lease, backlog and status all survive so the next message resumes the same persistent identity.
-A stand-down refusal for work in flight or an unanswered message is a stop-and-leave-it-up result, never an obstacle to force past; `--force` waives only the quiet-time and busy-pane gates and never those two.
-
-Do not treat a dormant wake-resident secondmate as a dead direct report.
-The session-start liveness sweep deliberately exempts it, so its "endpoint alive as a bare shell" shape is healthy, not a recovery trigger.
-Reach for the recovery path above only when it is dormant *and* has pending mail that a raise cannot clear.
 
 ## Retirement and teardown
 
@@ -275,9 +244,12 @@ Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or mai
 
 The safety check is the secondmate's own home.
 Teardown refuses while its `state/*.meta` contains in-flight work.
-A remote route delegates the same guard to its configured host and additionally refuses while the primary has a pending handoff outbox or unresolved routed reply.
+Non-forced retirement also refuses while any parent pending-reply for that id is still unresolved.
+A remote route delegates the in-flight guard to its configured host and additionally refuses while the primary has a pending handoff outbox.
 SSH exit 255 preserves the route and local records because remote completion is unknown.
-When safe, teardown kills the direct endpoint, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
+When retirement proceeds, teardown kills the direct endpoint, removes every parent pending-reply record for that id including resolved leftovers and its delivery confirmation, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
+An endpoint close that could not be made stops the retirement before any record naming that endpoint is removed, so a cleanup never reports success for an agent that may still be live with nothing left on disk naming it.
+[`bin/fm-teardown.sh`](../../../bin/fm-teardown.sh)'s `endpoint_close_refusal` contract owns backend-specific `--force` limits; [endpoint-close verification](../../../docs/verification/runtime-backends.md#endpoint-close) records what each backend can prove.
 Removing a leased home releases its durable treehouse lease via `treehouse return`, so the pool slot is freed for reuse rather than left leased forever.
 A plain-clone home with no pool slot is simply removed.
 If `treehouse return` fails for a leased home, teardown stops with state intact rather than raw-removing the directory and hiding a held lease.
@@ -286,7 +258,8 @@ It refuses retirement while that cleanup is uncertain or unavailable, preserving
 Raw deletion is unsupported because a blocking process-event child can outlive its home.
 
 With `--force`, teardown is the explicit discard path.
+The worktree-slot ownership contract in `bin/fm-teardown.sh` still applies: `--force` never authorizes returning a descendant pool slot that another task may own.
 It kills child windows, discards child work and state inside the secondmate home, removes the route, releases the lease, and removes the retired secondmate home.
 If forced teardown contends with a fresh task publication in any affected home, one command refuses without publishing or removing task state; treat that refusal as terminal and inspect the other operation before retrying.
-Relaunch and non-forced teardown remain outside that serialization.
+`fm-spawn.sh --relaunch` and non-forced teardown remain outside that task-set serialization; [`fm-secondmate-liveness-lib.sh`'s header](../../../bin/fm-secondmate-liveness-lib.sh) owns automatic recovery serialization.
 Never use `--force` unless the captain explicitly said to discard the work.

@@ -363,13 +363,9 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
     return 1
   }
   wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
-  [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation; the workspace was created but cannot be targeted - close it manually" >&2; return 1; }
+  [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2; return 1; }
   sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
-  [ -n "$sfid" ] || {
-    echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2
-    fm_backend_cmux_close_workspace_by_id "$wsid"
-    return 1
-  }
+  [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
   printf '%s %s' "$wsid" "$sfid"
 }
 
@@ -516,12 +512,16 @@ fm_backend_cmux_send_text_line() {  # <target> <text> [expected-label]
   return 2
 }
 
-# fm_backend_cmux_capture: bounded plain-text surface capture. No herdr-style
-# small-N empty-result bug was found (finding #3), but "fetch generous, trim
-# locally" is kept anyway: a single read-screen call is still bounded by the
-# surface's actual current viewport height regardless of the requested
-# --lines value, so a caller asking for more than the viewport can see would
-# otherwise silently get less than it asked for with no way to tell why.
+# fm_backend_cmux_capture: bounded plain-text surface capture. `--scrollback`
+# is this adapter's explicit opt-in to history, so the result can include
+# lines that have scrolled out of view - it is not a viewport read, and no
+# viewport-only primitive is offered for cmux (see FM_BACKEND_VISIBLE_CAPTURE in
+# bin/fm-backend.sh). Finding #3's viewport-height cap was observed on
+# read-screen calls; whether a call WITHOUT --scrollback is strictly bounded to
+# the viewport is plausible but has not been live-verified. No herdr-style
+# small-N empty-result bug was found (finding #3); "fetch generous, trim
+# locally" is kept for parity with herdr and so a small caller bound never
+# depends on how read-screen clamps a small --lines value.
 fm_backend_cmux_capture() {  # <target> <lines> [expected-label]
   fm_backend_cmux_target_ready "$1" "${3:-}" || return 1
   local lines=${2:-200} fetch raw out
@@ -599,9 +599,9 @@ fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count
   done < <(printf '%s' "$wins" | jq -r '.[]? | .id' 2>/dev/null)
 }
 
-# fm_backend_cmux_close_workspace_by_id: close <workspace_id> reliably,
-# best-effort - the one safe route for removing a task workspace, shared by
-# kill and create_task's own failure-path teardown.
+# fm_backend_cmux_kill: remove the task's whole workspace, best-effort (mirrors
+# every other backend's `kill` `|| true` contract). A cmux task owns one
+# workspace, so teardown reclaims that workspace and all of its surfaces.
 #
 # The selected-workspace teardown bug (docs/cmux-backend.md "Closing the last
 # workspace in a window"): cmux keeps every window at >=1 workspace, so
@@ -615,8 +615,14 @@ fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count
 # target is the last one in its window a throwaway sibling is created first,
 # leaving that window a fresh default workspace (never an fm-<home>- title, so
 # recovery/list_live ignore it) - cmux's own "closed the last tab" outcome.
-fm_backend_cmux_close_workspace_by_id() {  # <workspace_id>
-  local wsid=$1 wininfo win count
+fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
+  local expected_label=${3:-} wsid wininfo win count
+  if [ -n "$expected_label" ]; then
+    fm_backend_cmux_target_ready "$1" "$expected_label" || return 0
+  else
+    fm_backend_cmux_parse_target "$1" || return 0
+  fi
+  wsid=$FM_BACKEND_CMUX_WORKSPACE
   wininfo=$(fm_backend_cmux_window_of_workspace "$wsid")
   win=${wininfo%% *}
   count=${wininfo##* }
@@ -624,20 +630,6 @@ fm_backend_cmux_close_workspace_by_id() {  # <workspace_id>
     fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 || true
   fi
   fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || true
-}
-
-# fm_backend_cmux_kill: remove the task's whole workspace, best-effort (mirrors
-# every other backend's `kill` `|| true` contract). A cmux task owns one
-# workspace, so teardown reclaims that workspace and all of its surfaces via
-# fm_backend_cmux_close_workspace_by_id's last-in-window-safe close.
-fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
-  local expected_label=${3:-}
-  if [ -n "$expected_label" ]; then
-    fm_backend_cmux_target_ready "$1" "$expected_label" || return 0
-  else
-    fm_backend_cmux_parse_target "$1" || return 0
-  fi
-  fm_backend_cmux_close_workspace_by_id "$FM_BACKEND_CMUX_WORKSPACE"
 }
 
 # fm_backend_cmux_list_live: recovery/orphan discovery. Lists every workspace

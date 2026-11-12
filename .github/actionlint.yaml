@@ -1,7 +1,8 @@
 # actionlint configuration, auto-discovered by bin/fm-lint-workflows.sh.
 #
-# The Linux and Herdr CI jobs target the operator's self-hosted runner, selected
-# by the custom label "firstmate-ci" (alongside the built-in "self-hosted").
+# The auto-triggered checks and ci.yml's fast pure jobs target the operator's
+# self-hosted runner, selected by the custom label "firstmate-ci" (alongside the
+# built-in "self-hosted").
 # actionlint does not know custom labels, so declare it here or every
 # `runs-on: [self-hosted, firstmate-ci]` is flagged as an unknown label. See
 # CONTRIBUTING.md "Where CI runs" for how that runner is set up.

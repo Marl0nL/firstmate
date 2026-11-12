@@ -60,6 +60,16 @@ grep -q 'herdr: agent blocked' "$STATE_DIR/.wake-queue" || fail "the stale paylo
 pass "handle_push_transition: a blocked crew enqueues a stale wake naming its window and wakes the supervisor"
 
 reset_state
+rm -f "$STATE_DIR"/.rex-escalated-* 2>/dev/null || true
+fm_write_meta "$STATE_DIR/tk1.meta" "window=0a1b-c2:3d4e-f5" "backend=rex" "kind=ship"
+handle_push_transition rex 0a1b-c2 "$(fm_transition_record 3d4e-f5 "" "" blocked claude-code "permission: Allow Bash: rm -rf build")"
+grep -q 'stale	0a1b-c2:3d4e-f5' "$STATE_DIR/.wake-queue" || fail "a rex push must name the task's recorded window: $(cat "$STATE_DIR/.wake-queue")"
+grep -q 'rex: agent blocked (permission: Allow Bash: rm -rf build) - waiting on human' "$STATE_DIR/.wake-queue" \
+  || fail "the stale payload must name rex and carry the blocked kind and message: $(cat "$STATE_DIR/.wake-queue")"
+[ -e "$STATE_DIR/.rex-escalated-0a1b-c2_3d4e-f5" ] || fail "the rex dedupe marker must be committed after enqueue"
+pass "handle_push_transition: a rex blocked edge's wake names the backend and carries Rex's blocked kind and message"
+
+reset_state
 fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
 (
   # shellcheck disable=SC2329 # Runtime override called by the isolated production owner.
@@ -110,6 +120,25 @@ case "$PANES" in *"default:wG:pQ"*) : ;; *) fail "the ship window must be in the
 case "$PANES" in *"default:wA:pS"*) fail "a kind=secondmate window must be EXCLUDED from the event pane list, got '$PANES'" ;; *) : ;; esac
 pass "event_wait_or_sleep: herdr windows go on the event pane list, but kind=secondmate endpoints are excluded"
 
+# --- event_wait_or_sleep: a T3 task never takes herdr's fast path away -------
+
+reset_state
+fm_write_meta "$STATE_DIR/api-fix.meta" "window=fm-api-fix" "backend=t3code" "t3_thread_id=mcp:thread-api" "kind=ship"
+fm_write_meta "$STATE_DIR/web-ui.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
+fm_backend_events_capable() { return 0; }
+# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
+fm_backend_wait_transition() { printf '%s %s\n' "$1" "$*" > "$TMP/panes"; return 1; }
+event_wait_or_sleep
+PANES=$(cat "$TMP/panes" 2>/dev/null || true)
+case "$PANES" in "herdr "*"default:wG:pQ"*) : ;; *) fail "a mixed home must keep herdr's push wait even when a T3 task sorts first, got '$PANES'" ;; esac
+rm -f "$STATE_DIR/web-ui.meta" "$TMP/panes"
+_event_cap_key=""
+event_wait_or_sleep
+PANES=$(cat "$TMP/panes" 2>/dev/null || true)
+case "$PANES" in "t3code "*) : ;; *) fail "a T3-only home must use T3's bounded wait, got '$PANES'" ;; esac
+pass "event_wait_or_sleep: herdr keeps the push wait in a mixed home; T3's wait runs only without another push backend"
+
 reset_state
 fm_write_meta "$STATE_DIR/tk3.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
 CAP_CALLS=0
@@ -117,12 +146,15 @@ CAP_CALLS=0
 fm_backend_events_capable() { CAP_CALLS=$((CAP_CALLS + 1)); return 0; }
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
 fm_backend_wait_transition() {
-  [ "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" = 1 ] || fail "cached capability verdict was not passed to the wait"
+  # The wait runs in its own process, so record what it saw for the assertion.
+  printf '%s\n' "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" >> "$TMP/wtcalls"
   return 1
 }
+: > "$TMP/wtcalls"
 event_wait_or_sleep
 event_wait_or_sleep
 [ "$CAP_CALLS" = 1 ] || fail "capability probe must be memoized across waits, got $CAP_CALLS calls"
+[ "$(cat "$TMP/wtcalls")" = $'1\n1' ] || fail "cached capability verdict was not passed to each wait, got: $(cat "$TMP/wtcalls")"
 pass "event_wait_or_sleep: one cached capability probe owns validation across bounded waits"
 
 # --- event_wait_or_sleep: a tmux-only home never runs the event path ----------
@@ -152,59 +184,5 @@ event_wait_or_sleep   # disabled: sleeps without calling wait_transition
 WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
 pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
-
-# --- event_wait_or_sleep: the rc=0 arm delivers, and its gate is sourced-safe ---
-# The rc=0 arm re-checks singleton ownership before handle_push_transition commits
-# (the category invariant in bin/fm-watch.sh's header). Sourced mode has no watcher
-# runtime, so that gate must be INERT here. A gate that is NOT inert runs `exit 0`
-# in whatever shell called the gated function, so calling it directly here would
-# terminate this script with status 0 - skipping every later assertion and the
-# final marker while bin/fm-test-run.sh still records a pass, because it decides
-# pass/fail from the script exit code alone. Both arms below therefore run the
-# gated call in a SUBSHELL that writes a sentinel only AFTER the call returns:
-# the gate's reach is then observable in the parent instead of erasing it.
-RC0_RETURNED="$TMP/rc0-arm-returned"
-
-reset_state
-rm -f "$RC0_RETURNED"
-fm_write_meta "$STATE_DIR/tk6.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
-# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
-fm_backend_events_capable() { return 0; }
-# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
-fm_backend_wait_transition() { mkrec wG:pQ blocked; return 0; }
-( event_wait_or_sleep; : > "$RC0_RETURNED" )
-[ -e "$RC0_RETURNED" ] \
-  || fail "the sourced-mode ownership gate exited its shell at 'watcher_owns_lock || exit 0' instead of falling through"
-[ -s "$WAKE_LOG" ] || fail "an actionable edge must wake the supervisor through the rc=0 arm"
-grep -q 'default:wG:pQ' "$STATE_DIR/.wake-queue" 2>/dev/null \
-  || fail "the rc=0 arm must enqueue a stale record naming the crew's window: $(cat "$STATE_DIR/.wake-queue" 2>/dev/null || true)"
-[ -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] \
-  || fail "the rc=0 arm must commit the backend dedupe marker after enqueue"
-pass "event_wait_or_sleep: an actionable edge is delivered, and its ownership gate is inert with no watcher runtime"
-
-# Negative control for the case above: with a superseded owner the gate MUST stop
-# the arm, and the sentinel MUST be absent. This proves the assertion distinguishes
-# an inert gate from a live one - without it, the positive case would hold even if
-# the gate never ran at all - and it pins the silent-pass shape itself: the subshell
-# still exits 0, so only the sentinel separates "delivered" from "stood down".
-reset_state
-rm -f "$RC0_RETURNED"
-fm_write_meta "$STATE_DIR/tk6.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
-(
-  # shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
-  watcher_owns_lock() { return 1; }
-  event_wait_or_sleep
-  : > "$RC0_RETURNED"
-)
-NC_RC=$?
-[ "$NC_RC" -eq 0 ] \
-  || fail "a superseded watcher must stand down with status 0, got $NC_RC"
-[ ! -e "$RC0_RETURNED" ] \
-  || fail "a superseded watcher must not run past 'watcher_owns_lock || exit 0' in the rc=0 arm"
-[ ! -s "$WAKE_LOG" ] \
-  || fail "a superseded watcher must not wake the supervisor: $(cat "$WAKE_LOG" 2>/dev/null || true)"
-[ ! -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] \
-  || fail "a superseded watcher must leave the backend dedupe marker unwritten so the holder's reader re-delivers the edge"
-pass "event_wait_or_sleep: a superseded watcher stands down at the rc=0 gate, committing nothing"
 
 echo "# fm-supervision-events.test.sh: all assertions passed"

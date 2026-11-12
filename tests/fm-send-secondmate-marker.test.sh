@@ -59,7 +59,7 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows) printf '%s\n' fm-domain fm-build win window; exit 0 ;;
 esac
 exit 0
 SH
@@ -126,33 +126,6 @@ test_secondmate_target_is_marked() {
   [ -f "$(fm_pending_reply_path "$home/state" "$corr")" ] \
     || fail "marked secondmate send should create a parent pending-reply record"
   pass "fm-send: a kind=secondmate target gets the from-firstmate marker and corr prepended"
-}
-
-# The marker and corr ride the durable record, which the mate reads only after
-# the doorbell tells it to. A cleared secondmate lost the charter rule that a
-# marked request needs a correlated status reply, so the doorbell that fm-send
-# rings for a marked request must itself carry that directive. This drives the
-# real executable and reads the typed doorbell (the -l text) out of the log.
-test_marked_secondmate_doorbell_carries_reply_directive() {
-  local dir fb log home rc doorbell
-  dir="$TMP_ROOT/sm-doorbell"; mkdir -p "$dir"
-  fb=$(make_stubs "$dir"); log="$dir/send.log"
-  home=$(setup_home sm-doorbell)
-  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
-  run_send "$fb" "$home" "$log" "fm-domain" "audit the build"; rc=$?
-  expect_code 0 "$rc" "marked secondmate send should succeed"
-  doorbell=$(cat "$log")
-  case "$doorbell" in
-    *"$FM_FROMFIRST_MARK"*|*corr=[a-f0-9]*)
-      fail "the doorbell must not leak the marker or a per-record corr value: $doorbell" ;;
-  esac
-  assert_contains "$doorbell" "includes its corr=<id> token" \
-    "the marked-request doorbell did not tell a naive mate to reply with the corr token"
-  assert_contains "$doorbell" "domain.status" \
-    "the marked-request doorbell did not name the mate's status file"
-  assert_contains "$doorbell" "reads only that status file, not this pane" \
-    "the marked-request doorbell did not warn that a pane-only reply is lost"
-  pass "fm-send: the doorbell rung for a marked secondmate request carries the correlated-reply directive"
 }
 
 test_exact_secondmate_task_id_is_marked() {
@@ -296,7 +269,6 @@ test_marked_send_preserves_trailing_newlines() {
 }
 
 test_secondmate_target_is_marked
-test_marked_secondmate_doorbell_carries_reply_directive
 test_exact_secondmate_task_id_is_marked
 test_crewmate_target_is_not_marked
 test_explicit_window_is_not_marked

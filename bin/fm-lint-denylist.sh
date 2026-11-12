@@ -12,8 +12,12 @@
 # bin/fm-lint.sh runs this as part of its default (no-explicit-path) lint; see
 # docs/configuration.md "Operator-private denylist" for the file's contract.
 #
-# It operates on the git repository containing the current working directory and
-# reads config/public-denylist from that repository's top level.
+# It operates on the git repository containing the current working directory.
+# It reads the first config/public-denylist found at: that repository's top
+# level; the main worktree's top level (via git's common dir), so a linked task
+# worktree - where pushes happen - sees the operating home's file; then
+# $FM_HOME/config/public-denylist. A trailing CR on an entry (a CRLF file) is
+# ignored.
 #
 # Usage:
 #   fm-lint-denylist.sh          check tracked files against the denylist
@@ -34,13 +38,37 @@ esac
 
 command -v git >/dev/null 2>&1 || exit 0
 top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-denylist="$top/config/public-denylist"
-[ -f "$denylist" ] || exit 0
+
+# fm_denylist_main_top: print the main worktree's top level for a linked
+# worktree (the parent of a non-bare repository's common .git dir); print
+# nothing when it cannot be resolved.
+fm_denylist_main_top() {
+  local common
+  common=$(git -C "$top" rev-parse --git-common-dir 2>/dev/null) || return 0
+  case "$common" in
+    /*) ;;
+    *) common="$top/$common" ;;
+  esac
+  common=$(cd "$common" 2>/dev/null && pwd -P) || return 0
+  [ "$(basename "$common")" = .git ] || return 0
+  dirname "$common"
+}
+
+denylist=""
+for candidate in "$top" "$(fm_denylist_main_top)" "${FM_HOME:-}"; do
+  [ -n "$candidate" ] || continue
+  if [ -f "$candidate/config/public-denylist" ]; then
+    denylist="$candidate/config/public-denylist"
+    break
+  fi
+done
+[ -n "$denylist" ] || exit 0
 
 rc=0
 lineno=0
 while IFS= read -r pattern || [ -n "$pattern" ]; do
   lineno=$((lineno + 1))
+  pattern=${pattern%$'\r'}
   case "$pattern" in
     ''|'#'*) continue ;;
   esac

@@ -21,7 +21,7 @@
 #
 # Safety (2026-07-02 incident, see tests/herdr-test-safety.sh): every lifecycle
 # operation goes through bin/fm-herdr-lab.sh, which appends the named session
-# flag and verifies the default fleet session is unchanged after teardown.
+# flag and verifies the configured fleet session is unchanged after teardown.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,15 +38,6 @@ assert_contains_local() {  # <haystack> <needle> <msg>
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
-
-# Every spawn below launches a deliberate non-agent stand-in command, so
-# fm-spawn.sh's post-launch agent-start confirmation could never observe a
-# registered agent and would fail the spawn after two full poll windows.
-# Disable it exactly as tests/lib.sh does for fake panes; the confirmation has
-# its own dedicated coverage in tests/fm-spawn-agent-confirm.test.sh. The
-# in-pane spawn script below restates this explicitly - a herdr pane's shell
-# does not inherit this suite's environment.
-export FM_SPAWN_CONFIRM=0
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
@@ -78,6 +69,8 @@ cleanup_all() {
   done
   WORKTREES=()
   "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || status=$?
+  # Spawn leaves each state/<id>.git-hooks strip dir read-only.
+  find "$TMP_ROOT" -type d -exec chmod u+rwx {} + 2>/dev/null
   rm -rf "$TMP_ROOT"
   return "$status"
 }
@@ -184,6 +177,8 @@ printf 'off\n' > "$SM2_HOME/config/herdr-presentation-spaces"
 printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM2_HOME/AGENTS.md"
 printf '%s\n' "$SM2_ID" > "$SM2_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM2_HOME/data/charter.md"
+printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$SM2_HOME/.gitignore"
+git -C "$SM2_HOME" init -q -b main
 
 # A third primary-shaped home that keeps presentation spaces ON through the
 # historical empty opt-in file, so the default-on migration is exercised against
@@ -192,11 +187,22 @@ PRES_HOME="$TMP_ROOT/presentation-home"
 mkdir -p "$PRES_HOME/state" "$PRES_HOME/config"
 : > "$PRES_HOME/config/herdr-presentation-spaces"
 
+write_ship_brief() {  # <file> <id>
+  cat > "$1" <<EOF
+# Task
+## Captain's intent
+Exercise Herdr launcher placement for $2.
+
+## Firstmate spec
+Verify the worker is placed in the correct workspace.
+EOF
+}
+
 for id in uniqA uniqB dupC dupD staleF smE presU presD; do
   mkdir -p "$PRIMARY_HOME/data/$id" "$SM_HOME/data/$id" "$PRES_HOME/data/$id"
-  printf 'trivial launcher-placement brief: nothing to do.\n' > "$PRIMARY_HOME/data/$id/brief.md"
-  printf 'trivial launcher-placement brief: nothing to do.\n' > "$SM_HOME/data/$id/brief.md"
-  printf 'trivial launcher-placement brief: nothing to do.\n' > "$PRES_HOME/data/$id/brief.md"
+  write_ship_brief "$PRIMARY_HOME/data/$id/brief.md" "$id"
+  write_ship_brief "$SM_HOME/data/$id/brief.md" "$id"
+  write_ship_brief "$PRES_HOME/data/$id/brief.md" "$id"
 done
 mkdir -p "$PRIMARY_HOME/data/$SM2_ID"
 printf 'trivial secondmate charter brief: nothing to do.\n' > "$PRIMARY_HOME/data/$SM2_ID/brief.md"
@@ -289,7 +295,7 @@ WS_PRIMARY_TABS_BEFORE=$(tab_labels_of_workspace "$WS_PRIMARY")
 cat > "$TMP_ROOT/spawn-in-pane.sh" <<SPAWN
 #!/usr/bin/env bash
 set -u
-FM_SPAWN_NO_GUARD=1 FM_SPAWN_CONFIRM=0 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \\
+FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \\
   "$ROOT/bin/fm-spawn.sh" dupC "$PROJ" "sh -c 'echo launcher-ws-ok'" --mode no-mistakes --yolo off --backend herdr \\
   > "$TMP_ROOT/dupC.out" 2> "$TMP_ROOT/dupC.err"
 echo \$? > "$TMP_ROOT/dupC.rc"
@@ -439,8 +445,8 @@ pass "real herdr E2E: teardown closes only the worker's own pane and leaves the 
 
 if ! cleanup_all; then
   trap - EXIT
-  printf 'not ok - isolated Herdr lab teardown failed or the default fleet session changed\n' >&2
+  printf 'not ok - isolated Herdr lab teardown failed or the configured fleet session changed\n' >&2
   exit 1
 fi
 trap - EXIT
-pass "real herdr E2E: isolated lab session removed and default fleet session unchanged"
+pass "real herdr E2E: isolated lab session removed and configured fleet session unchanged"

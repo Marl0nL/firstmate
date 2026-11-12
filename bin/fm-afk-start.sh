@@ -3,11 +3,11 @@
 # foreground process when one is not already alive.
 #
 # Usage: fm-afk-start.sh
-#   Sets state/.afk unless FM_AFK_STATE_PREPARED=1, checks
-#   state/.supervise-daemon.lock, and:
+#   Sets state/.afk (mode preserved on refresh, see fm_afk_flag_write) unless
+#   FM_AFK_STATE_PREPARED=1, checks state/.supervise-daemon.lock, and:
 #     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
 #       lock is held by a live daemon (a REFRESH: no stale-artifact clear);
-#     - otherwise clears any prior away session's stale escalation artifacts
+#     - otherwise clears prior-session delivery caches and per-task markers
 #       (fm_afk_clear_stale_artifacts) for a direct, non-prepared start, then
 #       execs bin/fm-supervise-daemon.sh in the foreground. A prepared start was
 #       already cleared transactionally by bin/fm-afk-launch.sh.
@@ -46,24 +46,22 @@ fm_afk_start_usage() {
   sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
-# fm_afk_clear_stale_artifacts: on a FRESH away-session entry (the daemon is not
-# already running), drop the previous away session's leftover escalation-delivery
-# artifacts so they cannot surface as stale escalations under the new session.
-# These are session-scoped by timing: a fresh entry owns a new supervision
-# session and the new daemon has not produced anything yet, so anything present
-# here belongs to a PRIOR session. This never drops a genuinely-pending
-# escalation - the delivery buffer is a transient cache, and any condition still
-# true (a crew still blocked, a check still firing) is re-derived and re-escalated
-# fresh by the daemon's heartbeat catch-all scan and the durable
-# state/.wake-queue replay (see docs/herdr-backend.md "Away-mode stale-artifact
-# lifecycle" and bin/fm-supervise-daemon.sh's escalate_add/inject_wedge_alarm).
-# NOT called on a refresh (daemon already alive), so the current session's own
-# buffered escalations are preserved.
+# Call only before a fresh daemon can produce state, never on a live refresh:
+# timing is what proves these caches and episode clocks belong to a prior session.
+# Durable wake-queue rows and classification positions must remain intact for
+# replay and catch-all reconciliation by bin/fm-supervise-daemon.sh.
+# .agents/skills/afk/SKILL.md "Stale-artifact lifecycle" owns the session contract.
 fm_afk_clear_stale_artifacts() {  # <state-dir>
   local state=$1
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
-        "$state/.subsuper-inject-wedged" 2>/dev/null
+        "$state/.subsuper-inject-wedged" \
+        "$state/.subsuper-unknown-acked" \
+        "$state"/.subsuper-stale-* \
+        "$state"/.subsuper-reported-stale-* \
+        "$state"/.subsuper-dialog-* \
+        "$state"/.subsuper-paused-* \
+        "$state"/.subsuper-pause-until-due-* 2>/dev/null
 }
 
 daemon_lock_owner() {
@@ -110,12 +108,24 @@ daemon_lock_held_by_live_daemon() {
   daemon_pid_matches "$pid" "$owner"
 }
 
-fm_afk_flag_write() {  # <state-dir>
-  local state=$1 lock="$1/.cursor-park-owner.lock" pending attempt=0 status=1
+fm_afk_flag_write() {  # <state-dir> [mode]
+  local state=$1 requested_mode=${2:-} lock="$1/.cursor-park-owner.lock" \
+    pending attempt=0 status=1 mode
   mkdir -p "$state" || return 1
   [ ! -d "$state/.afk" ] || return 1
+  # An explicit mode is a caller's deliberate request (a fresh /afk or /quiet
+  # entry). Omitted means "just refresh" (an already-running daemon, or
+  # recovery re-entering generically) and PRESERVES whatever mode is already
+  # on disk via fm_afk_mode - which itself falls back to "away" when nothing
+  # is on disk yet, so a genuinely fresh unspecified entry still defaults
+  # away. This is what keeps a refresh from silently flipping a captain's
+  # quiet mode back to away underneath them (kunchenguid/firstmate#2356).
+  case "$requested_mode" in
+    away|quiet) mode=$requested_mode ;;
+    *) mode=$(fm_afk_mode "$state") ;;
+  esac
   pending=$(mktemp "$state/.afk.pending.XXXXXX") || return 1
-  date '+%s' > "$pending" || { rm -f "$pending"; return 1; }
+  { printf '%s\n' "$mode"; date '+%s'; } > "$pending" || { rm -f "$pending"; return 1; }
   while [ "$attempt" -lt 50 ]; do
     attempt=$((attempt + 1))
     if fm_lock_try_acquire "$lock"; then
@@ -155,8 +165,7 @@ fm_afk_start_main() {
     fm_lock_remove_path "$FM_AFK_LOCK" 2>/dev/null || true
   fi
 
-  # Fresh start: clear the previous away session's stale delivery artifacts
-  # before the new daemon can surface them (fix for the leaked-artifact defect).
+  # Clear prior-session state before the new daemon can observe or produce it.
   if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ]; then
     fm_afk_clear_stale_artifacts "$FM_AFK_STATE"
   fi

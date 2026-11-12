@@ -344,14 +344,13 @@ fm_backend_zellij_create_task() {  # <session> <label> <cwd>
   tab_id=$(fm_backend_zellij_cli "$session" action new-tab --cwd "$cwd" --name "$title" 2>/dev/null | tr -d '[:space:]')
   case "$tab_id" in
     ''|*[!0-9]*)
-      echo "error: zellij new-tab did not return a numeric tab id for '$title' (got '$tab_id'; session '$session' may not exist); a tab titled '$title' may have been created without a targetable id - close it manually if present" >&2
+      echo "error: zellij new-tab did not return a numeric tab id for '$title' (got '$tab_id'; session '$session' may not exist)" >&2
       return 1
       ;;
   esac
   pane_id=$(fm_backend_zellij_pane_for_tab "$session" "$tab_id")
   if [ -z "$pane_id" ]; then
     echo "error: could not find a terminal pane for zellij tab $tab_id (session '$session')" >&2
-    fm_backend_zellij_cli "$session" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || true
     return 1
   fi
   if [ -n "$prev_active" ] && [ "$prev_active" != "$tab_id" ]; then
@@ -492,6 +491,14 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
     out=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action dump-screen --pane-id "$FM_BACKEND_ZELLIJ_PANE" --full 2>/dev/null) || return 1
   fi
   printf '%s' "$out" | tail -n "$lines"
+}
+
+# fm_backend_zellij_visible_capture: the visible viewport only. `dump-screen`
+# without --full is already viewport-bounded; this primitive keeps the dump
+# whole instead of trimming it to a caller's line bound.
+fm_backend_zellij_visible_capture() {  # <target> [expected-label]
+  fm_backend_zellij_target_ready "$1" "${2:-}" || return 1
+  fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action dump-screen --pane-id "$FM_BACKEND_ZELLIJ_PANE" 2>/dev/null
 }
 
 # --- zellij composer capture and capability primitives ----------------------

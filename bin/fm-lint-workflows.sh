@@ -7,6 +7,9 @@
 # this check must not live only as a step inside that workflow. bin/fm-lint.sh
 # invokes this owner on its default (no explicit-path) path, which CI and
 # commands.lint both use.
+# When <root>/.github/actionlint.yaml exists it is passed explicitly, so a
+# custom self-hosted runner label it declares resolves even in a tree
+# actionlint cannot place in a git project (a test fixture copy).
 #
 # Usage:
 #   fm-lint-workflows.sh                 lint workflows under this repo
@@ -124,8 +127,12 @@ fi
 # fm-lint.sh owns ShellCheck of the canonical shell set. Disable actionlint's
 # extra shell and Python subprocess linters so this gate is the named workflow
 # linter, not a second shell lint of `run:` blocks.
+CONFIG_ARGS=()
+if [ -f "$ROOT/.github/actionlint.yaml" ]; then
+  CONFIG_ARGS=(-config-file "$ROOT/.github/actionlint.yaml")
+fi
 set +e
-"$ACTIONLINT_BIN" -no-color -shellcheck= -pyflakes= -- "${FILES[@]}"
+"$ACTIONLINT_BIN" -no-color -shellcheck= -pyflakes= ${CONFIG_ARGS[@]+"${CONFIG_ARGS[@]}"} -- "${FILES[@]}"
 rc=$?
 set -e
 

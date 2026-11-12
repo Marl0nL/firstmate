@@ -204,6 +204,27 @@ test_valid_fixture_passes() {
   pass "valid fixture workflow passes"
 }
 
+# A custom self-hosted runner label resolves through the root's
+# .github/actionlint.yaml even in a tree that is not a git project, and is
+# still an unknown label without that config.
+test_root_actionlint_config_declares_custom_labels() {
+  local tmp out rc
+  tmp=$(fm_test_tmproot fm-lint-wf-label)
+  mkdir -p "$tmp/.github/workflows"
+  write_valid_workflow "$tmp/.github/workflows/ci.yml"
+  sed -i.bak 's/runs-on: ubuntu-latest/runs-on: [self-hosted, fm-test-label]/' "$tmp/.github/workflows/ci.yml"
+  rm -f "$tmp/.github/workflows/ci.yml.bak"
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an undeclared custom runner label unexpectedly passed"$'\n'"$out"
+  assert_contains "$out" "fm-test-label" "the unknown-label failure did not name the label"
+  printf 'self-hosted-runner:\n  labels:\n    - fm-test-label\n' > "$tmp/.github/actionlint.yaml"
+  rc=0
+  out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a custom label declared in the root's actionlint.yaml must pass"$'\n'"$out"
+  pass "the root's .github/actionlint.yaml declares custom runner labels outside a git project"
+}
+
 test_empty_workflows_dir_fails() {
   local tmp out rc
   tmp=$(fm_test_tmproot fm-lint-wf-empty)
@@ -518,6 +539,7 @@ test_pins_an_explicit_version
 test_current_workflows_pass
 test_col0_heredoc_fails_with_clear_error
 test_valid_fixture_passes
+test_root_actionlint_config_declares_custom_labels
 test_empty_workflows_dir_fails
 test_explicit_broken_path_fails
 test_non_mapping_root_fails
