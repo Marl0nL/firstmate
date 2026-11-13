@@ -124,7 +124,7 @@ test_create_task_is_independent_labeled_and_refuses_duplicates() {
   local out tag
   setup_case create
   printf '{"address":"t9"}\n' > "$D/run.json"
-  out=$(hc_shell 'fm_backend_hc_create_task fmtest fm-a1 /proj')
+  out=$(hc_shell 'unset HC_TERMINAL_ID FM_HC_SPACE; fm_backend_hc_create_task fmtest fm-a1 /proj')
   assert_equals "$out" t9 "create_task prints the new address"
   tag=$(hometag_of)
   out=$(grep $'\x1frun\x1f' "$D/log")
@@ -137,6 +137,45 @@ test_create_task_is_independent_labeled_and_refuses_duplicates() {
   expect_refused hc_shell 'fm_backend_hc_create_task fmtest fm-a1 /proj'
   assert_not_contains "$(cat "$D/log")" $'\x1frun\x1f' "a live duplicate must not start a second terminal"
   pass "hc: create_task starts an independent labeled terminal and refuses a duplicate"
+}
+
+# run_space <env-prefix>: create a task and print the herdr.space label its run
+# carried.
+run_space() {  # <script-prefix>
+  : > "$D/log"
+  hc_shell "$1"'; fm_backend_hc_create_task fmtest fm-a1 /proj' >/dev/null || return 1
+  grep $'\x1frun\x1f' "$D/log" | tr '\037' '\n' | sed -n 's/^herdr\.space=//p'
+}
+
+test_create_task_space_follows_the_spawner() {
+  local tag
+  setup_case space
+  printf '{"address":"t9"}\n' > "$D/run.json"
+  jq -n '{address: "t4", state: "running", labels: {"herdr.space": "sp4585abc"}}' > "$D/t4.json"
+  tag=$(hometag_of)
+  assert_equals "$(run_space 'export FM_HC_SPACE=pinned HC_TERMINAL_ID=t4')" pinned \
+    "a non-empty FM_HC_SPACE must win over the spawner's space"
+  assert_equals "$(run_space 'unset FM_HC_SPACE; export HC_TERMINAL_ID=t4')" sp4585abc \
+    "a live spawner terminal's herdr.space must be inherited"
+  assert_contains "$(grep $'\x1fget\x1f' "$D/log")" "HC_SESSION=fmtest" \
+    "the spawner lookup must go through the target session"
+  assert_equals "$(run_space 'export FM_HC_SPACE= HC_TERMINAL_ID=t4')" sp4585abc \
+    "an empty FM_HC_SPACE must not count as set"
+  assert_equals "$(run_space 'unset FM_HC_SPACE HC_TERMINAL_ID')" "fm-$tag" \
+    "no HC_TERMINAL_ID must fall back to fm-<hometag>"
+  assert_equals "$(run_space 'unset FM_HC_SPACE; export HC_TERMINAL_ID=t77')" "fm-$tag" \
+    "a not-found spawner terminal must fall back to fm-<hometag>"
+  echo 2 > "$D/t4.exit"
+  assert_equals "$(run_space 'unset FM_HC_SPACE; export HC_TERMINAL_ID=t4')" "fm-$tag" \
+    "a failed lookup must fall back to fm-<hometag>"
+  rm -f "$D/t4.exit"
+  jq -n '{address: "t4", state: "running", labels: {}}' > "$D/t4.json"
+  assert_equals "$(run_space 'unset FM_HC_SPACE; export HC_TERMINAL_ID=t4')" "fm-$tag" \
+    "an unlabeled spawner terminal must fall back to fm-<hometag>"
+  assert_equals "$(run_space 'unset FM_HC_SPACE; export HC_TERMINAL_ID=-bad')" "fm-$tag" \
+    "an invalid HC_TERMINAL_ID must fall back without a lookup"
+  assert_not_contains "$(cat "$D/log")" $'\x1fget\x1f' "an invalid HC_TERMINAL_ID must never reach hc"
+  pass "hc: create_task's herdr.space is FM_HC_SPACE, else the spawner's space, else fm-<hometag>"
 }
 
 test_control_interrupt_delivers_the_harness_keys() {
@@ -364,6 +403,7 @@ fm_test_run \
   test_hc_is_spawn_capable_and_needs_app_signals \
   test_required_tool_check_uses_the_adapter_resolver \
   test_create_task_is_independent_labeled_and_refuses_duplicates \
+  test_create_task_space_follows_the_spawner \
   test_control_interrupt_delivers_the_harness_keys \
   test_foreign_or_unlabeled_terminal_gets_no_input_and_no_close \
   test_invalid_session_never_reaches_hc \

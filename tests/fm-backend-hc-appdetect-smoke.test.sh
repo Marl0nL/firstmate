@@ -138,13 +138,15 @@ teardown_one() {  # <id>
   WT=
 }
 
-assert_task_labels() {  # <id> <terminal-addr>
+# <space> is the herdr.space the worker must carry: a spawn from inside a
+# labeled terminal inherits that terminal's space (bin/backends/hc.sh).
+assert_task_labels() {  # <id> <terminal-addr> <space>
   local labels
   labels=$("$ROOT/bin/fm-hc-lab.sh" run "$HC_TEST_SES" get "$2" --json \
     | jq -r '.labels["herdr.space"], .labels["herdr.tab"], .labels["firstmate.task"], .labels["firstmate.home"]' 2>/dev/null) \
     || fail "hc get on the spawned task terminal failed for $1"
-  [ "$(printf '%s\n' "$labels" | sed -n 1p)" = "fm-$HOMETAG" ] \
-    || fail "$1's herdr.space must be fm-$HOMETAG, got: $labels"
+  [ "$(printf '%s\n' "$labels" | sed -n 1p)" = "$3" ] \
+    || fail "$1's herdr.space must be $3, got: $labels"
   [ "$(printf '%s\n' "$labels" | sed -n 2p)" = "$HOMETAG-fm-$1" ] \
     || fail "$1's herdr.tab must be $HOMETAG-fm-$1, got: $labels"
   [ "$(printf '%s\n' "$labels" | sed -n 3p)" = "fm-$1" ] \
@@ -176,7 +178,7 @@ grep -q '^backend_detect=app-terminal$' "$META" \
 grep -q "^hc_session=$HC_TEST_SES\$" "$META" || fail "meta must record hc_session"$'\n'"$(cat "$META")"
 WORKER_TERM=$(grep '^hc_terminal=' "$META" | cut -d= -f2-)
 [ -n "$WORKER_TERM" ] || fail "meta must record hc_terminal"
-assert_task_labels "$ID" "$WORKER_TERM"
+assert_task_labels "$ID" "$WORKER_TERM" fm-app
 teardown_one "$ID"
 pass "app-terminal: spawn env claiming a herdr.space-labeled terminal auto-selects hc, notices, records backend_detect=app-terminal, and labels the worker"
 
