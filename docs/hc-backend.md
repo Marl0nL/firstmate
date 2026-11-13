@@ -81,7 +81,7 @@ The terminal carries these labels:
 | --- | --- | --- |
 | `firstmate.task` | `fm-<id>` | Task identity checked before input or close. |
 | `firstmate.home` | `<hometag>` from `bin/fm-backend-hometag-lib.sh` | Keeps two homes with the same task id apart. |
-| `herdr.space` | `FM_HC_SPACE`, default `fm-<hometag>` | Groups a home's tasks in one Herdr.app space. |
+| `herdr.space` | `FM_HC_SPACE` when set; else the `herdr.space` label of the spawner's own `HC_TERMINAL_ID` terminal, so crews follow firstmate's current space; else `fm-<hometag>` | Groups a home's tasks in one Herdr.app space. A failed or empty lookup falls back to the next source and never fails the spawn. |
 | `herdr.tab` | `<hometag>-fm-<id>` | One Herdr.app tab per task. |
 
 ```text

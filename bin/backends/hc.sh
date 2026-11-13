@@ -30,9 +30,12 @@
 #
 # Visibility in Herdr.app: the app shows a terminal that carries
 # herdr.space=<id> and herdr.tab=<id> labels, and an unknown id becomes a new
-# space or tab. create_task sets herdr.space=FM_HC_SPACE (default
-# fm-<hometag>) and herdr.tab=<scoped label>, so a home's tasks group in one
-# space with one tab each. Naming the space needs the app window and is not done.
+# space or tab. create_task sets herdr.tab=<scoped label> and herdr.space to,
+# in order: a non-empty FM_HC_SPACE; else the herdr.space label of the
+# spawner's own HC_TERMINAL_ID terminal in the target session, so crews follow
+# firstmate's current space across restarts; else fm-<hometag>. A failed or
+# empty lookup falls back silently. Naming the space needs the app window and
+# is not done.
 #
 # Measured limits on hc 0.1.13 and 0.1.14 (docs/hc-backend.md "Limits"):
 #   - `hc send` always presses Enter after pasting. There is no paste without
@@ -272,14 +275,31 @@ fm_backend_hc_container_ensure() {
   printf '%s' "$session"
 }
 
+# fm_backend_hc_space: the herdr.space label for a new task terminal in
+# <session>, in the order the header's "Visibility" paragraph states. Never
+# fails: any lookup problem yields fm-<home>.
+fm_backend_hc_space() {  # <session> <home>
+  local session=$1 home=$2 space=
+  if [ -n "${FM_HC_SPACE:-}" ]; then
+    printf '%s' "$FM_HC_SPACE"
+    return 0
+  fi
+  if fm_backend_hc_address_valid "${HC_TERMINAL_ID:-}"; then
+    space=$(fm_backend_hc_cli "$session" get --json "$HC_TERMINAL_ID" 2>/dev/null \
+      | jq -r '.labels["herdr.space"] // ""' 2>/dev/null) || space=
+  fi
+  printf '%s' "${space:-fm-$home}"
+}
+
 # fm_backend_hc_create_task: start a login shell terminal in <cwd> for
 # <window-label>, refusing a live duplicate in this home. Prints the address.
 # --no-parent and --outlive-parent keep the terminal independent of whichever
 # hc terminal firstmate itself runs in; --no-notify keeps hc from typing notes
 # into any parent.
 fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
-  local session=$1 label=$2 cwd=$3 home scoped dup out address
+  local session=$1 label=$2 cwd=$3 home scoped space dup out address
   home=$(fm_backend_hometag)
+  space=$(fm_backend_hc_space "$session" "$home")
   scoped=$(fm_backend_hc_scoped_label "$label")
   dup=$(fm_backend_hc_cli "$session" ls --json --label "firstmate.task=$label" --label "firstmate.home=$home" 2>/dev/null) \
     || { echo "error: 'hc ls' failed for session '$session'; cannot create $label" >&2; return 1; }
@@ -290,7 +310,7 @@ fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
   out=$(fm_backend_hc_cli "$session" run --bg --json --no-parent --outlive-parent --no-notify \
     --cwd "$cwd" \
     --label "firstmate.task=$label" --label "firstmate.home=$home" \
-    --label "herdr.space=${FM_HC_SPACE:-fm-$home}" --label "herdr.tab=$scoped" 2>&1) \
+    --label "herdr.space=$space" --label "herdr.tab=$scoped" 2>&1) \
     || { echo "error: hc run failed for $label: $out" >&2; return 1; }
   address=$(printf '%s' "$out" | jq -r '.address // empty' 2>/dev/null)
   fm_backend_hc_address_valid "$address" || { echo "error: hc run did not return a terminal address for $label (got: $out)" >&2; return 1; }
