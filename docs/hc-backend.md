@@ -27,12 +27,12 @@ The Herdr app shows the terminals of the session it bound at launch, `default` u
 
 ## Default backend
 
-After `--backend`, `FM_BACKEND`, and `config/backend`, a ship or scout spawn selects hc whenever a usable hc toolchain resolves, ahead of every runtime marker including `$TMUX` and `HERDR_ENV=1`.
+After `--backend`, `FM_BACKEND`, and `config/backend`, a ship, scout, or `--secondmate` spawn selects hc whenever a usable hc toolchain resolves, ahead of every runtime marker including `$TMUX` and `HERDR_ENV=1`.
 Usable means the adapter's own spawn-time binary gate passes (an executable `FM_HC_BIN`, or `herdr-core`/`hc` on `PATH` reporting `hc x.y.z` at or above the verified minimum) plus `jq`.
 The check only runs `<bin> --version`, bounded to `FM_BACKEND_HC_PROBE_TIMEOUT` seconds (default 5), which never contacts or starts a core; the spawn's container ensure is the first core contact, exactly as for an explicit hc spawn.
 When hc is unusable, one stderr notice names the reason and the older order below (runtime auto-detection, then tmux) picks the backend.
-A `--secondmate` spawn skips the default and resolves through that older order, because hc refuses secondmates, so a home that runs second mates still needs tmux or Herdr installed even though session-start tool checks follow the hc default; the away-mode supervisor backend comes from the captain's own terminal, not from this order.
-Usable is a binary and version check only: when herdr-core is installed but its core cannot start or is unhealthy, ship and scout spawns fail at the hc step rather than silently switching, and local `config/backend` containing `tmux` is the escape hatch until hc is repaired.
+The away-mode supervisor backend comes from the captain's own terminal, not from this order.
+Usable is a binary and version check only: when herdr-core is installed but its core cannot start or is unhealthy, those spawns fail at the hc step rather than silently switching, and local `config/backend` containing `tmux` is the escape hatch until hc is repaired.
 
 ## Runtime auto-detection
 
@@ -115,14 +115,14 @@ An input, capture, or close that carries the task label refuses a terminal whose
 
 ## Second mates
 
-`bin/fm-spawn.sh <id> [<home>] --secondmate --backend hc`, or the same launch under a `config/backend` of `hc`, runs a persistent second mate in one hc terminal started like any task terminal, with the user's login shell in the mate's home.
+`bin/fm-spawn.sh <id> [<home>] --secondmate --backend hc`, or the same launch resolving hc from `config/backend` or the [default](#default-backend), runs a persistent second mate in one hc terminal started like any task terminal, with the user's login shell in the mate's home.
 The record it publishes is the ordinary hc shape above plus `kind=secondmate` and `home=`.
 The terminal's `firstmate.task` and `firstmate.home` labels are the launching home's, because that home's record owns the terminal and every later read, input, and close checks them against that home.
 Its presentation labels are the mate's own: `herdr.space` is `fm-<mate hometag>`, the tag the mate home derives for itself (`bin/fm-backend-hometag-lib.sh` resolves `2ndmate-<id>` plus a short hash of that home), and `herdr.tab` is the launching home's scoped label for the mate.
 A mate's own crew label their terminals with that same space, so Herdr.app shows the mate as its own agent with its crew as tabs beside it, apart from the primary's space.
 `FM_HC_SPACE` is not consulted for a `--secondmate` launch, because it would move the mate out of the space its crew uses.
 Known limitation: when the mate's home is a linked git worktree, the app has been seen to show the mate's terminal in a space named after that folder and nested under the launching home's space rather than as its own top-level entry; the labels above are still applied, and this page records the behavior rather than working around it.
-The mate's own spawns select hc through the inherited `config/backend` when the primary sets one, otherwise through the app-terminal signal its own labeled terminal carries.
+The mate's own spawns select hc through the inherited `config/backend` when the primary sets one, otherwise through the [default](#default-backend), or with the default off through the app-terminal signal its own labeled terminal carries.
 
 Liveness and recovery follow the shared second-mate contract ([`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) "Recovery"; [`bin/fm-secondmate-liveness-lib.sh`](../bin/fm-secondmate-liveness-lib.sh) owns the mechanics).
 The session-start sweep and the watcher's liveness tick classify the mate's terminal through the agent-state read above.

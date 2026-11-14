@@ -582,7 +582,7 @@ New spawns choose the backend in this order:
    A later task cannot inherit that authority by analogy.
 2. `FM_BACKEND`.
 3. The first non-empty line of local, gitignored `config/backend`.
-4. This fork's default, `hc`, for ship and scout spawns whenever a usable hc toolchain resolves, even under `$TMUX` or `HERDR_ENV=1`; [`docs/hc-backend.md`](hc-backend.md#default-backend) owns what usable means and the fallback notice.
+4. This fork's default, `hc`, for ship, scout, and second-mate spawns whenever a usable hc toolchain resolves, even under `$TMUX` or `HERDR_ENV=1`; [`docs/hc-backend.md`](hc-backend.md#default-backend) owns what usable means and the fallback notice.
 5. Runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, `TERM_PROGRAM=rex` with `REX_BLOCK`, cmux runtime signals, or the Herdr app signal.
 6. Fallback `tmux`.
 

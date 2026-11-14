@@ -125,7 +125,7 @@
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
-#   config/backend, then this fork's hc default for ship and scout spawns (hc
+#   config/backend, then this fork's hc default for every spawn kind (hc
 #   whenever a usable herdr-core toolchain resolves, recorded as
 #   backend_detect=default; otherwise one stderr notice names why), then
 #   runtime auto-detection from the runtime firstmate's
@@ -2395,7 +2395,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
   else
     # Called directly so the one detection that chose BACKEND also leaves
     # FM_BACKEND_DETECT_SIGNAL for the meta's backend_detect= line below.
-    fm_backend_resolve "$KIND"
+    fm_backend_resolve
     BACKEND=$FM_BACKEND_RESOLVED
   fi
   fm_backend_validate_spawn "$BACKEND" || exit 1

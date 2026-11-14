@@ -475,6 +475,40 @@ test_secondmate_spawn_lands_in_the_mates_own_space() {
   pass "hc: a --secondmate spawn keeps this home's identity and lands in the mate home's own space"
 }
 
+# This fork's hc default applies to a --secondmate spawn like any other:
+# with no --backend, FM_BACKEND, or config/backend and a usable hc toolchain,
+# the mate lands on hc and its record names the default as the reason.
+test_secondmate_spawn_takes_the_hc_default() {
+  local id="hcsd$$" mate primary_tag out rc=0 meta line
+  setup_case secondmate-default
+  mate="$D/mate"
+  mkdir -p "$mate/bin" "$mate/data" "$mate/state" "$mate/config" "$mate/projects" \
+    "$HOMEDIR/state" "$HOMEDIR/config" "$HOMEDIR/data" "$D/user-home"
+  printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$mate/AGENTS.md"
+  printf 'charter\n' > "$mate/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' > "$mate/.gitignore"
+  git -C "$mate" init -q -b main
+  printf 'codex\n' > "$HOMEDIR/config/crew-harness"
+  primary_tag=$(FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$FM_TEST_ROOT bash -c '. "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"; fm_backend_source hc >/dev/null 2>&1; fm_backend_hometag')
+  [ -n "$primary_tag" ] || fail "could not resolve the home tag"
+  printf '{"address":"t9"}\n' > "$D/run.json"
+  write_terminal "$D" t9 live "fm-$id" "$primary_tag" zsh /bin/zsh
+  FM_TEST_CLEANUP_DIRS+=("/tmp/fm-$id")
+  out=$(env -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE -u HC_SOCKET -u TMUX -u HERDR_ENV -u FM_BACKEND \
+    PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FAKE_HC_DIR="$D" HOME="$D/user-home" \
+    FM_HOME="$HOMEDIR" FM_ROOT_OVERRIDE="$FM_TEST_ROOT" FM_SPAWN_NO_GUARD=1 \
+    FM_SKIP_SECONDMATE_SYNC=1 FM_BACKEND_HC_DEFAULT=1 HC_SESSION=fmtest \
+    bash "$FM_TEST_ROOT/bin/fm-spawn.sh" "$id" "$mate" --secondmate 2>&1) || rc=$?
+  expect_code 0 "$rc" "a --secondmate spawn with a usable hc and no explicit backend must succeed"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=codex kind=secondmate" "the spawn reports the mate"
+  meta=$(cat "$HOMEDIR/state/$id.meta")
+  for line in kind=secondmate backend=hc backend_detect=default hc_session=fmtest "home=$mate"; do
+    assert_contains "$meta" "$line" "the published record must carry $line"
+  done
+  pass "hc: a --secondmate spawn with no explicit backend takes this fork's hc default"
+}
+
 fm_test_run \
   test_hc_is_spawn_capable_and_needs_app_signals \
   test_required_tool_check_uses_the_adapter_resolver \
@@ -494,4 +528,5 @@ fm_test_run \
   test_container_ensure_gates_binary_version_and_generation \
   test_send_text_submit_confirms_through_send_wait \
   test_send_delimiters_and_binary_socket_pins \
-  test_secondmate_spawn_lands_in_the_mates_own_space
+  test_secondmate_spawn_lands_in_the_mates_own_space \
+  test_secondmate_spawn_takes_the_hc_default

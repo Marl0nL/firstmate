@@ -501,11 +501,11 @@ fm_backend_hc_unusable_reason() {
 # runtime auto-detection (fm_backend_detect), then default tmux.
 # The hc default selects hc whenever a usable hc toolchain resolves
 # (fm_backend_hc_unusable_reason), ahead of every runtime marker including
-# $TMUX and HERDR_ENV, and records FM_BACKEND_DETECT_SIGNAL=default. It does
-# not apply to a `secondmate` spawn kind (hc refuses --secondmate), which
-# resolves exactly as below, nor when FM_BACKEND_HC_DEFAULT=0 (the test
-# suite's hermetic setting). When hc is unusable, one stderr notice names the
-# reason before the older order picks the backend. A per-task `--backend` flag is
+# $TMUX and HERDR_ENV, and records FM_BACKEND_DETECT_SIGNAL=default, for
+# every spawn kind, second mates included. It does not apply when
+# FM_BACKEND_HC_DEFAULT=0 (the test suite's hermetic setting). When hc is
+# unusable, one stderr notice names the reason before the older order picks
+# the backend. A per-task `--backend` flag is
 # parsed by the caller (fm-spawn.sh) and takes precedence over this
 # resolution entirely; it is not read here. Auto-detect fires only when
 # nothing was explicitly configured, so an explicit setting always wins and
@@ -522,12 +522,12 @@ fm_backend_hc_unusable_reason() {
 # the missing piece instead of switching.
 # Paseo and tern are never auto-detected, so they only ever come out of this
 # function from FM_BACKEND or config/backend.
-fm_backend_resolve() {  # [<spawn-kind>]
-  local kind=${1:-} marker toolchain hc_reason=""
+fm_backend_resolve() {
+  local marker toolchain hc_reason=""
   FM_BACKEND_DETECTED=""
   FM_BACKEND_DETECT_SIGNAL=""
   FM_BACKEND_RESOLVED=$(fm_backend_explicit_name) && return 0
-  if [ "$kind" != secondmate ] && [ "${FM_BACKEND_HC_DEFAULT:-1}" != 0 ]; then
+  if [ "${FM_BACKEND_HC_DEFAULT:-1}" != 0 ]; then
     if ! hc_reason=$(fm_backend_hc_unusable_reason); then
       FM_BACKEND_RESOLVED=hc
       FM_BACKEND_DETECT_SIGNAL=default
