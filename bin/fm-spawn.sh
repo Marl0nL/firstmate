@@ -125,7 +125,7 @@
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
-#   config/backend, then this fork's hc default for ship and scout spawns (hc
+#   config/backend, then this fork's hc default for every spawn kind (hc
 #   whenever a usable herdr-core toolchain resolves, recorded as
 #   backend_detect=default; otherwise one stderr notice names why), then
 #   runtime auto-detection from the runtime firstmate's
@@ -148,8 +148,12 @@
 #   top-level shell into it, because a restart restores that shell's cwd.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. Orca, cmux, paseo, tern, and hc do not support
-#   --secondmate spawns.
+#   absent backend= means tmux. Orca, cmux, paseo, and tern do not support
+#   --secondmate spawns (bin/fm-backend.sh's FM_BACKEND_SECONDMATE owns that
+#   list). An hc --secondmate launch keeps this home's identity labels on the
+#   mate's terminal but places it in the mate home's OWN Herdr.app space, the
+#   one that home's crew will label their terminals into, so the app shows the
+#   mate as its own agent with its crew beside it (the hc arm below).
 #   A rex crewmate or scout opens one tab in the Rex session the launching
 #   firstmate runs in when it runs directly inside Rex, otherwise in its home's
 #   own Rex session; a --secondmate launch opens its tab in that secondmate
@@ -2391,29 +2395,15 @@ if [ "$RELAUNCH" -eq 0 ]; then
   else
     # Called directly so the one detection that chose BACKEND also leaves
     # FM_BACKEND_DETECT_SIGNAL for the meta's backend_detect= line below.
-    fm_backend_resolve "$KIND"
+    fm_backend_resolve
     BACKEND=$FM_BACKEND_RESOLVED
   fi
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
-  if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=orca does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
-  if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=cmux does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
-  if [ "$BACKEND" = paseo ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=paseo does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
-  if [ "$BACKEND" = tern ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=tern does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
-  if [ "$BACKEND" = hc ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=hc does not support --secondmate spawns yet" >&2
+  # bin/fm-backend.sh's FM_BACKEND_SECONDMATE owns which backends host a
+  # persistent second mate and why the others do not.
+  if [ "$KIND" = secondmate ] && ! fm_backend_secondmate_supported "$BACKEND"; then
+    echo "error: backend=$BACKEND does not support --secondmate spawns yet" >&2
     exit 1
   fi
   fm_backend_runtime_check "$BACKEND" || exit 1
@@ -5378,7 +5368,22 @@ EOF
     ;;
   hc)
     HC_SES=$(fm_backend_hc_container_ensure) || exit 1
-    HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$PROJ_ABS") || exit 1
+    if [ "$KIND" = secondmate ]; then
+      # Identity stays this home's: the record lives in this home's state/,
+      # and every later read, input, and close checks the terminal's
+      # firstmate.task and firstmate.home labels against THIS process's
+      # hometag. Presentation is the mate's own: Herdr.app groups terminals
+      # by herdr.space, and the mate's crew will label their terminals with
+      # the mate home's tag (inside the mate's own session FM_HOME and
+      # FM_ROOT both resolve to that home), so the mate's terminal takes that
+      # same space and the app shows the mate as its own agent with its crew
+      # beside it. FM_HC_SPACE is deliberately not consulted here: it would
+      # move the mate out of the space its crew is about to use.
+      HC_MATE_SPACE="fm-$(FM_HOME="$PROJ_ABS" FM_ROOT="$PROJ_ABS" fm_backend_hometag)"
+      HC_TERMINAL=$(FM_HC_SPACE="$HC_MATE_SPACE" fm_backend_hc_create_task "$HC_SES" "$W" "$PROJ_ABS") || exit 1
+    else
+      HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$PROJ_ABS") || exit 1
+    fi
     T="$HC_SES:$HC_TERMINAL"
     ;;
   orca)

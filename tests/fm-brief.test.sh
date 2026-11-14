@@ -1395,6 +1395,48 @@ test_home_brief_include_is_appended_last() {
   pass "fm-brief.sh: the home brief include lands last on ship and scout, verbatim, and fails closed"
 }
 
+# config/herdr-desk adds a "# Herdr desk" section: ship and scout workers declare
+# themselves a crew under the scaffolding terminal, a charter points the
+# secondmate at the herdr-desk skill, the home include still lands last, and
+# without the flag nothing changes.
+test_herdr_desk_section_follows_the_home_flag() {
+  local home brief kind last_heading
+  home="$TMP_ROOT/desk-home"
+  mkdir -p "$home/config"
+
+  FM_HOME="$home" HC_TERMINAL_ID=t4 "$ROOT/bin/fm-brief.sh" desk-off some-proj --scout >/dev/null || fail "scout scaffold failed without the desk flag"
+  assert_no_grep '# Herdr desk' "$home/data/desk-off/brief.md" "a home without config/herdr-desk got a desk section"
+
+  : > "$home/config/herdr-desk"
+  printf '%s\n' 'Prefer small commits.' > "$home/config/brief-include.md"
+  for kind in ship scout; do
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" HC_TERMINAL_ID=t4 "$ROOT/bin/fm-brief.sh" "desk-$kind" some-proj --scout >/dev/null || fail "scout scaffold failed with the desk flag"
+    else
+      FM_HOME="$home" HC_TERMINAL_ID=t4 "$ROOT/bin/fm-brief.sh" "desk-$kind" some-proj --mode no-mistakes >/dev/null || fail "ship scaffold failed with the desk flag"
+    fi
+    brief="$home/data/desk-$kind/brief.md"
+    assert_grep '# Herdr desk' "$brief" "$kind brief lacks the desk section"
+    assert_grep "desk init crew --name fm-desk-$kind --task fm-desk-$kind --parent t4" "$brief" "$kind brief does not declare the crew under the scaffolding terminal"
+    assert_grep 'never replaces a status line or the inbox' "$brief" "$kind desk section lost its not-a-channel rule"
+    last_heading=$(grep -n '^# ' "$brief" | grep -v -x '[0-9]*:# Task' | tail -n 1)
+    [ "${last_heading#*:}" = '# Home brief additions' ] || fail "$kind desk section displaced the home include from last place"
+  done
+
+  FM_HOME="$home" env -u HC_TERMINAL_ID "$ROOT/bin/fm-brief.sh" desk-noterm some-proj --scout >/dev/null || fail "scout scaffold failed outside a Herdr terminal"
+  assert_grep 'desk init crew --name fm-desk-noterm --task fm-desk-noterm` once' "$home/data/desk-noterm/brief.md" "a scaffold outside a Herdr terminal still named a parent"
+
+  FM_HOME="$home" HC_TERMINAL_ID=t4 FM_SECONDMATE_CHARTER='Supervise assigned work.' \
+    "$ROOT/bin/fm-brief.sh" desk-mate --secondmate --no-projects >/dev/null || fail "secondmate scaffold failed with the desk flag"
+  brief="$home/data/desk-mate/brief.md"
+  # shellcheck disable=SC2016 # Literal brief text.
+  assert_grep 'load the `herdr-desk` skill at session start' "$brief" "charter does not point the secondmate at the herdr-desk skill"
+  # shellcheck disable=SC2016 # Literal brief text.
+  assert_grep 'Pass `--parent t4` there' "$brief" "charter does not name the main firstmate's terminal"
+  assert_no_grep 'desk init crew' "$brief" "a secondmate charter was told to declare itself a crew"
+  pass "fm-brief.sh: config/herdr-desk adds the crew and secondmate desk sections, ahead of the home include"
+}
+
 # --base-branch names the branch a task starts from and a ship's PR targets. It is
 # recorded as a Base branch line under # Setup, which fm-spawn reads back, and is
 # refused where no pull request carries the work.
@@ -1725,6 +1767,7 @@ test_workers_wait_without_spending_turns
 test_wait_no_turns_absent_keeps_the_previous_brief
 test_inbox_guidance_explains_marked_body_terminator
 test_home_brief_include_is_appended_last
+test_herdr_desk_section_follows_the_home_flag
 test_base_branch_is_rendered_and_bounded
 test_ship_branch_prefix_defaults_to_legacy_fm
 test_ship_branch_prefix_override_is_consistent_across_modes

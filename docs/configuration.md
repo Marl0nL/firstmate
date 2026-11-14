@@ -582,7 +582,7 @@ New spawns choose the backend in this order:
    A later task cannot inherit that authority by analogy.
 2. `FM_BACKEND`.
 3. The first non-empty line of local, gitignored `config/backend`.
-4. This fork's default, `hc`, for ship and scout spawns whenever a usable hc toolchain resolves, even under `$TMUX` or `HERDR_ENV=1`; [`docs/hc-backend.md`](hc-backend.md#default-backend) owns what usable means and the fallback notice.
+4. This fork's default, `hc`, for ship, scout, and second-mate spawns whenever a usable hc toolchain resolves, even under `$TMUX` or `HERDR_ENV=1`; [`docs/hc-backend.md`](hc-backend.md#default-backend) owns what usable means and the fallback notice.
 5. Runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, `TERM_PROGRAM=rex` with `REX_BLOCK`, cmux runtime signals, or the Herdr app signal.
 6. Fallback `tmux`.
 
@@ -601,7 +601,9 @@ Paseo and tern stay explicit-only because their runtime markers leak into every 
 ### Accepted backends and secondmate limits
 
 Any value other than `tmux`, `herdr`, `zellij`, `orca`, `cmux`, `paseo`, `rex`, `t3code`, `tern`, or `hc` is rejected until another adapter is implemented and verified.
-`fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, `cmux`, `paseo`, `rex`, `t3code`, `tern`, and `hc` for ship and scout tasks; `backend=orca`, `backend=cmux`, `backend=paseo`, `backend=tern`, and `backend=hc` all still refuse `--secondmate` until secondmate launch semantics are designed for each, while `backend=t3code` supports secondmates and runs only the `claude` and `codex` harnesses.
+`fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, `cmux`, `paseo`, `rex`, `t3code`, `tern`, and `hc` for ship and scout tasks.
+`backend=orca`, `backend=cmux`, `backend=paseo`, and `backend=tern` still refuse `--secondmate` until secondmate launch semantics are designed for each; `FM_BACKEND_SECONDMATE` in [`bin/fm-backend.sh`](../bin/fm-backend.sh) is the one owner of that list.
+`backend=t3code` supports secondmates and runs only the `claude` and `codex` harnesses, and `backend=hc` supports secondmates as [Second mates](hc-backend.md#second-mates) describes.
 
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
 
@@ -803,6 +805,14 @@ The optional local, gitignored `config/wait-no-turns` presence flag opts this ho
 With it present, ship and scout briefs gain the `# Waiting` section and the foreground no-mistakes drive text, every brief's inbox section keeps the natural-checkpoint check and adds that a waiting worker does not poll or list its inbox because a waiting instruction rings, a pending-reply recovery waits while that mate has its own open decision or blocker, and a fire-and-forget steer whose doorbell did not land gets one later ring.
 With the file absent, generated briefs omit the waiting section and the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
 The flag is a home-local preference and is not inherited by secondmate homes.
+
+## Herdr desk (config/herdr-desk)
+
+The optional local, gitignored `config/herdr-desk` presence flag says the captain watches this home in Herdr's Desk layout, whose `desk` CLI lets each agent keep its own panel there.
+With it present, ship and scout briefs gain a `# Herdr desk` section telling the worker to declare itself a crew under the scaffolding terminal and keep its summary, findings, and next steps current, and a secondmate charter gains one pointing the secondmate at the `herdr-desk` skill.
+Every instruction in those sections is conditional on the worker's own `desk` and `$HC_TERMINAL_ID`, and none of it replaces a status line, the steering inbox, or any other contract.
+With the file absent, generated briefs and charters are unchanged.
+The [`herdr-desk`](../.agents/skills/herdr-desk/SKILL.md) skill owns when firstmate creates or removes the flag; it is home-local and not inherited by secondmate homes.
 
 ## PR health monitor (config/pr-health-monitor)
 

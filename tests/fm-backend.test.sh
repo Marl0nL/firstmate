@@ -576,7 +576,7 @@ test_backend_rex_autodetect() {
 # undetected however the app home and spawn core look.
 test_backend_detect_herdr_app() {
   local dir fb cfg cfg_tmux out errfile sockdir sock run other apphome lpid opid
-  command -v python3 >/dev/null 2>&1 || { pass "skip: python3 absent; the herdr-app probes need its unix connect"; return; }
+  command -v python3 >/dev/null 2>&1 || { pass "skip: python3 absent; these cases park their unix sockets with it"; return; }
   command -v jq >/dev/null 2>&1 || { pass "skip: jq absent; the hc toolchain check needs it"; return; }
 
   dir="$TMP_ROOT/herdr-app-detect"; fb="$dir/fakebin"; cfg="$dir/config-empty"; cfg_tmux="$dir/config-tmux"
@@ -657,7 +657,8 @@ SH
     FM_FAKE_HC_GET='{"labels":{"herdr.space":"fm-app"}}' \
     HC_TERMINAL_ID=t2 fm_backend_detect) \
     && fail "HC_TERMINAL_ID without a socket never reaches the record check, got '$out'"
-  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$run" \
+  # node stays reachable: the socket probe runs on it, as on every home.
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="$(dirname "$(command -v node)"):/usr/bin:/bin" XDG_RUNTIME_DIR="$run" \
     HC_TERMINAL_ID=t2 HC_TERMINAL_SOCKET="$sock" FM_HC_BIN=/nonexistent/hc fm_backend_detect && exit 9; \
     [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-terminal-unusable ]) \
     || fail "a live terminal with no usable hc must stay undetected with signal app-terminal-unusable, got '$out'"
@@ -756,8 +757,8 @@ SH
 # FM_BACKEND and config/backend, a usable hc toolchain selects hc ahead of
 # every runtime marker, $TMUX and HERDR_ENV included, touching the binary only
 # through `--version`; an unusable one falls back to the older order with one
-# notice naming why; a secondmate spawn kind and FM_BACKEND_HC_DEFAULT=0 keep
-# the older order silently.
+# notice naming why; the spawn kind does not matter; FM_BACKEND_HC_DEFAULT=0
+# keeps the older order silently.
 test_backend_name_hc_default() {
   local dir fb old cfg cfg_tmux log out errfile
   command -v jq >/dev/null 2>&1 || { pass "skip: jq absent; the hc toolchain check needs it"; return; }
@@ -847,18 +848,22 @@ SH
   grep -q "default hc backend unavailable (.*did not answer within 1s)" "$errfile" \
     || fail "a hung hc must print a notice naming the timed-out probe"$'\n'"$(cat "$errfile")"
 
-  # A secondmate spawn kind and the test suite's off switch keep the older
-  # order, silently, even with a usable hc.
+  # The default does not depend on the spawn kind: fm-spawn resolves ships,
+  # scouts, and second mates through this same call (a real --secondmate
+  # launch taking the default is pinned in tests/fm-backend-hc.test.sh).
   : > "$errfile"
   out=$(unset HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; TMUX='fake,1,0' \
     FM_BACKEND_HC_DEFAULT=1 FM_HC_BIN="$fb/herdr-core" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" \
-    bash -c '. "$1/bin/fm-backend.sh"; FM_BACKEND_CONFIG_DIR=$2; fm_backend_resolve secondmate; printf "%s" "$FM_BACKEND_RESOLVED"' _ "$ROOT" "$cfg" 2>"$errfile")
-  [ "$out" = tmux ] || fail "a secondmate spawn must skip the hc default, got '$out'"
+    bash -c '. "$1/bin/fm-backend.sh"; FM_BACKEND_CONFIG_DIR=$2; fm_backend_resolve; printf "%s|%s" "$FM_BACKEND_RESOLVED" "$FM_BACKEND_DETECT_SIGNAL"' _ "$ROOT" "$cfg" 2>"$errfile")
+  [ "$out" = "hc|default" ] || fail "a usable hc must be the default for every spawn kind, got '$out'"
+  # The test suite's off switch keeps the older order, silently, even with a
+  # usable hc.
+  : > "$errfile"
   out=$(unset HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; TMUX='fake,1,0' \
     FM_BACKEND_HC_DEFAULT=0 FM_HC_BIN="$fb/herdr-core" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>>"$errfile")
   [ "$out" = tmux ] || fail "FM_BACKEND_HC_DEFAULT=0 must restore the older order, got '$out'"
   [ ! -s "$errfile" ] || fail "a skipped hc default must stay silent"$'\n'"$(cat "$errfile")"
-  pass "fm_backend_name: a usable hc is the default ahead of tmux and Herdr markers; a hung or unusable hc falls back with a notice; explicit settings, secondmates, and the off switch keep the older order"
+  pass "fm_backend_name: a usable hc is the default ahead of tmux and Herdr markers; a hung or unusable hc falls back with a notice; explicit settings and the off switch keep the older order"
 }
 
 # fm_backend_name notices and explicit precedence for the Herdr app signal:
@@ -868,7 +873,7 @@ SH
 # toolchain prints the missing piece instead of switching.
 test_backend_name_herdr_app() {
   local dir fb cfg cfg_tmux out errfile apphome lpid cpid sockdir run
-  command -v python3 >/dev/null 2>&1 || { pass "skip: python3 absent; the herdr-app probes need its unix connect"; return; }
+  command -v python3 >/dev/null 2>&1 || { pass "skip: python3 absent; these cases park their unix sockets with it"; return; }
   command -v jq >/dev/null 2>&1 || { pass "skip: jq absent; the hc toolchain check needs it"; return; }
 
   dir="$TMP_ROOT/herdr-app-name"; fb="$dir/fakebin"; cfg="$dir/config-empty"; cfg_tmux="$dir/config-tmux"
@@ -918,7 +923,7 @@ SH
 
   # A live hc terminal with no usable toolchain: no switch, notice names the gap.
   : > "$errfile"
-  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HERDR_APP_HOME; PATH="/usr/bin:/bin" \
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HERDR_APP_HOME; PATH="$(dirname "$(command -v node)"):/usr/bin:/bin" \
     XDG_RUNTIME_DIR="$run" HC_TERMINAL_ID=t4 HC_TERMINAL_SOCKET="$run/herdr-core/default.sock" \
     FM_HC_BIN=/nonexistent/hc FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = tmux ] || fail "a live hc terminal with an unusable toolchain must keep the default backend, got '$out'"
@@ -1173,6 +1178,21 @@ test_backend_source_requires_missing_hermes_helper() {
 
 test_backend_source_requires_unreadable_hermes_helper() {
   _backend_source_hermes_helper_condition unreadable
+}
+
+# bin/fm-backend.sh's FM_BACKEND_SECONDMATE is the one owner of which
+# spawn-capable backends host a persistent --secondmate launch; fm-spawn.sh's
+# refusal and fm-secondmate-move.sh's target check both read it.
+test_backend_secondmate_support_is_one_table() {
+  local backend
+  for backend in tmux herdr zellij rex t3code hc; do
+    fm_backend_secondmate_supported "$backend" || fail "$backend must host a second mate"
+    fm_backend_validate_spawn "$backend" 2>/dev/null || fail "a secondmate-capable backend must be spawn-capable: $backend"
+  done
+  for backend in orca cmux paseo tern bogus ''; do
+    fm_backend_secondmate_supported "$backend" && fail "'$backend' must not host a second mate"
+  done
+  pass "fm_backend_secondmate_supported: tmux, herdr, zellij, rex, t3code, and hc host second mates; orca, cmux, paseo, tern, and unknown names do not"
 }
 
 test_backend_validate_spawn_accepts_orca() {
@@ -1880,6 +1900,7 @@ test_backend_source_requires_unreadable_adapter_file
 test_backend_source_requires_missing_hermes_helper
 test_backend_source_requires_unreadable_hermes_helper
 test_backend_validate_spawn_accepts_orca
+test_backend_secondmate_support_is_one_table
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
