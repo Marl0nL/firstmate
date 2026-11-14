@@ -806,6 +806,14 @@ With it present, ship and scout briefs gain the `# Waiting` section and the fore
 With the file absent, generated briefs omit the waiting section and the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
+## Herdr desk (config/herdr-desk)
+
+The optional local, gitignored `config/herdr-desk` presence flag says the captain watches this home in Herdr's Desk layout, whose `desk` CLI lets each agent keep its own panel there.
+With it present, ship and scout briefs gain a `# Herdr desk` section telling the worker to declare itself a crew under the scaffolding terminal and keep its summary, findings, and next steps current, and a secondmate charter gains one pointing the secondmate at the `herdr-desk` skill.
+Every instruction in those sections is conditional on the worker's own `desk` and `$HC_TERMINAL_ID`, and none of it replaces a status line, the steering inbox, or any other contract.
+With the file absent, generated briefs and charters are unchanged.
+The [`herdr-desk`](../.agents/skills/herdr-desk/SKILL.md) skill owns when firstmate creates or removes the flag; it is home-local and not inherited by secondmate homes.
+
 ## PR health monitor (config/pr-health-monitor)
 
 The optional local, gitignored `config/pr-health-monitor` presence flag opts this home into a mechanical monitor of the pull requests it owns.

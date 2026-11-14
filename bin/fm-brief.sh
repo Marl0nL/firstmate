@@ -153,6 +153,15 @@
 # regular file, or text carrying its own "Delivery contract: mode=" line (which
 # a later scout promotion could not outrank), stops the scaffold before
 # anything is written. Secondmate charters never take it.
+# When config/herdr-desk exists under the active home (docs/configuration.md
+# "Herdr desk"; the herdr-desk skill owns when firstmate writes it), ship and
+# scout scaffolds append a "# Herdr desk" section, ahead of any home include,
+# telling the worker to declare itself a crew on the captain's Herdr Desk layout
+# and keep its summary, findings, and next steps there; a secondmate charter
+# gets a "# Herdr desk" section pointing it at the herdr-desk skill. Both name
+# the scaffolding terminal ($HC_TERMINAL_ID, when set) as the parent, and both
+# are conditional on the worker's own `desk` and $HC_TERMINAL_ID, so a worker
+# without them skips the step.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -437,6 +446,34 @@ append_brief_include() {
     "$BRIEF_INCLUDE_BODY" >> "$BRIEF"
 }
 
+# The optional Herdr desk section: presentation for the captain's Desk layout,
+# never a status or steering channel.
+DESK_PARENT_ID=${HC_TERMINAL_ID:-}
+DESK_PARENT_ARG=
+[ -z "$DESK_PARENT_ID" ] || DESK_PARENT_ARG=" --parent $DESK_PARENT_ID"
+append_herdr_desk() {
+  local when parent
+  [ -e "$CONFIG/herdr-desk" ] || return 0
+  # shellcheck disable=SC2016 # Backticks and $HC_TERMINAL_ID are literal brief text for the worker.
+  when='When `command -v desk` succeeds and `$HC_TERMINAL_ID` is set'
+  if [ "$KIND" = secondmate ]; then
+    parent=
+    [ -z "$DESK_PARENT_ID" ] || parent=$'\n'"Pass \`--parent $DESK_PARENT_ID\` there: it is the main firstmate's terminal."
+    printf '\n%s\n%s%s\n' \
+      '# Herdr desk' \
+      "The captain runs Herdr's Desk layout. $when, load the \`herdr-desk\` skill at session start and follow it as a secondmate." \
+      "$parent" >> "$BRIEF"
+    return 0
+  fi
+  # shellcheck disable=SC2016 # Backticks are literal brief text for the worker.
+  printf '\n%s\n%s\n%s\n%s\n%s\n' \
+    '# Herdr desk' \
+    "The captain watches this fleet in Herdr's Desk layout, which shows a sheet above your terminal." \
+    "$when, run \`desk init crew --name fm-$ID --task fm-$ID$DESK_PARENT_ARG\` once, right after the isolation check." \
+    'Keep it current at your own phase changes: `desk summary "<what you are doing now>"`, `desk finding add "<what you learned>"` (add `--tone good|warn|bad` when it matters), and `desk next set "<step>" "<step>" ...` whenever your plan changes, ticking steps off with `desk next done <n>`.' \
+    'The desk is a glance for the captain, not a channel: it never replaces a status line or the inbox, and a missing or failing `desk` never blocks or delays the task.' >> "$BRIEF"
+}
+
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
@@ -595,6 +632,7 @@ When you have no assigned or in-flight work after that reconciliation, go idle a
 An empty queue is a healthy resting state, not a cue to invent work: never spawn a survey, audit, or any self-directed "find work" task on your own initiative.
 If this charter cannot be carried out, append \`blocked [at=<epoch>]: {why}\` or \`failed [at=<epoch>]: {why}\` to the main status file and stop.
 EOF
+append_herdr_desk
 if [ "$SECONDMATE_CHARTER" = "{TASK}" ]; then
   echo "scaffolded: $BRIEF (secondmate charter; replace {TASK})"
 else
@@ -751,6 +789,7 @@ If the command refuses, report the refusal to firstmate and stop rather than byp
 When the report is complete, append \`done [at=<epoch>]: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
+append_herdr_desk
 append_brief_include
 echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
 exit 0
@@ -830,6 +869,7 @@ A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agen
 
 $DOD
 EOF
+append_herdr_desk
 append_brief_include
 if [ "$PR_TEXT" = manual ]; then
   echo "scaffolded: $BRIEF (ship, mode=$MODE pr=manual; replace {TASK} and {FIRSTMATE_SPEC})"
