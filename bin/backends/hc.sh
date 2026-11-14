@@ -34,8 +34,10 @@
 # in order: a non-empty FM_HC_SPACE; else the herdr.space label of the
 # spawner's own HC_TERMINAL_ID terminal in the target session, so crews follow
 # firstmate's current space across restarts; else fm-<hometag>. A failed or
-# empty lookup falls back silently. Naming the space needs the app window and
-# is not done.
+# empty lookup falls back silently. A --secondmate launch overrides all three
+# with the mate home's own fm-<hometag> through FM_HC_SPACE (fm-spawn.sh's hc
+# secondmate arm), so the mate and its crew share their own space. Naming the
+# space needs the app window and is not done.
 #
 # Measured limits on hc 0.1.13 and 0.1.14 (docs/hc-backend.md "Limits"):
 #   - `hc send` always presses Enter after pasting. There is no paste without
