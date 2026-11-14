@@ -1,0 +1,48 @@
+=== fm-backend
+ok - fm-spawn.sh --backend bogus is refused loudly
+ok - fm-spawn.sh --backend codex-app is refused
+ok - fm-spawn.sh honors FM_BACKEND and refuses an unimplemented value loudly
+ok - fm-spawn.sh: an explicit --backend tmux resolves silently and writes no backend= (missing means tmux)
+ok - fm-spawn.sh: explicit --backend tmux wins over an ambient HERDR_ENV=1 auto-detect marker
+ok - fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end
+exit=0
+=== fm-backend-hc
+ok - hc: container_ensure refuses a misnamed, old, or wrong-generation binary
+ok - hc: send_text_submit proves the turn through send --wait and never forces a blocked terminal
+ok - hc: send text is -- delimited, and FM_HC_BIN/FM_HC_SOCKET pin the call
+ok - hc: a --secondmate spawn keeps this home's identity and lands in the mate home's own space
+ok - hc: a --secondmate spawn with no explicit backend takes this fork's hc default
+FM_TEST_COMPLETE
+exit=0
+=== fm-backend-hc-secondmate-smoke
+fm-hc-lab: FLEET-STATE TRIPWIRE FAILED: real herdr-core state changed during lab work
+fm-hc-lab: before: 11 files; after: 11 files
+8c8
+< ~/.local/state/herdr-core/default/terminals.json 768176 1794620175 9058
+---
+> ~/.local/state/herdr-core/default/terminals.json 767976 1794620202 7671
+exit=1
+=== fm-brief
+ok - fm-brief.sh: an empty --branch-prefix override resolves to a bare <task-id> branch
+ok - fm-brief.sh: --branch-prefix is refused on scout and secondmate scaffolds
+ok - fm-brief.sh: --branch-prefix value is validated against embedded spaces and a leading dash
+Switched to a new branch '$(touch${IFS}/tmp/fm-brief.VfFMzy/branch-prefix-shell-safe-marker)brief-branch-safe-g3'
+ok - fm-brief.sh: ref-format-valid shell metacharacters stay literal in generated branch commands
+ok - fm-brief.sh: every crewmate scaffold forbids administering the shared worktree pool
+exit=0
+=== fm-secondmate-liveness
+ok - poll probe: unreachable or inconclusive remote reads preserve the route
+ok - full probe: a live rex route stays alive through the rex readiness gate
+ok - full probe: remote backend drift is reported, never migrated
+ok - full probe: rex readiness gaps and unreachable hosts stay explicit
+ok - full probe: a record without remote_backend stays a herdr route
+# all fm-secondmate-liveness tests passed
+exit=0
+=== fm-backend-t3code
+ok - fm-spawn.sh --backend t3code: a leased slot holding uncommitted work gets no thread and keeps its lease
+ok - fm-spawn.sh --backend t3code: a clean leased slot whose refresh fails gets no thread and is returned
+ok - fm-spawn.sh --backend t3code --secondmate: an aborted spawn archives its thread, then removes the T3 environment it wrote into the home
+ok - fm-teardown.sh backend=t3code: a nested T3 secondmate's home is reaped before it is removed
+ok - fm-spawn.sh --backend t3code: a launch brief whose reply is lost is reported unconfirmed and keeps its task record
+ok - fm-spawn.sh --backend t3code: a lease the isolation guard rejects is neither cleaned nor returned
+exit=124
